@@ -206,6 +206,24 @@ def test_drop_markers_are_reported_apart_never_summed(tmp_path: Path) -> None:
     assert report.clean  # a drop is a finding about the run, not a broken file
 
 
+def test_writer_and_emergency_tap_losses_use_the_existing_drop_schema(tmp_path: Path) -> None:
+    """The new loss classes are additive marker labels, not a file-format revision."""
+    report = parse(
+        tmp_path,
+        HEADER
+        + RECORDS
+        + [
+            "#drop,@65132,write,2,2",
+            "#drop,@65194,tap_shutdown:seg1,3,3",
+            "#close,@F3ED0,clean",
+        ],
+    )
+    assert [(d.what, d.delta, d.total) for d in report.drops] == [
+        ("write", 2, 2),
+        ("tap_shutdown:seg1", 3, 3),
+    ]
+
+
 def test_a_healthy_run_carries_no_markers(tmp_path: Path) -> None:
     """Markers are emitted on counter *change* only, so a clean run costs nothing
     — which also means their absence is the thing to assert."""
@@ -467,7 +485,6 @@ def test_a_malformed_gap_line_is_a_defect(tmp_path: Path, line: str, why: str) -
         ("C1x,2B,ZZZ,", "non-hex id"),
         ("C1x,2B,1A2,00GG", "non-hex payload"),
         ("Q1,2B,1A2,", "unknown type letter"),
-        ("#nope,1,2", "unknown meta line"),
         ("#sdlog,1", "truncated header"),
     ],
 )
@@ -482,6 +499,12 @@ def test_a_malformed_line_is_a_defect(tmp_path: Path, line: str, why: str) -> No
     report = parse(tmp_path, HEADER + RECORDS + [line, "#close,@1,clean"])
     assert not report.clean, why
     assert len(report.bad_lines) == 1
+
+
+def test_an_unknown_meta_line_is_skipped_for_forward_compatibility(tmp_path: Path) -> None:
+    report = parse(tmp_path, HEADER + ["#utc,100000003,6543210FEDCBA", "#origin,SEV Mr. Orange"] + RECORDS)
+    assert report.clean
+    assert report.counts == {"C": 2, "X": 1, "L": 1}
 
 
 def test_a_message_with_commas_is_not_a_malformed_line(tmp_path: Path) -> None:
@@ -716,25 +739,25 @@ def test_check_reports_an_unreadable_file_separately(tmp_path: Path) -> None:
 def test_extract_yields_a_single_schema_csv(tmp_path: Path, capsys) -> None:
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     assert sdlog.main(["extract", str(path), "--type", "C"]) == 0
-    lines = capsys.readouterr().out.strip().split("\n")
-    assert lines[0] == "t_us,label,id_hex,flags,dlc,data_hex"
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "t_us,label,id_hex,flags,dlc,data_hex,utc_us"
     assert lines[1:] == [
-        "412345,C1,1A2,x,8,0011223344556677",
-        "412388,C2,1A2,xs,8,0011223344556677",
+        "412345,C1,1A2,x,8,0011223344556677,",
+        "412388,C2,1A2,xs,8,0011223344556677,",
     ]
 
 
 def test_extract_can_select_one_segment(tmp_path: Path, capsys) -> None:
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "C", "--label", "C1", "--no-header"])
-    assert capsys.readouterr().out.strip() == "412345,C1,1A2,x,8,0011223344556677"
+    assert capsys.readouterr().out.splitlines() == ["412345,C1,1A2,x,8,0011223344556677,"]
 
 
 def test_extract_can_select_shed_frames(tmp_path: Path, capsys) -> None:
     """The Issue #1 hunt: a frame that was on the wire and was not forwarded."""
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "C", "--shed", "--no-header"])
-    assert capsys.readouterr().out.strip() == "412388,C2,1A2,xs,8,0011223344556677"
+    assert capsys.readouterr().out.splitlines() == ["412388,C2,1A2,xs,8,0011223344556677,"]
 
 
 def test_extract_skips_a_torn_trailing_record(tmp_path: Path, capsys) -> None:
@@ -746,7 +769,7 @@ def test_extract_skips_a_torn_trailing_record(tmp_path: Path, capsys) -> None:
 def test_extract_text_lines(tmp_path: Path, capsys) -> None:
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "X", "--no-header"])
-    assert capsys.readouterr().out.strip() == "412502,I,sd_logger,records=4120 dropped=0 bytes=198112"
+    assert capsys.readouterr().out.splitlines() == ["412502,I,sd_logger,records=4120 dropped=0 bytes=198112,"]
 
 
 def test_extract_resolves_the_chain_across_the_types_it_is_not_asked_for(tmp_path: Path, capsys) -> None:
@@ -755,7 +778,7 @@ def test_extract_resolves_the_chain_across_the_types_it_is_not_asked_for(tmp_pat
     a v1 extract could afford to do — would print 108 µs instead of 412610."""
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "L", "--no-header"])
-    assert capsys.readouterr().out.strip() == "412610,lin,3C,-,8,55AA0000000000FF"
+    assert capsys.readouterr().out.splitlines() == ["412610,lin,3C,-,8,55AA0000000000FF,"]
 
 
 def test_extract_puts_back_every_column_the_card_stopped_paying_for(
@@ -768,10 +791,67 @@ def test_extract_puts_back_every_column_the_card_stopped_paying_for(
     Each costs ~3600 lines a second on the card and nothing at all in a CSV."""
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "C", "--no-header"])
-    assert capsys.readouterr().out.strip().split("\n") == [
-        "412345,C1,1A2,x,8,0011223344556677",
-        "412388,C2,1A2,xs,8,0011223344556677",
+    assert capsys.readouterr().out.splitlines() == [
+        "412345,C1,1A2,x,8,0011223344556677,",
+        "412388,C2,1A2,xs,8,0011223344556677,",
     ]
+
+
+def test_extract_appends_resolved_utc_and_uses_each_new_anchor(tmp_path: Path, capsys) -> None:
+    """UTC is a second axis: before its first anchor it is blank, then every new
+    correspondence supersedes the preceding one without moving the boot-time chain."""
+    path = write_log(
+        tmp_path,
+        HEADER
+        + [
+            "#origin,bench-orange",
+            "C1x,@100,1A2,00",  # before any #utc
+            "#utc,110,F4240",  # boot 272 == UTC 1,000,000
+            "C1x,10,1A2,01",
+            "#utc,120,1E8480",  # boot 288 == UTC 2,000,000
+            "C1x,10,1A2,02",
+            "#close,@1,clean",
+        ],
+    )
+
+    assert sdlog.main(["extract", str(path), "--type", "C"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "t_us,label,id_hex,flags,dlc,data_hex,utc_us",
+        "256,C1,1A2,x,1,00,",
+        "272,C1,1A2,x,1,01,1000000",
+        "288,C1,1A2,x,1,02,2000000",
+    ]
+
+
+def test_check_adds_utc_span_and_origin_only_when_anchored(tmp_path: Path, capsys) -> None:
+    anchored = HEADER + [
+        "#origin,bench-orange",
+        "C1x,@100,1A2,00",
+        "#utc,110,F4240",
+        "C1x,10,1A2,01",
+        "#utc,120,1E8480",
+        "C1x,10,1A2,02",
+        "#close,@1,clean",
+    ]
+    lines = check_lines(tmp_path, anchored, capsys)
+    assert lines[0] == (
+        "L0000007.LOG: v2 seq=7 C=3 span=0.0s "
+        "utc=1970-01-01T00:00:01.000000Z..1970-01-01T00:00:02.000000Z origin=bench-orange"
+    )
+
+    # A file with no #utc keeps check's existing summary byte-for-byte unchanged.
+    lines = check_lines(tmp_path, HEADER + RECORDS + ["#close,@1,clean"], capsys)
+    assert lines[0] == "L0000007.LOG: v2 seq=7 C=2 L=1 X=1 span=0.0s"
+
+
+def test_utc_resolution_saturates_in_both_directions() -> None:
+    """Keep the host reader bit-for-bit aligned with utc_anchor.h at uint64_t's
+    two edges; these values are unlikely clock readings but easy arithmetic bugs."""
+    anchor = sdlog.UtcAnchor()
+    anchor.set(0, (1 << 64) - 1)
+    assert anchor.resolve((1 << 64) - 1) == (1 << 64) - 1
+    anchor.set(1, 1)
+    assert anchor.resolve(0) == 0
 
 
 def test_extract_refuses_a_v1_file(tmp_path: Path, capsys) -> None:

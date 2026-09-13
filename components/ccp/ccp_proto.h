@@ -11,6 +11,7 @@ constexpr uint8_t CCP_FRAME_LEN = 8;
 constexpr uint8_t CCP_RESPONSE_MARKER = 0xFF;
 constexpr uint8_t CCP_TIMEOUT = 0xFE;
 constexpr uint8_t CCP_MAX_TRANSFER = 5;
+constexpr uint8_t CCP_ODT_PAYLOAD = 7;
 
 enum class ByteOrder : uint8_t { LITTLE, BIG };
 enum Command : uint8_t {
@@ -46,6 +47,12 @@ enum Command : uint8_t {
 
 struct Cro {
   uint8_t data[CCP_FRAME_LEN]{};
+};
+
+struct DaqField {
+  uint8_t size;
+  uint8_t ext;
+  uint32_t address;
 };
 
 inline void put_u16(uint8_t *out, uint16_t value, ByteOrder order) {
@@ -106,6 +113,46 @@ inline Cro short_up(uint8_t ctr, uint8_t size, uint8_t ext, uint32_t address, By
   out.data[2] = size;
   out.data[3] = ext;
   put_u32(out.data + 4, address, order);
+  return out;
+}
+inline Cro get_daq_size(uint8_t ctr, uint8_t list, uint32_t dto_id, ByteOrder order) {
+  Cro out = command(GET_DAQ_SIZE, ctr);
+  out.data[2] = list;
+  put_u32(out.data + 4, dto_id, order);
+  return out;
+}
+inline Cro set_daq_ptr(uint8_t ctr, uint8_t list, uint8_t odt, uint8_t element) {
+  Cro out = command(SET_DAQ_PTR, ctr);
+  out.data[2] = list;
+  out.data[3] = odt;
+  out.data[4] = element;
+  return out;
+}
+inline Cro write_daq(uint8_t ctr, uint8_t size, uint8_t ext, uint32_t address, ByteOrder order) {
+  Cro out = command(WRITE_DAQ, ctr);
+  out.data[2] = size;
+  out.data[3] = ext;
+  put_u32(out.data + 4, address, order);
+  return out;
+}
+inline Cro start_stop(uint8_t ctr, uint8_t mode, uint8_t list, uint8_t last_odt, uint8_t event, uint16_t rate,
+                      ByteOrder order) {
+  Cro out = command(START_STOP, ctr);
+  out.data[2] = mode;
+  out.data[3] = list;
+  out.data[4] = last_odt;
+  out.data[5] = event;
+  put_u16(out.data + 6, rate, order);
+  return out;
+}
+inline Cro start_stop_all(uint8_t ctr, uint8_t mode) {
+  Cro out = command(START_STOP_ALL, ctr);
+  out.data[2] = mode;
+  return out;
+}
+inline Cro set_s_status(uint8_t ctr, uint8_t status) {
+  Cro out = command(SET_S_STATUS, ctr);
+  out.data[2] = status;
   return out;
 }
 inline Cro dnload(uint8_t ctr, const uint8_t *data, uint8_t size) {
@@ -191,6 +238,32 @@ inline const char *return_code_name(uint8_t code) {
 }
 inline uint8_t read_chunk(uint16_t remaining) {
   return remaining > CCP_MAX_TRANSFER ? CCP_MAX_TRANSFER : static_cast<uint8_t>(remaining);
+}
+inline uint16_t daq_total_size(const DaqField *fields, size_t count) {
+  uint16_t total = 0;
+  if (fields == nullptr)
+    return total;
+  for (size_t i = 0; i < count; i++)
+    total = static_cast<uint16_t>(total + fields[i].size);
+  return total;
+}
+inline bool daq_fits_one_odt(const DaqField *fields, size_t count) {
+  return daq_total_size(fields, count) <= CCP_ODT_PAYLOAD;
+}
+inline uint8_t daq_field_offset(const DaqField *fields, size_t count, size_t index) {
+  if (fields == nullptr || index >= count)
+    return 0;
+  uint8_t offset = 1;
+  for (size_t i = 0; i < index; i++)
+    offset = static_cast<uint8_t>(offset + fields[i].size);
+  return offset;
+}
+inline bool daq_anchor_matches(const uint8_t *frame, uint8_t len, uint8_t offset, const uint8_t *expect,
+                               uint8_t expect_len) {
+  const size_t end = static_cast<size_t>(offset) + expect_len;
+  if (frame == nullptr || expect == nullptr || end > len)
+    return false;
+  return std::memcmp(frame + offset, expect, expect_len) == 0;
 }
 
 }  // namespace esphome::ccp

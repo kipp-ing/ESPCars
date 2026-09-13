@@ -1,5 +1,7 @@
 #include "collection_server.h"
 
+#include "status_json.h"
+
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
 
 #include "sd_logger.h"
@@ -19,6 +21,17 @@
 #include "freertos/task.h"
 
 #include "esp_timer.h"
+
+// `serve_chunk_()` has to measure the httpd-owned task from inside its handler. Require the
+// FreeRTOS facilities that make both the measurement and a detected overflow actionable: IDF's
+// method-2 check verifies canary bytes at each context switch and invokes its panic hook on damage.
+// There is no per-httpd-task switch for either setting; these apply to the task httpd_start() owns.
+#if INCLUDE_uxTaskGetStackHighWaterMark != 1
+#error "sd_logger collection server requires uxTaskGetStackHighWaterMark"
+#endif
+#if configCHECK_FOR_STACK_OVERFLOW < 2
+#error "sd_logger collection server requires FreeRTOS method-2 stack-overflow canaries"
+#endif
 
 namespace esphome {
 namespace sd_logger {
@@ -267,9 +280,13 @@ bool CollectionServer::start(uint16_t port) {
   // that blocks is a peer that went away mid-header, and holding the single httpd task on it for
   // five seconds delays every other request behind it.
   config.recv_wait_timeout = static_cast<uint16_t>(SD_LOG_SEND_WAIT_S);
-  // The handler reads the card and formats JSON on this stack; the IDF default of 4096 is sized for
-  // neither. The extra kilobyte is cheap and a stack overflow here takes the whole firmware down.
-  config.stack_size = 5120;
+  // The handler reads the card and formats JSON on this stack. In particular, the FATFS read path
+  // grows when it follows a cluster link: 5 KiB was enough inside the first 64 KiB cluster, then
+  // overflowed the httpd task at the first boundary and corrupted the handler's live buffer state.
+  // 8 KiB is a recovery allocation, not an assumed final margin: each completed response logs the
+  // task's lifetime minimum free stack, including the deepest FATFS call made by that response.
+  // The staging block stays on the heap; this budget is for the handler and the IDF call chains.
+  config.stack_size = SD_LOG_HTTPD_STACK_SIZE;
   // Below the writer task (6), far below `lin_uart_evt` (18) and the WiFi tasks (~23). Serving must
   // never preempt logging or bus timing — §6's whole rule is that logging wins.
   //
@@ -640,6 +657,13 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
     }
     remaining -= static_cast<uint32_t>(got);
   }
+  // ESP-IDF reports this in bytes (not FreeRTOS words), and it is the minimum since the httpd task
+  // started. Query it only after a completed response so ordinary client disconnects do not
+  // produce misleading sizing data. The historic minimum includes the deepest f_read() path that
+  // crossed a FATFS cluster boundary during this and earlier completed transfers.
+  const UBaseType_t stack_free = uxTaskGetStackHighWaterMark(nullptr);
+  ESP_LOGI(TAG, "served %s: %" PRIu32 " B; httpd stack minimum free %u / %u B", on_card, body,
+           static_cast<unsigned>(stack_free), static_cast<unsigned>(SD_LOG_HTTPD_STACK_SIZE));
   return ESP_OK;
 }
 
@@ -687,9 +711,9 @@ esp_err_t CollectionServer::serve_done_(httpd_req_t *req) {
 
 esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
   // The one route no client reads — `sdlog_collect.py` contains no `/sdlog/status` at all — so this
-  // is the only place the firmware is free. It answers the operator's question, and the fake's six
-  // keys plus the two the design and §11.5 ask for: the oldest un-collected seq, and `index_refused`
-  // without which an index that overflowed looks exactly like a device with nothing to give.
+  // is the only place the firmware is free. It answers the operator's question with the established
+  // eight keys, then the card-state and writer counters a host needs to distinguish recovery from
+  // an unmounted card or a failed fill query.
   uint32_t sealed = 0;
   uint32_t confirmed = 0;
   for (uint16_t i = 0; i < this->parent_->collection_count(); i++) {
@@ -702,23 +726,31 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       confirmed++;
   }
   uint32_t oldest = 0;
-  const bool has_oldest = this->parent_->collection_oldest_uncollected(&oldest);
-  const uint32_t fill = this->parent_->collection_card_percent();
-
-  char oldest_text[16] = "null";
-  if (has_oldest)
-    snprintf(oldest_text, sizeof(oldest_text), "%" PRIu32, oldest);
-  char fill_text[16] = "null";
-  if (fill <= 100)
-    snprintf(fill_text, sizeof(fill_text), "%" PRIu32, fill);
-
-  char body[288];
-  const int n = snprintf(body, sizeof(body),
-                         "{\"device\":\"%s\",\"sealed\":%" PRIu32 ",\"confirmed\":%" PRIu32
-                         ",\"card_percent\":%s,\"discarded_chunks\":%" PRIu32 ",\"discarded_bytes\":%" PRIu64
-                         ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 "}",
-                         this->device_, sealed, confirmed, fill_text, this->parent_->collection_discarded_chunks(),
-                         this->parent_->collection_discarded_bytes(), oldest_text, this->parent_->get_index_refused());
+  // 487 rendered bytes worst case: the established fields plus five ten-digit loss-pipeline
+  // counters. Keep headroom so an additive status field cannot silently turn this route into 500.
+  char body[512];
+  const StatusFields fields{
+      this->device_,
+      sealed,
+      confirmed,
+      this->parent_->collection_card_percent(),
+      this->parent_->collection_discarded_chunks(),
+      this->parent_->collection_discarded_bytes(),
+      this->parent_->collection_oldest_uncollected(&oldest),
+      oldest,
+      this->parent_->get_index_refused(),
+      this->parent_->is_mounted(),
+      this->parent_->identification_degraded(),
+      this->parent_->get_records_written(),
+      this->parent_->get_dropped_records(),
+      this->parent_->get_card_dropped_records(),
+      this->parent_->get_write_lost_records(),
+      this->parent_->get_tap_shutdown_lost_records(),
+      this->parent_->get_tap_accepted_records(),
+      this->parent_->get_tap_drained_records(),
+      this->parent_->get_tap_record_ring_accepted_records(),
+  };
+  const int n = format_status_json(body, sizeof(body), fields);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(body))
     return reply_json(req, "500 Internal Server Error", "{\"error\":\"status\"}");
   return reply_json(req, "200 OK", body);

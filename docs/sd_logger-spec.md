@@ -101,8 +101,7 @@ run and a card full of confident nonsense.
   with `include_builtin_idf_component(...)`.
 
 Out of scope for the MVP: decoding/DBC-aware logging (log raw frames; decode is
-a later layer), an on-device web UI, time-of-day stamping without an RTC/NTP
-source.
+a later layer), an on-device web UI.
 
 ---
 
@@ -163,7 +162,7 @@ hit only the main loop / a writer task, never the buses.** Two corollaries:
 - **H4 — ADC for VCC sensing** (§7): the C6 has one SAR ADC (ADC1) on
   **GPIO0–GPIO6**. The VCC-divider tap must land on a free ADC1 pin (GPIO0/1/4/5
   are typically free on Orange).
-- **H5 — Card power (recommended, and NOT built).** A high-side load switch on
+- **H5 — Card power (recommended, NOT built, and no longer needed).** A high-side load switch on
   card VCC (+1 GPIO) would let firmware hard-cut and re-init a wedged card, and
   de-power the card cleanly on the emergency path (§7). On the reference board
   the GPIO exists and the switch does not: SD_PWR reaches header J5.6 through
@@ -173,7 +172,8 @@ hit only the main loop / a writer task, never the buses.** Two corollaries:
   longer declare the pin. Note also that a switch alone would not be enough:
   `gpio_reset_pin()` leaves the bus pins pulled up and the board adds 2.2k/4.7k
   externals, so a card whose VCC is cut still back-powers through its I/O clamp
-  diodes unless all four lines are driven low for the whole off window.
+  diodes unless all four lines are driven low for the whole off window. Moot as
+  of 2026-08-28: the wedge H5 was wanted for is handled in software — §7 Layer D.
 - **H6 — Hold-up energy (required for §7 to mean anything).** A bulk cap /
   supercap on 3V3 behind a series diode, sized to finish one in-flight SD write
   + one `f_sync` + `f_close` after the supply starts sagging. Firmware cannot
@@ -544,6 +544,8 @@ eras apart on a card that holds both, without sniffing.
   |---|---|
   | `#sdlog,<fmtver>,<seq>,<t_us>,<esphome_ver>` | file open |
   | `#src,<K>,<label>,<tag>,<origin>,<detail>` | file open, one per declared source |
+  | `#origin,<string>` | file open, once when `origin:` is configured; board/bench identity |
+  | `#utc,<boot_us_anchor_hex>,<utc_us_hex>` | file open after a time sync, and immediately on each later sync; boot-to-UTC correspondence |
   | `#types,…` / `#flags,…` / `#layout,…` | file open — the legend, so a card found on a bench is self-describing |
   | `#pad,<spaces>` | file open — pads the header block to a 512-byte boundary (D6) |
   | `#drop,<t_us>,<what>,<delta>,<total>` | only when a drop counter moves; `what` ∈ `ring` \| `tap:<label>` \| `text` |
@@ -557,6 +559,14 @@ eras apart on a card that holds both, without sniffing.
   because `@` then means one thing everywhere in the file — an absolute hex µs —
   rather than being a record-line convention a reader has to remember not to apply
   here.
+
+  `#utc` is also outside that chain, but its two fields are bare uppercase hex
+  values rather than stamp encodings: `boot_us_anchor_hex` is the same
+  reconstructed 64-bit boot-µs domain as `reconstruct_us()`, and `utc_us_hex` is
+  UTC microseconds. It states `record_utc = utc_us_anchor + (record_boot_us -
+  boot_us_anchor)`. Its absence is normal before a time sync or when no
+  `time_id:` is configured. `#origin` is emitted only when configured; both lines
+  pay once per file instead of adding work or bytes to a record.
 
   **Radix on meta lines**: times are hex (they carry `@`), and `#src`'s `tag` is
   hex **because it is the same number the record token carries** — a decimal `10`
@@ -901,6 +911,32 @@ final.
 The power cycle was originally documented here as "the firmware doing what
 'cycle 12 V on J8' did by hand". It never was: see H5 — the switch it drives was
 never built. The branch is kept for boards that do fit one.
+
+#### Layer D — the latched idle bit (2026-08-28, and it removed the last reason to want H5)
+
+A second wedge, distinct from the open CMD25 above and immune to every part of
+Layer C. After a soft reset the card keeps R1's "in idle state" bit set forever:
+5455 ACMD41 polls over 60 s, HCS set and clear, the full voltage window, a 1 s
+settle, twenty CMD0s and CMD1 — none of them clear it. Meanwhile the same card
+reports `OCR=0xC0FF8000` with its own power-up-complete flag **set**, returns
+CSD and CID, serves CMD17 block reads with a valid 55AA signature, and accepts
+CMD24 writes at 400 kHz and 10 MHz. It is a working card with a latched
+handshake, and only removing its power unlatches it.
+
+ESP-IDF has no way to be told that, and treats the bit as fatal in exactly two
+places: `sdmmc_send_cmd_send_op_cond()`, which polls it 300 times and returns
+ESP_ERR_TIMEOUT, and `sdmmc_write_sectors_dma()`'s post-write CMD13 gate, which
+demands `status == 0` while SPI-mode `SD_SPI_R2()` puts R1 in that status's low
+byte. Fix only the first and the card mounts read-only.
+
+So `mount_card_()` answers an `ESP_ERR_TIMEOUT` mount by running
+`card_probe_ready()` (card_reset.h) — OCR bit 31 **and** a real block read — and
+only on that evidence installs a `do_transaction` wrapper that clears bit 0 of
+those two responses, armed for the life of the mount. Every other bit, including
+R2's whole high byte, passes through untouched, so a card that is genuinely
+failing still fails and an absent one is refused exactly as before. This is why
+H5 is no longer worth fitting: the case it was wanted for is now handled in
+software, on evidence, with no hardware.
 
 Nothing is drained while there is no file. Producers are gated on `mounted_` and
 count their losses into a fourth counter, `card_dropped` — separate from

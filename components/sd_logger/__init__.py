@@ -33,6 +33,7 @@ from esphome.components.logger import (
     LOG_LEVEL_SEVERITY,
     request_log_listener,
 )
+from esphome.components import time
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DATA,
@@ -114,6 +115,8 @@ CONF_COLLECTION = "collection"
 CONF_RETENTION_PERCENT = "retention_percent"
 CONF_MAX_CHUNKS = "max_chunks"
 CONF_SERVE = "serve"
+CONF_TIME_ID = "time_id"
+CONF_ORIGIN = "origin"
 
 # Source tag 0 is the `sd_logger.log` action (S1). Native taps start at 1 so a
 # record's origin stays readable in the file without a side table (V11).
@@ -725,6 +728,8 @@ CONFIG_SCHEMA = cv.All(
             # is size-only, i.e. exactly today's behaviour.
             cv.Optional(CONF_MAX_FILE_SECONDS): _validate_max_file_seconds,
             cv.Optional(CONF_FORMAT_IF_MOUNT_FAILED, default=False): cv.boolean,
+            cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+            cv.Optional(CONF_ORIGIN): cv.string,
             cv.Optional(CONF_CAN_PORTS): cv.All(
                 cv.ensure_list(
                     cv.maybe_simple_value(CAN_PORT_SCHEMA, key=CONF_PORT)
@@ -1061,6 +1066,19 @@ async def to_code(config):
     cg.add(var.set_sync_interval(config[CONF_SYNC_INTERVAL].total_milliseconds))
     cg.add(var.set_max_file_size(config[CONF_MAX_FILE_SIZE]))
     cg.add(var.set_format_if_mount_failed(config[CONF_FORMAT_IF_MOUNT_FAILED]))
+    if (origin := config.get(CONF_ORIGIN)) is not None:
+        cg.add(var.set_origin(origin))
+    if (time_id := config.get(CONF_TIME_ID)) is not None:
+        clock = await cg.get_variable(time_id)
+        cg.add(
+            clock.add_on_time_sync_callback(
+                cg.RawExpression(
+                    f"[]() {{ {var}->set_utc_anchor("
+                    f"static_cast<uint64_t>({clock}->utcnow().timestamp) * 1000000ULL, "
+                    f"static_cast<uint64_t>(esp_timer_get_time())); }}"
+                )
+            )
+        )
 
     # M6 rotation and collection. Both keys are read by the firmware as of the
     # Phase A wiring: `max_file_seconds` is the second rotation bound (whichever

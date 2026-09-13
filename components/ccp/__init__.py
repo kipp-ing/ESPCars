@@ -28,8 +28,11 @@ CcpSelectCalPageAction = ccp_ns.class_("CcpSelectCalPageAction", automation.Acti
 CcpReadMemoryAction = ccp_ns.class_("CcpReadMemoryAction", automation.Action)
 CcpWriteMemoryAction = ccp_ns.class_("CcpWriteMemoryAction", automation.Action)
 CcpDaqAction = ccp_ns.class_("CcpDaqAction", automation.Action)
+CcpDaqReadAction = ccp_ns.class_("CcpDaqReadAction", automation.Action)
 CcpRawAction = ccp_ns.class_("CcpRawAction", automation.Action)
 CcpSetEnabledAction = ccp_ns.class_("CcpSetEnabledAction", automation.Action)
+
+CCP_ODT_PAYLOAD = 7
 
 CONF_CAN_GATEWAY_ID = "can_gateway_id"
 CONF_COMMAND_ID = "command_id"
@@ -42,6 +45,8 @@ CONF_ON_CONNECTED = "on_connected"
 CONF_ON_RESPONSE = "on_response"
 CONF_ON_ERROR = "on_error"
 CONF_ON_DAQ = "on_daq"
+CONF_ON_DAQ_READ = "on_daq_read"
+CONF_DAQ_ANCHOR = "daq_anchor"
 CONF_DATA = "data"
 CONF_END = "end"
 CONF_MTA = "mta"
@@ -50,6 +55,15 @@ CONF_ADDRESS = "address"
 CONF_SIZE = "size"
 CONF_LENGTH = "length"
 CONF_ENABLED = "enabled"
+CONF_EXPECT = "expect"
+CONF_FIELDS = "fields"
+CONF_LIST = "list"
+CONF_DTO_ID = "dto_id"
+CONF_EVENT = "event"
+CONF_PRESCALER = "prescaler"
+CONF_SAMPLES = "samples"
+CONF_COLLECT_TIMEOUT = "collect_timeout"
+CONF_REQUIRE_ANCHOR = "require_anchor"
 
 
 def _can_id(value):
@@ -63,6 +77,17 @@ def _byte_order(value):
     return cv.one_of("little", "big", lower=True)(value)
 
 
+DAQ_ANCHOR_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_ADDRESS): cv.hex_uint32_t,
+        cv.Optional(CONF_EXT, default=0): cv.hex_uint8_t,
+        cv.Required(CONF_EXPECT): cv.All(
+            cv.ensure_list(cv.hex_uint8_t), cv.Length(min=1, max=CCP_ODT_PAYLOAD)
+        ),
+    }
+)
+
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.declare_id(CcpHub),
@@ -73,10 +98,12 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_BYTE_ORDER, default="little"): _byte_order,
         cv.Optional(CONF_RESPONSE_TIMEOUT, default="100ms"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ALLOW_WRITE, default=False): cv.boolean,
+        cv.Optional(CONF_DAQ_ANCHOR): DAQ_ANCHOR_SCHEMA,
         cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(),
         cv.Optional(CONF_ON_RESPONSE): automation.validate_automation(),
         cv.Optional(CONF_ON_ERROR): automation.validate_automation(),
         cv.Optional(CONF_ON_DAQ): automation.validate_automation(),
+        cv.Optional(CONF_ON_DAQ_READ): automation.validate_automation(),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -108,6 +135,9 @@ async def to_code(config):
     cg.add(var.set_byte_order(cg.RawExpression("ccp::ByteOrder::LITTLE" if config[CONF_BYTE_ORDER] == "little" else "ccp::ByteOrder::BIG")))
     cg.add(var.set_response_timeout(config[CONF_RESPONSE_TIMEOUT].total_milliseconds))
     cg.add(var.set_allow_write(config[CONF_ALLOW_WRITE]))
+    if CONF_DAQ_ANCHOR in config:
+        anchor = config[CONF_DAQ_ANCHOR]
+        cg.add(var.set_daq_anchor(anchor[CONF_EXT], anchor[CONF_ADDRESS], anchor[CONF_EXPECT]))
     for conf in config.get(CONF_ON_CONNECTED, []):
         await automation.build_callback_automation(var, "add_on_connected_callback", [], conf)
     for conf in config.get(CONF_ON_RESPONSE, []):
@@ -116,6 +146,8 @@ async def to_code(config):
         await automation.build_callback_automation(var, "add_on_error_callback", [(cg.uint8, "command"), (cg.uint8, "return_code")], conf)
     for conf in config.get(CONF_ON_DAQ, []):
         await automation.build_callback_automation(var, "add_on_daq_callback", [(cg.uint8, "pid"), (cg.std_vector.template(cg.uint8), "data")], conf)
+    for conf in config.get(CONF_ON_DAQ_READ, []):
+        await automation.build_callback_automation(var, "add_on_daq_read_callback", [(cg.bool_, "ok"), (cg.uint16, "anchor_ok"), (cg.uint16, "frames_seen"), (cg.std_vector.template(cg.std_vector.template(cg.uint8)), "values")], conf)
 
 
 _HUB = {cv.Required(CONF_ID): cv.use_id(CcpHub)}
@@ -123,6 +155,45 @@ _BYTES = cv.templatable(cv.ensure_list(cv.hex_uint8_t))
 _U8 = lambda default=None: cv.templatable(cv.int_range(min=0, max=0xFF))
 _U16 = lambda: cv.templatable(cv.int_range(min=0, max=0xFFFF))
 _U32 = lambda: cv.templatable(cv.int_range(min=0, max=0xFFFFFFFF))
+
+
+DAQ_FIELD_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_ADDRESS): cv.hex_uint32_t,
+        cv.Optional(CONF_EXT, default=0): cv.hex_uint8_t,
+        cv.Required(CONF_SIZE): cv.int_range(min=1, max=CCP_ODT_PAYLOAD),
+    }
+)
+
+
+def _daq_fields_fit(fields):
+    total = sum(field[CONF_SIZE] for field in fields)
+    if total > CCP_ODT_PAYLOAD:
+        raise cv.Invalid(
+            f"ccp.daq_read fields total {total} bytes; one ODT carries {CCP_ODT_PAYLOAD}"
+        )
+    return fields
+
+
+DAQ_READ_SCHEMA = cv.Schema(
+    {
+        **_HUB,
+        cv.Required(CONF_FIELDS): cv.All(
+            cv.ensure_list(DAQ_FIELD_SCHEMA), cv.Length(min=1), _daq_fields_fit
+        ),
+        cv.Optional(CONF_LIST, default=0): _U8(),
+        cv.Optional(CONF_DTO_ID, default=0x702): cv.templatable(_can_id),
+        cv.Optional(CONF_EVENT, default=0): _U8(),
+        cv.Optional(CONF_PRESCALER, default=10): _U16(),
+        cv.Optional(CONF_SAMPLES, default=30): cv.templatable(
+            cv.int_range(min=1, max=0xFFFF)
+        ),
+        cv.Optional(CONF_COLLECT_TIMEOUT, default=5000): cv.templatable(
+            cv.int_range(min=1, max=0xFFFFFFFF)
+        ),
+        cv.Optional(CONF_REQUIRE_ANCHOR, default=True): cv.templatable(cv.boolean),
+    }
+)
 
 
 async def _action(config, action_id, template_arg, cls):
@@ -187,6 +258,20 @@ async def ccp_start_daq(config, action_id, template_arg, args):
 @automation.register_action("ccp.stop_daq", CcpDaqAction, cv.Schema(_HUB), synchronous=True)
 async def ccp_stop_daq(config, action_id, template_arg, args):
     var = await _action(config, action_id, template_arg, CcpDaqAction); cg.add(var.set_start(await cg.templatable(False, args, bool))); return var
+
+@automation.register_action("ccp.daq_read", CcpDaqReadAction, DAQ_READ_SCHEMA, synchronous=True)
+async def ccp_daq_read(config, action_id, template_arg, args):
+    var = await _action(config, action_id, template_arg, CcpDaqReadAction)
+    for field in config[CONF_FIELDS]:
+        cg.add(var.add_field(field[CONF_SIZE], field[CONF_EXT], field[CONF_ADDRESS]))
+    cg.add(var.set_list(await cg.templatable(config[CONF_LIST], args, cg.uint8)))
+    cg.add(var.set_dto_id(await cg.templatable(config[CONF_DTO_ID], args, cg.uint32)))
+    cg.add(var.set_event(await cg.templatable(config[CONF_EVENT], args, cg.uint8)))
+    cg.add(var.set_prescaler(await cg.templatable(config[CONF_PRESCALER], args, cg.uint16)))
+    cg.add(var.set_samples(await cg.templatable(config[CONF_SAMPLES], args, cg.uint16)))
+    cg.add(var.set_collect_timeout(await cg.templatable(config[CONF_COLLECT_TIMEOUT], args, cg.uint32)))
+    cg.add(var.set_require_anchor(await cg.templatable(config[CONF_REQUIRE_ANCHOR], args, bool)))
+    return var
 
 @automation.register_action("ccp.raw", CcpRawAction, cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}), synchronous=True)
 async def ccp_raw(config, action_id, template_arg, args): return await _data_action(config, action_id, template_arg, args, CcpRawAction)

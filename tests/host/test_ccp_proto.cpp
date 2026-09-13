@@ -29,6 +29,15 @@ TEST(ccp_proto_transfer_encoders) {
   CHECK_BYTES(down.data, expected_down, CCP_FRAME_LEN);
 }
 
+TEST(ccp_proto_start_stop_prescaler_uses_requested_byte_order) {
+  const Cro little = start_stop(0x20, 1, 0, 0, 0, 10, ByteOrder::LITTLE);
+  const uint8_t expected_little[] = {START_STOP, 0x20, 1, 0, 0, 0, 0x0A, 0x00};
+  CHECK_BYTES(little.data, expected_little, CCP_FRAME_LEN);
+  const Cro big = start_stop(0x21, 1, 0, 0, 0, 10, ByteOrder::BIG);
+  const uint8_t expected_big[] = {START_STOP, 0x21, 1, 0, 0, 0, 0x00, 0x0A};
+  CHECK_BYTES(big.data, expected_big, CCP_FRAME_LEN);
+}
+
 TEST(ccp_proto_decodes_response_matches_counter_and_routes_daq) {
   const uint8_t response[] = {0xFF, 0x00, 0x42, 1, 2, 3, 4, 5};
   const Dto dto = decode_dto(response, sizeof(response));
@@ -53,6 +62,34 @@ TEST(ccp_proto_return_codes_and_write_classification) {
   CHECK(is_write_command(DNLOAD));
   CHECK(is_write_command(PROGRAM_6));
   CHECK(!is_write_command(UPLOAD));
+}
+
+TEST(ccp_proto_daq_layout_totals_fit_and_offsets) {
+  const DaqField fields[] = {{4, 0, 0x10203050}, {1, 0, 0x10203060}, {2, 0, 0x10203070}};
+  CHECK_EQ(CCP_ODT_PAYLOAD, 7);
+  CHECK_EQ(daq_total_size(fields, 3), 7);
+  CHECK(daq_fits_one_odt(fields, 3));
+  CHECK_EQ(daq_field_offset(fields, 3, 0), 1);
+  CHECK_EQ(daq_field_offset(fields, 3, 1), 5);
+  CHECK_EQ(daq_field_offset(fields, 3, 2), 6);
+
+  const DaqField no_anchor[] = {{1, 0, 0x10203060}, {2, 0, 0x10203070}};
+  CHECK_EQ(daq_total_size(no_anchor, 2), 3);
+  CHECK_EQ(daq_field_offset(no_anchor, 2, 0), 1);
+  CHECK_EQ(daq_field_offset(no_anchor, 2, 1), 2);
+
+  const DaqField too_large[] = {{4, 0, 1}, {4, 0, 2}};
+  CHECK_EQ(daq_total_size(too_large, 2), 8);
+  CHECK(!daq_fits_one_odt(too_large, 2));
+}
+
+TEST(ccp_proto_daq_anchor_comparison) {
+  const uint8_t frame[] = {0x00, 0x01, 0xAD, 0x04, 0x02, 0xAA, 0x55, 0x66};
+  const uint8_t expect[] = {0x01, 0xAD, 0x04, 0x02};
+  const uint8_t wrong[] = {0x01, 0xAD, 0x04, 0x03};
+  CHECK(daq_anchor_matches(frame, sizeof(frame), 1, expect, sizeof(expect)));
+  CHECK(!daq_anchor_matches(frame, sizeof(frame), 1, wrong, sizeof(wrong)));
+  CHECK(!daq_anchor_matches(frame, 4, 1, expect, sizeof(expect)));
 }
 
 TEST(ccp_proto_read_memory_chunks_twelve_bytes_as_five_five_two) {
