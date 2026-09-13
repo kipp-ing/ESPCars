@@ -86,6 +86,8 @@ jobs:
           # partition, so it proves codegen requests the partition exactly once
           # — add_partition() refuses a duplicate name.
           - tests/build/uds/test-partition.esp32-c6-idf.yaml
+          - tests/build/ccp/test.esp32-c6-idf.yaml
+          - tests/build/ccp/test-write.esp32-c6-idf.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
