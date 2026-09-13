@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/build"]
+
+[tool.ruff]
+target-version = "py311"

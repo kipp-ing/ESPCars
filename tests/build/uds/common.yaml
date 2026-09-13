@@ -1,0 +1,220 @@
+# `uds` with an EMBEDDED catalog — the config CI can compile with nothing flashed.
+#
+# `embed: true` puts tests/uds/fixtures/mini.dcat (1.8 KB) into the firmware as a
+# const array, so the whole decode path — catalog open, name resolution, group
+# scheduling, bit extraction, scale evaluation, entity publishing — is compiled
+# and linked here without a partition existing anywhere. That is the only reason
+# the second source exists (design §2).
+#
+# Every field name below comes from tests/uds/fixtures/mini.manifest.json. None
+# of it is hand-derived, and none of it is a magic number: the catalog owns each
+# field's bit position, sign, scaling, unit and "not available" sentinels.
+esphome:
+  on_boot:
+    then:
+      # A group declared `update_interval: never` is read exactly like this and
+      # never polled — identity DIDs are read once, not every minute.
+      - uds.read:
+          id: mini
+          service: DT_Mini_VIN
+      # `service:` also takes a DID directly, and any original service qualifier
+      # that merged into the group.
+      - uds.read:
+          id: mini
+          service: 0xF18C
+      - uds.read:
+          id: mini
+          service: DT_Mini_Voltage_Minimum_Cell
+      - uds.set_enabled:
+          id: mini
+          enabled: true
+      # The active-service half, on the hub that opted in. Both of these are
+      # rejected at CONFIG time on a hub without `allow_active_services: true`.
+      - uds.execute:
+          id: mini_active
+          service: RT_Mini_Routine_Start
+      - uds.raw:
+          id: mini_active
+          data: [0x22, 0xD0, 0x00]
+      - uds.raw:
+          id: mini_active
+          data: !lambda "return {0x22, 0x01, 0x01};"
+
+can_gateway:
+  id: diag
+  ports:
+    - id: diag_bus
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      # V5: must cover the block size isotp grants (8) plus margin.
+      observe_queue_depth: 32
+  # No routes: a diagnostic tester observes and sends, it never relays.
+
+isotp:
+  # The tester pair. One hub per isotp instance is a hard rule — set_consumer()
+  # takes exactly one consumer, so a second hub here would silently never
+  # receive a response, and the validator refuses it (U13).
+  #
+  # These settings AGREE with what the catalog's ECU record declares, so §3.1's
+  # transport check passes silently: STmin 20 ms is CP_STMIN_SUG, block size 8 is
+  # CP_BLOCKSIZE_SUG, and n_cr_timeout is above the catalog's P2* of 2000 ms.
+  - id: tp_mini
+    port_id: diag_bus
+    tx_id: 0x7E7
+    rx_id: 0x7EF
+    padding: 0xFF
+    block_size: 8
+    st_min: 20ms
+    n_cr_timeout: 2500ms
+  # This one deliberately DISAGREES, so a build exercises the informational half
+  # of §3.1 as well: a block size and STmin below the database's suggestion are
+  # allowed (a slower client is still conforming) and an n_cr_timeout under P2*
+  # is a warning, not an error. Both lines are expected in this config's output.
+  - id: tp_active
+    port_id: diag_bus
+    tx_id: 0x7E1
+    rx_id: 0x7E9
+    block_size: 4
+    st_min: 5ms
+
+uds:
+  - id: mini
+    isotp_id: tp_mini
+    catalog:
+      file: ../../uds/fixtures/mini.dcat
+      embed: true
+    ecu: MINI
+    max_consecutive_failures: 2
+    on_value:
+      - lambda: |-
+          ESP_LOGD("uds", "%s = %.3f %s (%s) valid=%d", x.field, x.value, x.unit, x.text, (int) x.valid);
+    on_error:
+      - logger.log:
+          format: "uds error: %s (NRC 0x%02X)"
+          args: [x.what, x.nrc]
+
+  # A hub with no entities at all: actions only, and the flag that unlocks them.
+  # Sizing has to survive zero bindings, and the SAFE_READ gate still applies to
+  # `uds.read` on this hub whatever the flag says (design §6).
+  - id: mini_active
+    isotp_id: tp_active
+    catalog:
+      file: ../../uds/fixtures/mini.dcat
+      embed: true
+    allow_active_services: true
+
+sensor:
+  # Two fields of DID 0x0101: one request serves both, and the group's interval
+  # is the minimum across them (design §5) — 10s here, not 30s.
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Voltage_Maximum_Cell
+    update_interval: 10s
+    name: "Cell voltage max"
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Voltage_Minimum_Cell
+    update_interval: 30s
+    name: "Cell voltage min"
+
+  # DID 0x0102, three fields, one request. The unit comes from the catalog.
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Temperature_Maximum
+    update_interval: 20s
+    name: "Battery temperature max"
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Temperature_Minimum
+    update_interval: 20s
+    name: "Battery temperature min"
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Temperature_Averaged
+    update_interval: 20s
+    name: "Battery temperature mean"
+
+  # A collapsed array (format §5.1b): one field record, one name, an element
+  # index. `element: 1` is the factory's cell 2.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_Cell_2Byte
+    element: 1
+    update_interval: 15s
+    name: "Cell 2 voltage"
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_Cell_2Byte
+    element: 3
+    update_interval: 15s
+    name: "Cell 4 voltage"
+
+  # `service:` disambiguating by group, and a unit the YAML overrides — a
+  # corrected unit must not need a catalog rebuild.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_Voltage_2Byte
+    service: DT_Mini_Guarded_Block
+    update_interval: 60s
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    name: "Guarded block voltage"
+
+  # The hub's own counters, one polling component for all of them.
+  - platform: uds
+    uds_id: mini
+    update_interval: 30s
+    requests_sent:
+      name: "UDS requests sent"
+    responses_accepted:
+      name: "UDS responses accepted"
+    timeouts:
+      name: "UDS timeouts"
+    negative_responses:
+      name: "UDS negative responses"
+    decode_unmatched:
+      name: "UDS decode unmatched"
+    groups_suspended:
+      name: "UDS groups suspended"
+    partial_responses:
+      name: "UDS partial responses"
+    fields_uncovered:
+      name: "UDS fields uncovered"
+    last_nrc:
+      name: "UDS last NRC"
+
+text_sensor:
+  # An enumerated field: the catalog carries the state texts, so no map is
+  # written in YAML. Declaring this under `sensor:` is a config error (U9).
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_State
+    update_interval: 30s
+    name: "Contactor state"
+
+  # ASCII. Read once on demand — a VIN does not change, which is why `never` is
+  # this platform's default.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_VIN_4Byte
+    name: "VIN"
+
+  # HEXDUMP.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_Hex_2Byte
+    name: "Serial number"
+
+  # The compiler's last-resort naming: two identically named fields from one
+  # service, disambiguated by @<byte>.<bit> (format §5.1a rule 3).
+  - platform: uds
+    uds_id: mini
+    field: "PRES_Mini_Hex_2Byte@3.0"
+    update_interval: 60s
+    name: "Dual block low"
+  - platform: uds
+    uds_id: mini
+    field: "PRES_Mini_Hex_2Byte@5.0"
+    update_interval: 60s
+    name: "Dual block high"

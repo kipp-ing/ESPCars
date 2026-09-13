@@ -1,0 +1,201 @@
+# Mr. Purple — P3, BOTH LIN channels.
+# See docs/commissioning-mr-purple.md §4 (P3).
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-partner-lin.yaml --device <c6-port>
+#   .venv/bin/esphome run tests/hil/mr-purple-lin.yaml         --device /dev/cu.usbserial-0001
+#
+#   LIN0  U6  tx GPIO12 / rx GPIO13 / cs GPIO27, UART1, slave    — answers 0x20
+#   LIN1  U5  tx GPIO33 / rx GPIO32 / cs GPIO21, UART2, listener — sniffs both
+#
+# Both transceivers sit on the same physical wire as the C6 (§3), so this is
+# three nodes with exactly one master: the partner polls 0x20, LIN0 answers, and
+# LIN1 sniffs the exchange including LIN0's own response. Only LIN0 answers
+# 0x20 — two responders on one ID would collide.
+#
+# H2 is CLEARED (2026-07-23, top markings read: 3.3 V parts), which is what
+# allows U6 to be driven at all. Earlier revisions of this file ran LIN1 alone
+# and never mentioned GPIO27, to keep U6's regulator off while H2 was open.
+#
+# H1 is RETIRED (2026-07-23, tests/hil/mr-purple-lin0-probe.yaml): with U6 awake,
+# GPIO12 follows an internal pull-down, so U6 does not hold the MTDI strap high
+# and no B1 pull-down is needed. That probe also confirmed U6 is powered and its
+# receiver drives GPIO13 — which is the control that makes U4's floating output
+# in H15 a real fault rather than a quirk of the measurement.
+#
+# USE THE LIN-ONLY PARTNER while CAN is broken. The combined partner image
+# produced ~4750 TWAI error events/s on the C6 and stalled its LIN master
+# schedule dead at 198 requests; a broken P4 silently invalidates P3.
+
+esphome:
+  name: mr-purple-lin
+  name_add_mac_suffix: false
+  on_boot:
+    - priority: 800
+      then:
+        - lambda: |-
+            uint32_t s = *(volatile uint32_t *) 0x3FF44038;
+            ESP_LOGI("strap", "GPIO_STRAP_REG=0x%04X  GPIO12(LIN0_TX)=%d  GPIO0=%d",
+                     (unsigned) (s & 0xFFFF), (int) ((s >> 5) & 1), (int) ((s >> 4) & 1));
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+globals:
+  - id: lap
+    type: uint16_t
+    initial_value: "0"
+
+linbus:
+  # ---- LIN0 / U6 — the channel that had never been driven before today ----
+  - id: lin0
+    tx_pin: GPIO12
+    rx_pin: GPIO13
+    cs_pin: GPIO27
+    uart_port: UART_NUM_1
+    baud_rate: 19200
+    mode: slave
+    # The payload is restaged every second by the interval below, so the partner
+    # sees a *moving* value — that is what separates a live slave TX path from a
+    # stale buffer being echoed.
+    responses:
+      - lin_id: 0x20
+        data: [0x00, 0x00, 0x00, 0x01]
+        checksum: enhanced
+    rx_ids:
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+    on_frame:
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+        then:
+          - lambda: |-
+              ESP_LOGD("p3", "LIN0 heard master 0x21: %02X %02X %02X %02X",
+                       data[0], data[1], data[2], data[3]);
+    on_error:
+      - then:
+          - logger.log:
+              format: "LIN0 fault: %s"
+              args: ["x.c_str()"]
+
+  # ---- LIN1 / U5 — proven in 2021 and again today; here as the sniffer ----
+  - id: lin1
+    tx_pin: GPIO33
+    rx_pin: GPIO32
+    cs_pin: GPIO21
+    uart_port: UART_NUM_2
+    baud_rate: 19200
+    mode: listener
+    rx_ids:
+      - lin_id: 0x20
+        length: 4
+        checksum: enhanced
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+    # Sniffing 0x20 is the interesting one: that frame is LIN0's own response,
+    # so seeing it here proves both instances are independently live on one wire.
+    on_frame:
+      - lin_id: 0x20
+        length: 4
+        checksum: enhanced
+        then:
+          - lambda: |-
+              ESP_LOGD("p3", "LIN1 sniffed LIN0's 0x20: %02X %02X %02X %02X",
+                       data[0], data[1], data[2], data[3]);
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+        then:
+          - lambda: 'ESP_LOGD("p3", "LIN1 sniffed master 0x21");'
+    on_error:
+      - then:
+          - logger.log:
+              format: "LIN1 fault: %s"
+              args: ["x.c_str()"]
+
+sensor:
+  - platform: linbus
+    linbus_id: lin0
+    frames_received:
+      name: "LIN0 frames"
+      id: lin0_frames
+    checksum_errors:
+      name: "LIN0 checksum errors"
+      id: lin0_csum
+    pid_errors:
+      name: "LIN0 PID errors"
+      id: lin0_pid
+    collisions:
+      name: "LIN0 collisions"
+      id: lin0_coll
+    send_failures:
+      name: "LIN0 send failures"
+      id: lin0_sendfail
+    bus_load:
+      name: "LIN0 bus load"
+      id: lin0_load
+
+  - platform: linbus
+    linbus_id: lin1
+    frames_received:
+      name: "LIN1 frames"
+      id: lin1_frames
+    checksum_errors:
+      name: "LIN1 checksum errors"
+      id: lin1_csum
+    pid_errors:
+      name: "LIN1 PID errors"
+      id: lin1_pid
+    collisions:
+      name: "LIN1 collisions"
+      id: lin1_coll
+
+  # H14: shared 12 V rail — a silent bus is a power event until proven otherwise.
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+  - platform: uptime
+    id: up
+    name: "Uptime"
+    update_interval: 10s
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: 'id(lap)++;'
+      - linbus.update_response:
+          id: lin0
+          lin_id: 0x20
+          data: !lambda |-
+            return {0xC6, 0x50, (uint8_t) (id(lap) >> 8), (uint8_t) (id(lap) & 0xFF)};
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("p3", "up=%.0fs rail=%.2fV lap=%u", id(up).state, id(rail_12v).state,
+                   (unsigned) id(lap));
+          ESP_LOGI("p3", "  LIN0 frames=%.0f csum=%.0f pid=%.0f coll=%.0f sendfail=%.0f load=%.1f%%",
+                   id(lin0_frames).state, id(lin0_csum).state, id(lin0_pid).state,
+                   id(lin0_coll).state, id(lin0_sendfail).state, id(lin0_load).state);
+          ESP_LOGI("p3", "  LIN1 frames=%.0f csum=%.0f pid=%.0f coll=%.0f",
+                   id(lin1_frames).state, id(lin1_csum).state,
+                   id(lin1_pid).state, id(lin1_coll).state);

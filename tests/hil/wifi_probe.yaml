@@ -1,0 +1,119 @@
+# Bring WiFi up on a bench DUT and report what it costs — design §9.1/§9.2/§9.3.
+#
+# M6 collection serves sealed chunks over WiFi, and the design doc marks three things as
+# UNMEASURED and blocking:
+#
+#   §9.1  WiFi tasks run at priority ~23, ABOVE linbus's `lin_uart_evt` at 18, on a single core.
+#         That is a preemption path straight into LIN timing.
+#   §9.2  WiFi TX bursts to ~300 mA. The H6 hold-up cap is sized to finish one SD write and
+#         `vcc_monitor` trips an emergency close on rail sag.
+#   §9.3  mbedTLS costs ~40-50 kB per connection; the collection httpd wants ~10 kB plus a task
+#         stack. On a C6 already hosting two bus stacks, "does it fit" is a measurement.
+#
+# Layer this onto a rig config that is otherwise unchanged, so the WiFi round is an A/B against
+# that rig's own published numbers and nothing else moved:
+#
+#   packages:
+#     dut:  !include mr-orange.yaml
+#     wifi: !include wifi_probe.yaml
+#
+# NEEDS tests/hil/secrets.yaml (gitignored; copy secrets.yaml.example). Without it `esphome
+# config` fails loudly rather than compiling a board that cannot associate.
+#
+# WHAT THIS CAN AND CANNOT SEE — read before believing a number from it
+#
+# The §9.1 observables are already emitted by the components; this package adds none of them and
+# deliberately does not try to timestamp LIN frames itself:
+#
+#   Checksum Errors / framing   linbus statistics dump. A `lin_uart_evt` preempted long enough to
+#                               overrun the UART FIFO shows up here, and nowhere else.
+#   Frames RX (window)          same dump. 20/s at Green's 50 ms schedule. A shortfall is a frame
+#                               the listener never assembled.
+#   laps/s                      verify.py, end to end across LIN and both gateway directions.
+#
+# An `on_frame` automation CANNOT measure LIN task jitter, which is the tempting mistake here:
+# linbus fires frame triggers from `loop()` (linbus.cpp:187) with main-loop-rate coalescing, so a
+# timestamp taken there measures the ESPHome main loop, not `lin_uart_evt`. That is a different
+# question, and it is the one `[loop]` below answers — labelled as the main loop, not as LIN.
+#
+# The CAN side is unaffected by construction: can_gateway forwards in the TWAI RX ISR, and an ISR
+# preempts every task including WiFi's. If laps/s falls, look at LIN.
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # A DUT must never reset itself mid-run. ESPHome's default is to reboot after ~15 min of failed
+  # association, and on this board a reset while the SD card is being written wedges the card
+  # (M2 stress run (2026-07-26, git history); since 2026-07-29 the in-band reset recovers it on the next boot
+  # rather than needing 12 V, but it still costs a gap). A run where WiFi never came up is a
+  # RESULT — the board should stay up and say so, not disappear.
+  reboot_timeout: 0s
+  # Bench network only. No fallback AP: bringing up SoftAP would add a second radio role to the
+  # very measurement that is trying to price one.
+  fast_connect: true
+
+globals:
+  - id: loop_max_us
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: loop_slow_count
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: loop_count
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: loop_last_us
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+interval:
+  # The main-loop sampler. `interval: 0s` is ESPHome's spelling for "every loop iteration", which
+  # makes this measurement self-referential in the right way: it sits in the queue it is timing.
+  # Cost is one micros() and three compares per loop — no allocation, no log line.
+  - interval: 0s
+    then:
+      - lambda: |-
+          const uint32_t now = micros();
+          if (id(loop_last_us) != 0) {
+            const uint32_t delta = now - id(loop_last_us);  // wraps correctly at 2^32 us (~71 min)
+            if (delta > id(loop_max_us))
+              id(loop_max_us) = delta;
+            if (delta > 50000)
+              id(loop_slow_count) += 1;
+          }
+          id(loop_last_us) = now;
+          id(loop_count) += 1;
+
+  # Everything else on one 10 s cadence, matching cpu_stats/task_stats so the lines interleave
+  # readably in a single capture.
+  - interval: 10s
+    then:
+      - lambda: |-
+          // Heap: TWO numbers, and the second is the one that decides §9.3. The total is not what
+          // an allocation has to fit into — a heap fragmented into 2 kB pieces cannot serve a
+          // 10 kB httpd allocation however much of it is free. Report both or neither.
+          ESP_LOGI("heap", "free %u B, largest block %u B, min since boot %u B",
+                   (unsigned) esp_get_free_heap_size(),
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                   (unsigned) esp_get_minimum_free_heap_size());
+
+          // The main loop, then reset the window. Labelled as the main loop, never as LIN.
+          //
+          // Cast, like the heap line above: these globals are uint32_t, which on the C6's 32-bit
+          // RISC-V target is `long unsigned int`, so a bare `%u` is three -Wformat warnings per
+          // build. Harmless at runtime — same width — but it is the only warning the WiFi rigs
+          // emit, and a build that is not silent is one nobody reads.
+          ESP_LOGI("loop", "max %u us, %u gaps > 50 ms, %u loops", (unsigned) id(loop_max_us),
+                   (unsigned) id(loop_slow_count), (unsigned) id(loop_count));
+          id(loop_max_us) = 0;
+          id(loop_slow_count) = 0;
+          id(loop_count) = 0;
+
+          // Association state, so a capture can never be misread as "WiFi was up" when it was
+          // not. An unassociated run is a valid control — but only if the log says which it was.
+          ESP_LOGI("wifi", "%s, rssi %d dBm",
+                   wifi::global_wifi_component->is_connected() ? "ASSOCIATED" : "NOT ASSOCIATED",
+                   (int) wifi::global_wifi_component->wifi_rssi());

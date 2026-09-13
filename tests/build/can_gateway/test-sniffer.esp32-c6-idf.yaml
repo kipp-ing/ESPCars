@@ -1,0 +1,21 @@
+substitutions:
+  sniff_tx_pin: GPIO2
+  sniff_rx_pin: GPIO3
+
+esphome:
+  name: can-sniffer-c6
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+packages:
+  can_gateway: !include common_sniffer.yaml

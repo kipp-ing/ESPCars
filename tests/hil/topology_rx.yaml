@@ -1,0 +1,277 @@
+# Topology beacon + permanent receiver — "which board is on this wire?", answered
+# by the bench itself, on every run, without flashing a probe.
+#
+# THE PROBLEM THIS ENDS. Three sessions were spent deciding which board was on
+# which segment, from indirect evidence: an idle port and a disconnected port
+# read identically, ACK proves *somebody* is there but never *who*, and every
+# answer went stale the next time a connector moved. So:
+#
+#   every node transmits, on every CAN port it owns, a 1 Hz frame that says
+#   "I am <node>, this is my bus <n>" — and every node permanently subscribes to
+#   all of those frames on all of its ports, and prints what it heard.
+#
+# The result is one greppable line per port, every 10 s, in every bench config:
+#
+#   [topo] seg1 <- green.bus0 (912 ms)
+#   [topo] seg2 <- purple.bus0 (1004 ms)
+#
+# That is the topology, measured, named, and current. No guessing, no probe
+# flash, no decoder ring.
+#
+# ---------------------------------------------------------------------------
+# HOW TO INCLUDE IT — two packages per CAN port, this one (receive + report) and
+# `topology_tx.yaml` (the 1 Hz beacon), both taking the same two vars:
+#
+#   packages:
+#     base:         !include hil_common.yaml
+#     topo_rx_seg1: !include { file: topology_rx.yaml, vars: { port_id: seg1, beacon_id: "0x0C4" } }
+#     topo_tx_seg1: !include { file: topology_tx.yaml, vars: { port_id: seg1, beacon_id: "0x0C4" } }
+#     topo_rx_seg2: !include { file: topology_rx.yaml, vars: { port_id: seg2, beacon_id: "0x0C5" } }
+#     topo_tx_seg2: !include { file: topology_tx.yaml, vars: { port_id: seg2, beacon_id: "0x0C5" } }
+#
+# They are separate packages rather than one with an `enabled:` flag because a
+# `cyclic_send` targeting a listen-only port is rejected at config time whatever
+# its enabled state — correctly, since an action could enable it at runtime. So
+# a listen-only or observe-only config includes the RX half alone and still gets
+# the full topology line: it just does not announce itself. `probe-orange-links`
+# does exactly that, and beacons from its own inject lambda instead.
+#
+# SLOT MAP — fixed, and the only thing anyone has to look up. slot = node*2 + bus,
+# beacon id = 0x0C0 + slot, so the id decodes by eye: 0x0C5 is node 2 bus 1.
+#
+# MOVED 2026-07-30, from base 0x0F0 to 0x0C0. A real device attached to the
+# bench for testing transmits in the same range at 50 Hz, on what was slot 2 —
+# Blue's bus0 — on Blue's own segment. Two senders on one id means the same
+# arbitration field with different data, i.e. a bit error for both of them,
+# and it also made `topology.py` misread that device as Blue and report a
+# phantom link. Worst of all it blocked `verify.py`: the release gate needs
+# Blue's beacon, and Blue's only cabled port was on that device's wire, so the
+# gate could not run at all while it was attached.
+#
+# The WHOLE BLOCK moved, not just slot 2, because `base + node*2 + bus` is the
+# property that makes an id decodable by eye — relocating one board would trade a
+# collision for a lookup table. 0x0C0-0x0C7 is clear of everything that device
+# transmits, including its diagnostic pair, and being *lower* than 0x0F0 it is
+# strictly better on the priority axis the note below cares about.
+#
+#   | slot | id    | node   | bus  | port on that board            |
+#   |------|-------|--------|------|-------------------------------|
+#   | 0    | 0x0C0 | green  | bus0 | can1  (GPIO2/3)               |
+#   | 1    | 0x0C1 | green  | bus1 | CAN2  (GPIO10/11, M1)         |
+#   | 2    | 0x0C2 | blue   | bus0 | can1  (GPIO2/3)               |
+#   | 3    | 0x0C3 | blue   | bus1 | —                             |
+#   | 4    | 0x0C4 | orange | bus0 | seg1  (GPIO2/3)               |
+#   | 5    | 0x0C5 | orange | bus1 | seg2  (GPIO10/11)             |
+#   | 6    | 0x0C6 | purple | bus0 | can0  (native TWAI 26/25)     |
+#   | 7    | 0x0C7 | purple | bus1 | MCP2515 (stock canbus, M1)    |
+#
+# Every port subscribes to all eight, including its own — see ECHO below. Slots
+# for hardware that does not exist yet cost one entity each and nothing else.
+#
+# ---------------------------------------------------------------------------
+# WHAT THE LINE TELLS YOU, including the two faults it names outright:
+#
+#   seg1 <- green.bus0 (912 ms)        the wire Orange's seg1 is on carries Green's
+#                                      CAN1. That is the whole answer.
+#   seg1 <- nothing                    nobody else is beaconing on this wire: it is
+#                                      unterminated, unplugged, or every other node
+#                                      on it is unpowered / in the ROM stub.
+#   seg1 <- orange.bus1 SAME-WIRE      seg1 and seg2 are the SAME PHYSICAL WIRE.
+#                                      Under two routes that is a forwarding loop.
+#                                      A node never receives its own transmissions,
+#                                      so this can mean nothing else.
+#   seg1 <- orange.bus0 ECHO           this port received its own beacon: something
+#                                      is repeating frames back at it.
+#
+# The SAME-WIRE case is the reason every port subscribes to its own node's slots.
+# It used to need a deliberate two-partners-powered-down experiment; now it is
+# just a warning in the normal log.
+#
+# ---------------------------------------------------------------------------
+# DESIGN NOTES, so the next change does not break a property this depends on:
+#
+# * ONE BEACON ID PER (node, bus), never a shared id. Two nodes transmitting the
+#   same id with different payloads collide in the data field — arbitration only
+#   separates *identifiers* — and the bench's release gate is "zero errors on
+#   every counter". Distinct ids also make SAME-WIRE detectable instead of
+#   destructive: on a shared wire the two beacons simply both arrive.
+# * 0x0C0-0x0C7 is chosen for PRIORITY and for being unoccupied. Under a 91 % load of
+#   0x200-0x20F flood frames, a low-priority beacon loses arbitration for
+#   seconds at a time and the topology line would go stale exactly when the bench
+#   is busiest. 0x0Cx wins against everything the bench transmits (probe 0x100,
+#   flood 0x200+, ring 0x3A0/0x3B0, isotp 0x6A0/0x6A1, PHASE/STATUS 0x70x/0x71x)
+#   and costs 1 frame/s per port — 0.03 % of a loaded segment. It also loses to
+#   nothing that matters on that device's wire: its own frames sit well above
+#   this range, so a beacon here does not delay the traffic we are measuring.
+# * BENCH ONLY. High-priority ids and unconditional TX are both wrong on a
+#   vehicle bus; this package must never appear in tests/build/, in an example,
+#   or in a car config. CLAUDE.md: "never widen a default that causes
+#   transmission".
+# * Subscribing decode entities marks the port observed, which allocates its
+#   observation ring and keeps the hardware filter offload off (B25). On a port
+#   with a default-drop + single-rule route that offload would otherwise engage,
+#   so a config measuring RX cost with and without it must say the beacon is on.
+#   The per-frame cost added to the RX ISR is one binary search over 8 ids.
+# * The receiver deliberately does NOT touch the status LED: each config owns its
+#   own health/identity scheme (CLAUDE.md), and a package fighting it would make
+#   the LED lie.
+substitutions:
+  # How long a beacon stays "current". 5 s = five missed beacons; long enough
+  # that a busy log interval never blinks a healthy link out of the table.
+  topo_ttl_ms: "5000"
+
+globals:
+  # Last-heard millis per slot, indexed by the slot map above. 0 == never.
+  #
+  # No `initial_value:` on purpose. The documented `initial_value: '{}'` idiom
+  # does not compile for an array type here: GlobalsComponent has both a
+  # `T initial_value` and a `std::array<...>` constructor, `{}` binds to the
+  # first, and an array parameter decays to a pointer — "invalid conversion from
+  # 'long unsigned int*' to 'long unsigned int'". Omitting it selects the
+  # defaulted constructor and `T value_{}` zero-initialises every slot, which is
+  # exactly what "never heard" means here.
+  - id: topo_seen_${port_id}
+    type: uint32_t[8]
+
+# The permanent receiver: one decode entity per slot, subscribed by CAN id, so
+# the match happens in the RX ISR and stays exact under full bus load.
+#
+# EVERY ONE OF THESE DECODES BYTE 5, the beacon's rolling sequence counter, and
+# that is load-bearing rather than arbitrary. A decode entity **publishes on
+# change** — `if (have_last_ && raw == last_raw_) return;` in
+# CanGatewayDecodeSensor::on_frame — so a byte that is the same in every beacon
+# (the magic, the version) fires `on_value` exactly once, at the first frame
+# ever received, and never again. The freshness stamps below would then expire
+# five seconds after boot and the line would report an empty wire for the rest
+# of the run. Decoding the counter is what keeps the trigger firing once a
+# second. If the beacon payload ever changes, keep a byte here that rolls.
+sensor:
+  - platform: can_gateway
+    id: topo_rx_${port_id}_0
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C0
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[0] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_1
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C1
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[1] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_2
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C2
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[2] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_3
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C3
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[3] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_4
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C4
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[4] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_5
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C5
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[5] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_6
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C6
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[6] = millis();"
+  - platform: can_gateway
+    id: topo_rx_${port_id}_7
+    internal: true
+    port_id: ${port_id}
+    can_id: 0x0C7
+    offset: 5
+    length: 1
+    on_value:
+      - lambda: "id(topo_seen_${port_id})[7] = millis();"
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          // One line per port. Own slot derived from this include's beacon id,
+          // so the package needs no separate "which node am I" variable.
+          static const char *const NODES[4] = {"green", "blue", "orange", "purple"};
+          const int my_slot = ${beacon_id} - 0x0C0;
+          const uint32_t now = millis();
+          // Eight entries at ~30 chars each can outgrow any fixed buffer, and
+          // snprintf returns the length it WOULD have written — so `n` must be
+          // clamped after every call or the next `sizeof(line) - n` underflows
+          // (size_t) into a huge remaining-space value and the write runs off
+          // the end. All eight slots at once is not hypothetical: it is what a
+          // wire with every board on it looks like.
+          char line[256];
+          size_t n = 0;
+          int heard = 0;
+          bool same_wire = false;
+          for (int s = 0; s < 8 && n + 1 < sizeof(line); s++) {
+            const uint32_t seen = id(topo_seen_${port_id})[s];
+            if (seen == 0 || (now - seen) > ${topo_ttl_ms})
+              continue;
+            heard++;
+            // Hearing any slot of my own node is impossible on a correct rig: a
+            // TWAI node never receives its own transmissions, so the frame came
+            // back over a wire this port shares with that other port.
+            const char *flag = "";
+            if (s == my_slot) {
+              flag = " ECHO";
+              same_wire = true;
+            } else if ((s >> 1) == (my_slot >> 1)) {
+              flag = " SAME-WIRE";
+              same_wire = true;
+            }
+            const int written = snprintf(line + n, sizeof(line) - n, " %s.bus%d (%lu ms)%s", NODES[s >> 1], s & 1,
+                                         (unsigned long) (now - seen), flag);
+            if (written < 0)
+              break;
+            n += (size_t) written;
+            if (n >= sizeof(line)) {  // truncated: stop before the next call underflows
+              n = sizeof(line) - 1;
+              break;
+            }
+          }
+          if (!heard) {
+            ESP_LOGW("topo", "${port_id} <- nothing (no beacon in %lu ms) - alone on this wire, "
+                     "or every partner is unpowered / in the ROM stub",
+                     (unsigned long) ${topo_ttl_ms});
+          } else if (same_wire) {
+            ESP_LOGE("topo", "${port_id} <-%s", line);
+            ESP_LOGE("topo", "${port_id}: heard my OWN node - these two ports are the same physical "
+                             "wire. With routes in both directions that is a forwarding loop.");
+          } else {
+            ESP_LOGI("topo", "${port_id} <-%s", line);
+          }

@@ -1,0 +1,89 @@
+# Mr. Purple's bench partner — LIN master ONLY, no CAN.
+# See docs/commissioning-mr-purple.md (phase P3).
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-partner-lin.yaml --device <c6-port>
+#
+# WHY THIS EXISTS, separately from mr-purple-partner.yaml.
+#
+# The combined partner runs a CAN port and a LIN master in one image. That is
+# fine once both buses work, but during bring-up a dead CAN segment is not
+# quiet: with nobody to ACK, every beacon is retransmitted forever and the TWAI
+# error interrupt fires continuously. Measured on 2026-07-23: ~4750 error
+# events/s, and the C6's LIN master schedule — which is driven from the main
+# loop — stalled dead at 198 requests while the storm ran.
+#
+# So a broken P4 silently invalidates P3. This image removes the variable:
+# LIN master and nothing else. Use it for P3, and go back to the combined
+# partner once CAN0 is proven.
+#
+# The schedule is identical to mr-purple-partner.yaml's, so Mr. Purple's side
+# does not change between the two:
+#   0x20  polled, Mr. Purple answers as slave  -> proves his slave TX path
+#   0x21  this board's own response            -> gives him something to receive
+
+substitutions:
+  node_name: purple-partner-lin
+  id_r: "70%"
+  id_g: "0%"
+  id_b: "100%"
+
+packages:
+  base: !include hil_common.yaml
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: master
+  schedule:
+    - lin_id: 0x20
+      interval: 100ms
+      length: 4
+    - lin_id: 0x21
+      interval: 100ms
+  responses:
+    - lin_id: 0x21
+      data: [0xC6, 0xC6, 0x00, 0x01]
+      checksum: enhanced
+  rx_ids:
+    - lin_id: 0x20
+      length: 4
+  on_frame:
+    - lin_id: 0x20
+      length: 4
+      then:
+        - lambda: |-
+            ESP_LOGI("partner", "LIN 0x20 from Purple: %02X %02X %02X %02X",
+                     data[0], data[1], data[2], data[3]);
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sensor:
+  - platform: linbus
+    linbus_id: lin
+    master_requests:
+      name: "LIN master requests"
+      id: lin_reqs
+    frames_received:
+      name: "LIN frames"
+      id: lin_frames
+    checksum_errors:
+      name: "LIN checksum errors"
+      id: lin_csum
+    bus_load:
+      name: "LIN bus load"
+      id: lin_load
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("partner", "LIN master 19200 | reqs=%.0f frames=%.0f csum=%.0f load=%.1f%%",
+                   id(lin_reqs).state, id(lin_frames).state,
+                   id(lin_csum).state, id(lin_load).state);

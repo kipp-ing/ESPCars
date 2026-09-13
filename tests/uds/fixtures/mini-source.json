@@ -1,0 +1,368 @@
+{
+  "_comment": [
+    "Hand-written miniature of a factory diagnostic database JSON export,",
+    "shaped exactly like a real one but small enough to review by eye.",
+    "It exists so the golden tests/uds/fixtures/mini.dcat can be recompiled in",
+    "CI without the 6.8 MB factory export. Coverage on purpose: a merged",
+    "two-service group, a duplicated field qualifier (within one group AND",
+    "across groups), signed scaling, an enum with a sentinel row, ASCII and",
+    "HEXDUMP fields, an internal presentation, a non-SAFE_READ routine, and a",
+    "group needing session (client level 5) and security (level 3).",
+    "Also, for the §5.1a/§5.1b naming and array rules: group 0x0101 needs rule",
+    "(b) (two services, one presentation name); 0x0208 is a 4-element",
+    "collapsible array; 0xF1AA needs rule (c), because ONE service contributes",
+    "two identically named fields and no factory name separates them — the",
+    "only rule-(c) case anywhere, since the real BMS never produces one.",
+    "0x0102 is the trap: THREE same-named presentations at constant stride 16",
+    "that must NOT collapse, because their services differ by words, not",
+    "numbers — the shape that would fuse a real database's max/min/mean",
+    "readings into a bogus array if the collapse guards were dropped.",
+    "Compile: script/uds_catalog.py compile tests/uds/fixtures/mini-source.json",
+    "         --ecu MINI --variant Mini_Var --all -o tests/uds/fixtures/mini.dcat"
+  ],
+  "format": "caesar-cbf-json",
+  "ecus": [
+    {
+      "qualifier": "MINI",
+      "interface_subtypes": [
+        {
+          "qualifier": "HSCAN_UDS_500",
+          "com_parameters": [
+            {"name": "CP_REQUEST_CANIDENTIFIER", "value": 2023},
+            {"name": "CP_RESPONSE_CANIDENTIFIER", "value": 2031},
+            {"name": "CP_BLOCKSIZE_SUG", "value": 8},
+            {"name": "CP_STMIN_SUG", "value": 20},
+            {"name": "CP_P2_TIMEOUT", "value": 150},
+            {"name": "CP_P2_EXT_TIMEOUT_7F_78", "value": 2000}
+          ]
+        }
+      ],
+      "global_presentations": [
+        {
+          "qualifier": "PRES_Mini_Voltage_2Byte",
+          "internal_data_type": 3,
+          "sign_bit": 0,
+          "byte_order": 0,
+          "displayed_unit": "V",
+          "type_length": 2,
+          "type_kind": 0,
+          "scales": [
+            {"enum_low_bound": 0, "enum_up_bound": 65534,
+             "multiply_factor": 0.0010000000474974513, "add_const_offset": 1.5,
+             "enum_description": ""},
+            {"enum_low_bound": 65535, "enum_up_bound": 65535,
+             "multiply_factor": 0.0, "add_const_offset": 0.0,
+             "enum_description": "Signal not available"}
+          ]
+        },
+        {
+          "qualifier": "PRES_Mini_Temp_2Byte",
+          "internal_data_type": 3,
+          "sign_bit": 1,
+          "byte_order": 0,
+          "displayed_unit": "°C",
+          "type_length": 2,
+          "type_kind": 0,
+          "scales": [
+            {"enum_low_bound": -2560, "enum_up_bound": 5760,
+             "multiply_factor": 0.015625, "add_const_offset": 0.0,
+             "enum_description": ""},
+            {"enum_low_bound": -32768, "enum_up_bound": -32768,
+             "multiply_factor": 0.0, "add_const_offset": 0.0,
+             "enum_description": "SNA"}
+          ]
+        },
+        {
+          "qualifier": "PRES_Mini_State",
+          "internal_data_type": 3,
+          "sign_bit": 0,
+          "byte_order": 0,
+          "displayed_unit": "",
+          "type_length": 1,
+          "type_kind": 0,
+          "scales": [
+            {"enum_low_bound": 0, "enum_up_bound": 0,
+             "multiply_factor": 0.0, "add_const_offset": 0.0,
+             "enum_description": "open"},
+            {"enum_low_bound": 2, "enum_up_bound": 2,
+             "multiply_factor": 0.0, "add_const_offset": 0.0,
+             "enum_description": "closed"},
+            {"enum_low_bound": 255, "enum_up_bound": 255,
+             "multiply_factor": 0.0, "add_const_offset": 0.0,
+             "enum_description": "SNA"}
+          ]
+        },
+        {
+          "qualifier": "PRES_Mini_VIN_4Byte",
+          "internal_data_type": 6,
+          "sign_bit": 0,
+          "byte_order": 0,
+          "displayed_unit": "",
+          "type_length": 4,
+          "type_kind": 0,
+          "scales": []
+        },
+        {
+          "qualifier": "PRES_Mini_Hex_2Byte",
+          "internal_data_type": 2,
+          "sign_bit": 0,
+          "byte_order": 0,
+          "displayed_unit": "",
+          "type_length": 2,
+          "type_kind": 0,
+          "scales": []
+        },
+        {
+          "qualifier": "PRES_Mini_Cell_2Byte",
+          "internal_data_type": 3,
+          "sign_bit": 0,
+          "byte_order": 0,
+          "displayed_unit": "V",
+          "type_length": 2,
+          "type_kind": 0,
+          "scales": [
+            {"enum_low_bound": 0, "enum_up_bound": 65534,
+             "multiply_factor": 0.0009765629656612873, "add_const_offset": 0.0,
+             "enum_description": ""},
+            {"enum_low_bound": 65535, "enum_up_bound": 65535,
+             "multiply_factor": 0.0, "add_const_offset": 0.0,
+             "enum_description": "SNA"}
+          ]
+        }
+      ],
+      "global_internal_presentations": [
+        {
+          "qualifier": "PRES_Mini_Internal_1Byte",
+          "internal_data_type": 5,
+          "sign_bit": 0,
+          "byte_order": 0,
+          "displayed_unit": "",
+          "type_length": 1,
+          "type_kind": 0,
+          "scales": []
+        }
+      ],
+      "global_diag_services": [
+        {
+          "qualifier": "DT_Mini_Voltage_Maximum_Cell",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220101",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Voltage_2Byte", "bit_position": 24,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 0, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Voltage_Minimum_Cell",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220101",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Voltage_2Byte", "bit_position": 40,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 0, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Temperature_Maximum",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220102",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Temp_2Byte", "bit_position": 24,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 1, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Temperature_Minimum",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220102",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Temp_2Byte", "bit_position": 40,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 1, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Temperature_Averaged",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220102",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Temp_2Byte", "bit_position": 56,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 1, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Contactor_State",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "22D000",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_State", "bit_position": 24,
+               "size_in_bits": 8, "field_type": "Presentation",
+               "pres_pool_index": 2, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_VIN",
+          "service_type": 22,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "22F190",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_VIN_4Byte", "bit_position": 24,
+               "size_in_bits": 32, "field_type": "Presentation",
+               "pres_pool_index": 3, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Serial",
+          "service_type": 22,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "22F18C",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Hex_2Byte", "bit_position": 24,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 4, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "RT_Mini_Routine_Start",
+          "service_type": 23,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "31010300",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Internal_1Byte", "bit_position": 32,
+               "size_in_bits": 8, "field_type": "InternalPresentation",
+               "pres_pool_index": 0, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Guarded_Block",
+          "service_type": 22,
+          "client_access_level": 5,
+          "security_access_level": 3,
+          "request_bytes": "220318",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Voltage_2Byte", "bit_position": 24,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 0, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Cells_Voltage_Cell_1",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220208",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Cell_2Byte", "bit_position": 24,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 5, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Cells_Voltage_Cell_2",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220208",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Cell_2Byte", "bit_position": 40,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 5, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Cells_Voltage_Cell_3",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220208",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Cell_2Byte", "bit_position": 56,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 5, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Cells_Voltage_Cell_4",
+          "service_type": 5,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "220208",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Cell_2Byte", "bit_position": 72,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 5, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        },
+        {
+          "qualifier": "DT_Mini_Dual_Same",
+          "service_type": 22,
+          "client_access_level": 1,
+          "security_access_level": 0,
+          "request_bytes": "22F1AA",
+          "output_preparations": [
+            [
+              {"qualifier": "PRES_Mini_Hex_2Byte", "bit_position": 24,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 4, "info_pool_index": 0, "size_error": null},
+              {"qualifier": "PRES_Mini_Hex_2Byte", "bit_position": 40,
+               "size_in_bits": 16, "field_type": "Presentation",
+               "pres_pool_index": 4, "info_pool_index": 0, "size_error": null}
+            ]
+          ]
+        }
+      ],
+      "variants": [
+        {
+          "qualifier": "Mini_Var",
+          "diag_service_indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        }
+      ]
+    }
+  ]
+}

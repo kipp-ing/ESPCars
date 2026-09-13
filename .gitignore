@@ -1,0 +1,10 @@
+.venv/
+.esphome/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/host/build/
+secrets.yaml
+.DS_Store
+.claude/worktrees/
+private/

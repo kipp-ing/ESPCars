@@ -1,0 +1,142 @@
+# Mr. Green — /dev/cu.usbmodem1101 (MAC …0a:d5:ac)
+# LIN master + CAN1 on segment 1 (bridged to Mr. Blue by Mr. Orange).
+# Ring owner: carries lap N in its LIN master response (0x30), closes a lap
+# when N returns over CAN (0x3B0 via the gateway), then advances to N+1.
+# The token is level-based: state retransmits every LIN cycle, so a lost
+# frame self-heals — only a dead component stalls the lap counter.
+substitutions:
+  node_name: mr-green
+  id_r: "0%"
+  id_g: "100%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  # Topology beacon: names whoever else is on this wire, every 10 s, in the
+  # console. See tests/hil/topology_rx.yaml for the slot map.
+  topo_rx_can1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C0"
+  topo_tx_can1: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C0"
+
+globals:
+  - id: lap_n
+    type: int
+    initial_value: "1"
+  - id: last_lap_ms
+    type: uint32_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 125kbps
+      observe_queue_depth: 32
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("hil", "CAN bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN recovered");'
+  # Nasty load: high-priority floods the token must survive (arbitration-
+  # superior to the 0x3xx token frames).
+  cyclic_sends:
+    - id: load_fast
+      port: can1
+      can_id: 0x150
+      interval: 4ms
+      data: [0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44]
+    - id: load_slow
+      port: can1
+      can_id: 0x160
+      interval: 10ms
+      data: [0xCA, 0xFE, 0xBA, 0xBE, 0x55, 0x66, 0x77, 0x88]
+  statistics:
+    log_interval: 15s
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: master
+  schedule:
+    - lin_id: 48 # token out: master's own response carries lap N
+      interval: 50ms
+    - lin_id: 49 # Blue's LIN echo of the token
+      interval: 50ms
+      length: 4
+  responses:
+    - lin_id: 48
+      data: [0x00, 0x01, 0xCA, 0xFE] # big-endian lap 1
+      checksum: enhanced
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sensor:
+  - platform: can_gateway
+    port_id: can1
+    can_id: 0x3B0
+    offset: 0
+    length: 2
+    byte_order: big
+    name: "Token return"
+    on_value:
+      - if:
+          condition:
+            lambda: "return ((int) x) == id(lap_n);"
+          then:
+            - lambda: |-
+                id(last_lap_ms) = millis();
+                if (id(lap_n) % 25 == 0)
+                  ESP_LOGI("ring", "RING lap %d closed", id(lap_n));
+            - can_gateway.send:
+                port: can1
+                can_id: 0x3A0
+                data: !lambda |-
+                  const int n = id(lap_n);
+                  return {(uint8_t) (n >> 8), (uint8_t) (n & 0xFF)};
+            - lambda: "id(lap_n) += 1;"
+            - linbus.update_response:
+                lin_id: 48
+                data: !lambda |-
+                  const int n = id(lap_n);
+                  return std::vector<uint8_t>{(uint8_t) (n >> 8), (uint8_t) (n & 0xFF), 0xCA, 0xFE};
+            - script.execute: led_token
+  - platform: can_gateway
+    port_id: can1
+    bus_load:
+      name: "CAN bus load"
+    observed:
+      name: "CAN observed"
+    bus_err:
+      name: "CAN bus errors"
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool ok = id(last_lap_ms) != 0 && (now - id(last_lap_ms)) < 3000;
+          id(healthy) = ok;
+          if (ok) {
+            id(led_health).execute();
+          } else {
+            if (now > 10000)
+              ESP_LOGE("ring", "TOKEN LOST at lap %d", id(lap_n));
+            id(led_fault).execute();
+          }

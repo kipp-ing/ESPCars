@@ -1,0 +1,190 @@
+# Mr. Orange — wedge the card on purpose, then watch the firmware talk it back.
+#
+# Written 2026-07-29. Every claim this project has ever made about the wedge is an
+# inference from a failed mount: `sdmmc_card_init failed (0x107)` and nothing else.
+# Nobody has ever asked the card what state it was in. This probe asks.
+#
+# RUN ON HARDWARE 2026-07-29 — IT ANSWERED. 12/12 staged wedges recovered in band,
+# no power cycle, 10 on attempt 2 and 2 on attempt 3. The control (`-s in_band false`)
+# left the card down through six plain remounts, so the wedge is real and a remount
+# cannot clear it. Every success looked the same:
+#
+#   card reset: idle at cmd13 (busy 0 ms, then 0 ms; cmd0 x1 r1=0x01 status=0x00)
+#
+# `busy 0 ms` on every cycle: the card was NOT programming, it was parked in the open
+# CMD25 waiting for a token. So the stop token is the whole mechanism and the busy
+# budget below is belt-and-braces — the "card is merely slower than 40 ms" theory is
+# dead for this card. `no response at cmd0` and `mute at cmd0` each showed up once and
+# cleared on the very next attempt, so neither is proof of a latched card (the decision
+# table below said `no response` justified fitting H5 — the bench says it does not).
+# Full numbers in wedge run (2026-07-29, 12/12, git history).
+#
+# WHAT IT DOES
+#
+#   1. Streams ~12 000 records/s at the card, so a reset always lands inside a
+#      multi-block write — the state the wedge is made of.
+#   2. After ${wedge_after_ms} ms, it resets itself mid-write with esp_restart(). That is
+#      the same cut a reflash or a console attach makes, minus the human.
+#   3. On the next boot it does NOT arm again (esp_reset_reason() == ESP_RST_SW),
+#      so the board comes up once into a wedged card and stays there, reporting.
+#   4. The recovery ladder runs: attempt 1 is a plain remount, attempt 2 and up
+#      run the in-band reset (stop token -> busy wait -> CMD12 -> CMD0 -> CMD13).
+#
+# WHAT TO READ — the `card reset:` line, which carries the numbers that decide it:
+#
+#   idle at cmd0 (busy 340 ms, ...)     the card was BUSY, not wedged. 340 ms against
+#                                       the SDSPI driver's fixed 40 ms is the whole
+#                                       bug, and patience alone is the fix.
+#   idle at cmd13 (busy 2 ms, then N)   the card was sitting in the open CMD25. The
+#                                       stop token ended it. This is the wedge, and
+#                                       the sequence cleared it without touching power.
+#   still busy at busy wait             DO never released inside the budget. Raise
+#                                       max_busy_timeout and read the next attempt:
+#                                       the budget doubles from attempt 3 on.
+#   mute at cmd0 (busy 0 ms)            nothing ever drove MISO. Not a wedge at all —
+#                                       card absent, unpowered, or its TX side is dead.
+#                                       Check the rail before touching firmware.
+#   no response at cmd0                 the card answered CMD12 but refuses CMD0. It
+#                                       is present and latched; this is the one shape
+#                                       that would justify fitting the H5 switch.
+#
+# Then `card recovered after N attempt(s)` — or seven identical failures, which is
+# what 2026-07-28 got and the measurement that made this probe necessary.
+#
+# There is no CAN port in this config, so the topology_rx/topology_tx packages do
+# not apply (they answer "who is on my wire?", and there is no wire here).
+#
+# RUN IT — once, and leave the console attached for the whole thing:
+#
+#   .venv/bin/esphome run tests/hil/probe-orange-wedge.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# To re-arm for another cycle you must RE-FLASH (or cycle 12 V). `esphome logs` does
+# NOT reset this board — measured 2026-07-29, a logs session watched it stream straight
+# through with zero boot headers — so an attach alone leaves the probe disarmed, and
+# esptool cannot reset it from a second process while a logs session holds the port
+# (it fails and parks the chip in DOWNLOAD mode). `esphome run` does both in one go.
+#
+# Read the card back with `script/sdlog.py check` BEFORE flashing anything else:
+# the file this leaves behind ends without `#close`, which is the power-cut
+# signature and, here, the evidence that the cut landed where it was aimed.
+#
+# To watch the writer without wedging anything, `-s wedge_after_ms 0` disarms it.
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+  # Milliseconds of streaming before the self-inflicted reset. Long enough that
+  # the card is well into a file and FATFS has allocated clusters; short enough
+  # that a bench session is not spent waiting. "0" disarms the wedge entirely.
+  # Plain milliseconds, not a time period: substitutions are textual, so
+  # `${x.total_milliseconds}` inside a lambda would be pasted through verbatim.
+  wedge_after_ms: "20000"
+  # The A/B knobs, so a sweep costs a flag and not an edit:
+  #   -s in_band false   THE CONTROL. Recovery without the in-band reset, i.e. exactly
+  #                      what 2026-07-28 ran. The card is expected to stay down; if it
+  #                      recovers anyway, the wedge was never what we think it is.
+  #   -s busy 8s         a longer first budget, when attempt 2 reports `still busy`
+  in_band: "true"
+  busy: 2s
+  max_busy: 10s
+
+packages:
+  base: !include hil_common.yaml
+  # The 12 V rail through esphome's CALIBRATED adc, not sd_logger's uncalibrated
+  # one. A wedge diagnosis is worthless if the rail was sagging all along.
+  rail: !include rail_check.yaml
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin: the H5 switch on card VCC was never built (GPIO17 reaches
+  # header J5.6 and stops there), so there is nothing to cycle. That is exactly
+  # why this probe exists — the in-band reset is the only lever this board has.
+  clock: 10MHz                 # 100R series + flying leads make 20MHz marginal
+  buffer_depth: 4096
+  sync_interval: 1s
+  # No time bound and a large size bound: rotation is not what is being measured,
+  # and a rotation landing on the wedge would add a second variable.
+  max_file_size: 64MB
+  statistics:
+    log_interval: 5s
+  recovery:
+    enabled: true
+    # Tighter than the shipped 1s -> 30s ladder on purpose: at 30 s a bench
+    # session watches four attempts an hour. Here attempt 2 — the first that
+    # resets in band — lands ~6 s after the failure.
+    initial_delay: 2s
+    max_delay: 8s
+    max_attempts: 0            # keep trying; the point is to watch it escalate
+    in_band_reset: ${in_band}
+    busy_timeout: ${busy}
+    max_busy_timeout: ${max_busy}   # doubles 2 -> 4 -> 8 -> 10 from attempt 3 on
+
+interval:
+  # The producer. One burst per 16 ms main-loop pass, which is ~12 500 rec/s —
+  # enough that the writer is inside a write() far more often than not, so the
+  # reset below has a high chance of cutting one in half rather than landing in
+  # the gap between two.
+  - interval: 16ms
+    then:
+      - lambda: |-
+          static uint32_t seq = 0;
+          for (uint8_t i = 0; i < 200; i++) {
+            const uint8_t data[8] = {
+                (uint8_t) (seq >> 24), (uint8_t) (seq >> 16), (uint8_t) (seq >> 8), (uint8_t) seq,
+                0xA5, 0x5A, (uint8_t) i, 0x00};
+            id(sd_log)->log_frame(0, 0x400 + (seq & 0x7F), 0, data, 8);
+            seq++;
+          }
+
+  # The cut. Armed only on a boot that did not follow our own restart, so this
+  # wedges the card exactly once and then leaves the board alone to report.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t after_ms = ${wedge_after_ms};
+          if (after_ms == 0)
+            return;
+          if (esp_reset_reason() == ESP_RST_SW) {
+            static bool said = false;
+            if (!said) {
+              ESP_LOGW("wedge", "this boot follows the self-inflicted reset — not arming again; "
+                                "watch the card reset / card recovery lines");
+              said = true;
+            }
+            return;
+          }
+          if (millis() < after_ms)
+            return;
+          if (!id(sd_log)->is_mounted()) {
+            ESP_LOGW("wedge", "not arming: the card is already down");
+            return;
+          }
+          // No close, no unmount, no flush: that is the entire point. The card is
+          // left holding whatever the writer had in flight.
+          ESP_LOGW("wedge", "cutting the board mid-write NOW (%u ms of streaming)",
+                   (unsigned) millis());
+          esp_restart();
+
+  # The verdict, on the LED as well as the console, because reading the console
+  # is itself a reset on this chip.
+  - interval: 5s
+    then:
+      - lambda: |-
+          const bool ok = id(sd_log)->is_mounted();
+          ESP_LOGI("wedge", "mounted=%d recovery_attempts=%" PRIu32 "%s", ok ? 1 : 0,
+                   id(sd_log)->get_recovery_attempts(),
+                   ok ? "  -> card is up" : "  -> card is down, ladder running");
+          id(healthy) = ok;
+      - if:
+          condition:
+            lambda: "return id(healthy);"
+          then:
+            - script.execute: led_health
+          else:
+            - script.execute: led_fault

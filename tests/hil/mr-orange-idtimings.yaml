@@ -1,0 +1,30 @@
+# Mr. Orange + a full per-ID timing table — Phase 4, Todo 7a.
+#
+# Todo 7a: with `id_timings` on and a large table, the pre-fix `log_statistics_`
+# emitted one ESP_LOGI per tracked ID per port from a single loop() pass — up to
+# ~260 lines, well over half a second of blocking UART against a ~16 ms budget.
+# The fix only *arms* the dump there; `log_id_timings_step_()` then emits at most
+# ID_LOG_LINES_PER_PASS (= 1) line per port per pass, so a full table drips out
+# over ~2 s instead of stalling one pass.
+#
+# The differential, with tests/hil/mr-blue-manyids.yaml feeding 128 distinct IDs:
+#
+#   pre-fix   all ID lines land in one burst inside one statistics interval;
+#             expect ESPHome's "took a long time" warning and a visible lap-rate
+#             dip synchronised to log_interval
+#   post-fix  lines paced ~1 per port per pass, spread over ~2 s, no stall
+#             warning, ring undisturbed; if a dump is still running when the next
+#             interval fires, a warning names how far it got
+#
+# log_interval is 20 s: long enough that a ~2 s paced dump finishes inside it, so
+# "dump overran the interval" stays a real signal rather than the normal case.
+
+packages:
+  orange: !include mr-orange.yaml
+
+can_gateway:
+  id: gw
+  statistics:
+    log_interval: 20s
+    id_timings: true
+    id_timings_max: 128

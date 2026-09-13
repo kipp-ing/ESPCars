@@ -1,0 +1,37 @@
+# The §9.1 gate: does associating to WiFi cost the token ring anything?
+#
+# Mr. Orange, the ring config included whole, plus the radio. Green and Blue are NOT rebuilt —
+# only the DUT gains WiFi, because the question is what WiFi does to a board that is also
+# forwarding CAN and listening to LIN, not what it does to a bench.
+#
+#   .venv/bin/esphome run tests/hil/ring-wifi-orange.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#   .venv/bin/python script/hil/verify.py --seconds 45 --min-laps 75
+#
+# Needs tests/hil/secrets.yaml — copy secrets.yaml.example.
+#
+# PASS: 19.4 laps/s and ALL GREEN, i.e. indistinguishable from the radio-off baseline, with the
+# `[wifi]` line reading ASSOCIATED throughout. That is the whole gate.
+#
+# FAIL is informative in two different ways and they must not be conflated:
+#
+#   laps/s falls, LIN counters clean       the main loop is being preempted; `[loop] max` says
+#                                          by how much. Costly but not a correctness problem.
+#   Checksum/framing errors appear, or     `lin_uart_evt` (prio 18) is losing to WiFi (prio ~23).
+#   "Frames RX (window)" drops below 20/s  This is §9.1's actual risk and it would mean the
+#                                          collection server cannot share a core with the LIN
+#                                          stack as designed.
+#
+# A ring at 125 kbps is not a soak and not a load test. If this passes, the next round is
+# soak-wifi-orange.yaml, which asks the same question at 500 kbit/s with the writer at rate.
+#
+# BUILDS CLEAN, 2026-07-28, zero warnings: RAM 37.2 % (168 408 B of 452 112), Flash 46.6 %
+# (855 078 B of 1 835 008). That is the STATIC cost with the radio linked in; it is not the
+# answer to §9.3, which is about the runtime heap and specifically about the largest free block.
+# The `[heap]` line is what answers that, and only on hardware.
+#
+# Node name stays mr-orange so ports.py/verify.py/topology.py resolve as usual — which also means
+# switching between this and mr-orange.yaml forces a full rebuild each way.
+packages:
+  ring: !include mr-orange.yaml
+  wifi: !include wifi_probe.yaml

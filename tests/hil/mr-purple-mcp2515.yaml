@@ -1,0 +1,120 @@
+# Mr. Purple P5 — MCP2515 bring-up on stock ESPHome `canbus`.
+# See docs/commissioning-mr-purple.md §2.5 and phase P5.
+#
+# This chip has NEVER been talked to: the 2021 firmware drove three of its four
+# SPI pins wrong (clk 17 / mosi 16 / miso 15 instead of 18 / 23 / 19), so every
+# result here is a first. No custom component is involved — stock ESPHome
+# already ships an mcp2515 canbus platform, and its `clock:` / `mode:` options
+# are exactly the staging P5 needs.
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-mcp2515.yaml --device /dev/cu.usbserial-0001
+#
+# STAGE IT. Do not jump to NORMAL:
+#   1. mode LOOPBACK    — no transceiver, no bus. Proves SPI, bit timing maths
+#                         and buffers. NOTE: loopback CANNOT resolve H8 — a
+#                         wrong crystal loops back perfectly happily.
+#   2. mode LISTENONLY  — against the C6 partner on CAN2. The first frame
+#                         received here is what actually settles H8.
+#   3. mode NORMAL      — bidirectional; partner's TEC must stay 0.
+#
+#   .venv/bin/esphome -s mcp_mode LISTENONLY run tests/hil/mr-purple-mcp2515.yaml --device ...
+#
+# H8 — SETTLED, and not by measurement: Y1 was never populated. The 2026-07-26
+# rework fitted a **16 MHz** part, so that is the truth regardless of what the
+# BOM said. The unpopulated resonator is also why this chip never answered SPI
+# at all — the MCP2515 clocks its register file from Fosc, so with no oscillator
+# MISO stays undriven even with CS asserted, which is exactly what the raw
+# bit-banged probe measured.
+#
+# If LISTENONLY ever receives nothing, flip mcp_clock before suspecting wiring:
+# at the wrong setting the wire rate is out by 2x and nothing decodes.
+#
+#   .venv/bin/esphome -s mcp_clock 8MHZ -s mcp_mode LISTENONLY run ... --device ...
+
+substitutions:
+  mcp_clock: 16MHZ
+  mcp_mode: LOOPBACK
+
+esphome:
+  name: mr-purple-mcp
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+globals:
+  - id: rx_count
+    type: uint32_t
+    initial_value: "0"
+  - id: tx_seq
+    type: uint16_t
+    initial_value: "0"
+
+spi:
+  clk_pin: GPIO18
+  miso_pin: GPIO19
+  mosi_pin: GPIO23
+
+canbus:
+  - platform: mcp2515
+    id: mcp
+    cs_pin: GPIO5
+    clock: ${mcp_clock}
+    mode: ${mcp_mode}
+    bit_rate: 125KBPS
+    # This node's own default TX id. mr-purple-partner.yaml decodes 0x301
+    # offset 0 length 2 big-endian as "Purple counter", so the two line up.
+    can_id: 0x301
+    on_frame:
+      # 0x201 is the partner's beacon (mr-purple-partner.yaml, every 100 ms).
+      # In LOOPBACK this never fires; our own 0x301 comes back instead.
+      - can_id: 0x201
+        then:
+          - lambda: |-
+              id(rx_count)++;
+              ESP_LOGI("mcp", "RX 0x201 len=%u [%02X %02X] total=%u",
+                       (unsigned) x.size(),
+                       x.size() > 0 ? x[0] : 0, x.size() > 1 ? x[1] : 0,
+                       (unsigned) id(rx_count));
+      - can_id: 0x301
+        then:
+          - lambda: |-
+              id(rx_count)++;
+              ESP_LOGI("mcp", "RX 0x301 (own frame - loopback) total=%u",
+                       (unsigned) id(rx_count));
+
+sensor:
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 5s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+interval:
+  # Counter on 0x301 so the partner has something to decode. In LOOPBACK this
+  # is also the RX source — if the on_frame above never fires in LOOPBACK, the
+  # SPI link or the bit timing is wrong and there is no point going further.
+  - interval: 500ms
+    then:
+      - canbus.send:
+          canbus_id: mcp
+          can_id: 0x301
+          data: !lambda |-
+            id(tx_seq)++;
+            return {(uint8_t)(id(tx_seq) >> 8), (uint8_t)(id(tx_seq) & 0xFF),
+                    0xC0, 0xFF, 0xEE, 0x00, 0x00, 0x00};
+
+  - interval: 10s
+    then:
+      - lambda: |-
+          ESP_LOGI("mcp", "mode=${mcp_mode} clock=${mcp_clock} tx=%u rx=%u rail=%.2fV",
+                   (unsigned) id(tx_seq), (unsigned) id(rx_count), id(rail_12v).state);

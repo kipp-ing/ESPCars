@@ -1,0 +1,16 @@
+# Green's half of the bidirectional PERF soak: the seg1 generator at -O2, burst matched to Blue.
+#
+# `burst: 2` overrides stress-green-load.yaml's solo default of 58, and the override is the whole
+# point of this wrapper. With two generators the frame budget does NOT double — a TWAI node never
+# receives its own transmissions, so each wire carries G1 + G2 and 90 % of 500 kbit/s is ~3600 f/s
+# total, i.e. ~1800 each. Left at 58, Green's TX competes with Orange's forwarding TX on the same
+# wire, Orange's queue backs up and the route sheds — a bench misconfiguration that reads as a
+# gateway finding. Keep this equal to Blue's burst; the granularity is coarse (1 ≈ 25 %, 2 ≈ 50 %).
+#
+# Dial from the achieved "bus load x %" on the port statistics line, never from the burst value.
+packages:
+  gen: !include stress-green-load.yaml
+  perf: !include opt_perf.yaml
+
+substitutions:
+  burst: "2"

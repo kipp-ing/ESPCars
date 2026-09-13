@@ -1,0 +1,112 @@
+# Mr. Orange — the writer at rate, serving, while a puller drags chunks off it.
+#
+# This is the **CAN-free half** of M6 load run §4.3 (2026-07-29, git history). The full rig is
+# tests/hil/stress-orange-collect.yaml (gateway + LIN + taps + serve + pull); this
+# one drops the bus and keeps everything else, so it answers the failure the load
+# handover ranks FIRST and nothing else:
+#
+#   §5 #1  "httpd task starves the writer through the FATFS lock" —
+#          `dropped` climbs while a transfer is in flight.
+#   §9.2   the rail under sustained WiFi TX, with `vcc_monitor` armed and able to
+#          trip. Association alone barely transmits; a 400 KB/s pull does.
+#   §9.3   `[heap] largest block` with the server *running*, not merely sized for.
+#
+# WHY IT EXISTS AS A SEPARATE FILE. On 2026-07-29 Mr. Orange's +5 V CAN domain
+# went dead: both ports read `loopback OPEN (no echo)` at the pin with GPIO7 high
+# and 11.86 V on J8, while Mr. Green on identical firmware reads `CLOSED
+# (transceiver echoes)` on both of its channels. That is a board fault, not a
+# cabling one, and it makes every CAN number on this DUT meaningless until it is
+# fixed. The writer, the card, the radio and the server are all untouched by it —
+# so the half of §4.3 that does not need a bus can be run today, and the half that
+# does waits for a meter. Do not merge the two files: the point of this one is
+# that a green run here says nothing at all about the gateway.
+#
+#   .venv/bin/esphome run tests/hil/stress-orange-sdcollect.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#   .venv/bin/python script/sdlog_collect.py index http://<ip>:8080
+#   .venv/bin/python script/sdlog_collect.py pull  http://<ip>:8080 --into /tmp/arch
+#
+# NEEDS tests/hil/secrets.yaml (copy secrets.yaml.example).
+#
+# WHAT A GREEN RUN HERE DOES **NOT** MEAN — the list is the point of the file:
+#
+#   tap_dropped == 0      never exercised. There is no can_gateway and no tap
+#                         ring; `log_frame()` is called from the main loop, so the
+#                         RX-ISR-to-ring path this rig's big brother stresses is
+#                         absent entirely.
+#   design §9.1, fully    only the LISTENER half. `linbus` IS in this build —
+#                         inherited from stress-orange-sdrotate.yaml, listener
+#                         mode, id 48 — so `lin_uart_evt` (prio 18) really is
+#                         there for WiFi (prio ~23) to preempt, and it needs a
+#                         master on the wire to mean anything: flash Green with
+#                         tests/hil/mr-green.yaml first, then read `Frames RX
+#                         (window)` — 20/s is the criterion. What stays
+#                         unexercised is LIN under CAN load, where the same core
+#                         is also servicing two TWAI RX ISRs.
+#   the ring / laps/s     not measured, and could not be: Orange is out of the
+#                         ring for the length of this run.
+#
+# THE A/B, and why the rate is 12 and not 4. `records: 12` is inherited from
+# stress-orange-sdrotate.yaml unchanged — ~8460 rec/s / 338 KB/s, the last fully
+# clean rate of the M5.7 sweep, and the rate of the radio-free soak of 2026-07-28
+# (13 rotations L0000629->L0000641, `dropped=0 text_dropped=0 card_dropped=0` as
+# the only counter state, CPU 72.1-72.6 %). Same rig, same rate, same bounds: every
+# delta here belongs to the radio, the server and the pull. It is also ~2.3x the
+# production tap load (~3600 rec/s / ~148 KB/s), so a clean run is an upper bound
+# on the loaded-gateway case rather than a proxy for it — which is the right way
+# round for a rig that cannot run the real thing.
+#
+# RETENTION IS PARKED AT 90, deliberately, and this is the one substitution that
+# differs from the soak baseline. `stress-orange-sdrotate.yaml` runs
+# `retention_at: 2` to force the discard path; at 2 % fill on a wiped card the
+# oldest chunk is unlinked within seconds of being sealed, so a puller would spend
+# the run collecting 404s that the RIG manufactured rather than found (Phase B
+# §6.4 is the same family of self-inflicted failure). 90 keeps chunks alive long
+# enough to be fetched. The consequence, stated so nobody reads it as a result:
+# **retention almost certainly never fires in this run, so this rig does not close
+# §6.7's `#gap` reconciliation either.** That needs its own low-retention pass with
+# no puller attached.
+#
+# NO TOPOLOGY PACKAGES, and that is the documented exemption, not the oversight
+# CLAUDE.md warns about: this config declares no can_gateway port at all, so there
+# is no wire to beacon on. Same reasoning as stress-orange-sdrotate.yaml and
+# readback-orange.yaml at their own heads. Any rig that *does* declare a CAN port
+# gets topology_rx + topology_tx, once per port.
+#
+# `vcc_monitor` is inherited armed (threshold 10.5 V, physical divider 10.8673)
+# and that is required, not incidental: §9.2 is one of the three questions here and
+# a monitor that cannot trip cannot answer it. Two things to check in the boot
+# dump before believing a quiet rail — `vcc_monitor: ... (eFuse-calibrated)`, since
+# an `UNCALIBRATED estimate` reads ~26 % low and makes the physical divider unsafe,
+# and that no `VCC sag:` line appears at all. The trip is ONE-WAY: a board that
+# latches it stops logging for the rest of the run and says so exactly once.
+substitutions:
+  # See the retention note above. This is the only value that departs from the
+  # 2026-07-28 soak baseline, and it departs from it on purpose.
+  retention_at: "90"
+
+packages:
+  # The producer, the writer, the rotation bounds and the card half of collection.
+  # Everything under test that is not the radio.
+  soak: !include stress-orange-sdrotate.yaml
+  # -O2. The soak baseline this is A/B'd against was measured at PERF, so leaving
+  # it out would move two variables.
+  perf: !include opt_perf.yaml
+  # Credentials, plus the three lines that are the actual instruments here:
+  # `[heap] free / largest block / min since boot`, `[loop] max us`, and
+  # `[wifi] ASSOCIATED, rssi`. A run whose radio never came up is a valid control
+  # only because that last line says which run it was.
+  wifi: !include wifi_probe.yaml
+
+sd_logger:
+  collection:
+    # The one key that separates this rig from its baseline. Everything else in
+    # the merged `collection:` block — enabled, retention_percent — comes from
+    # stress-orange-sdrotate.yaml.
+    #
+    # CONFIRM THE MERGE TOOK. Read `collection: serving on port 8080` out of the
+    # boot dump_config; do not assume YAML package precedence did what you meant.
+    # A rig that silently kept `serve: false` looks identical to a server that
+    # failed to bind, right up until the puller times out.
+    serve: true
+    port: 8080

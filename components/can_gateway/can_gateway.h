@@ -1,0 +1,969 @@
+#pragma once
+
+#ifdef USE_ESP32
+
+#include "gateway_core.h"
+
+#include "esphome/core/automation.h"
+#include "esphome/core/component.h"
+#include "esphome/core/defines.h"
+#include "esphome/core/helpers.h"
+
+#ifdef USE_BINARY_SENSOR
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
+#ifdef USE_SENSOR
+#include "esphome/components/sensor/sensor.h"
+#endif
+#ifdef USE_SWITCH
+#include "esphome/components/switch/switch.h"
+#endif
+#ifdef USE_TEXT_SENSOR
+#include "esphome/components/text_sensor/text_sensor.h"
+#endif
+
+#include <esp_twai.h>
+#include <esp_twai_onchip.h>
+#include <esp_twai_types.h>
+#include <freertos/FreeRTOS.h>
+#if defined(USE_CAN_GATEWAY_ID_STATS) || defined(USE_CAN_GATEWAY_LOG_TAP)
+#include <esp_timer.h>
+#endif
+
+// Codegen-sized static pools: esphome/core/defines.h carries the
+// static-analysis defaults, __init__.py emits the real values via add_define().
+
+// Derived here, never emitted by codegen: true when at least one non-forwarding
+// consumer of a received frame is compiled in (bus-load / per-ID statistics,
+// the last_frame snapshot ring, the observation ring). The RX tap block and the
+// staging receive that feeds it on the shed path exist only in that case; with
+// none of them built in, a shed frame has nowhere to go and is left to the
+// driver, exactly as before.
+#if defined(USE_CAN_GATEWAY_STATS) || defined(USE_CAN_GATEWAY_SNAPSHOT) || defined(USE_CAN_GATEWAY_OBSERVE) || \
+    defined(USE_CAN_GATEWAY_LOG_TAP)
+#define CAN_GATEWAY_HAS_RX_TAPS
+#endif
+
+namespace esphome::can_gateway {
+
+class CanGateway;
+class GatewayPort;
+class GatewayRoute;
+
+// Contract-level rule flag bits emitted by codegen (see the symbol contract in
+// __init__.py). Bits 0-4 are identical to the core RULE_FLAG_* bits and pass
+// straight into RuleEntry::flags; bits 5-6 are consumed by add_rule() when it
+// builds the prepared PatchData.
+static constexpr uint8_t RULE_FLAG_OUT_EXT = 1 << 5;     ///< Frame type after modification.
+static constexpr uint8_t RULE_FLAG_REPLACE_ID = 1 << 6;  ///< Modification rewrites ID / frame type.
+
+/// One TX slot: the driver frame plus its payload storage. The driver TX queue
+/// keeps a *pointer* to `frame` until on_tx_done, so slots live in static
+/// arrays owned by the route (forwarding) or the port (inject).
+/// `route`/`port`/`index` let the destination port's on_tx_done ISR return the
+/// slot to the right pool.
+struct TxSlot {
+  twai_frame_t frame{};
+  uint8_t payload[MAX_FRAME_DATA_LEN]{};
+  GatewayRoute *route{nullptr};  // owning route (forward slots), or ...
+  GatewayPort *port{nullptr};    // ... owning port (inject slots)
+  uint8_t index{0};
+};
+
+/// Runtime-updatable patch handle for rules with an `id`.
+/// set_byte()/set_can_id() stage into the inactive bank; commit() publishes
+/// atomically. Loop context only; config validation guarantees only declared
+/// entries are touched, and the byte's codegen-fixed mask is re-applied on
+/// every stage.
+class RulePatch {
+ public:
+  void set_byte(uint8_t index, uint8_t value) {
+    if (index >= MAX_FRAME_DATA_LEN)
+      return;
+    PatchData &staged = this->banks_.stage();
+    staged.or_value[index] = value & static_cast<uint8_t>(~staged.and_mask[index]);
+  }
+  void set_can_id(uint32_t can_id) {
+    PatchData &staged = this->banks_.stage();
+    // The rule's output frame type is fixed at codegen; mask runtime-staged
+    // IDs to that type's width so a templated value can never make the
+    // hardware truncate a too-wide ID on the wire. Static values are bounded
+    // at validation time already.
+    staged.new_can_id = can_id & (staged.new_extended ? MAX_EXTENDED_ID : MAX_STANDARD_ID);
+  }
+  void commit() { this->banks_.commit(); }
+
+ protected:
+  friend class GatewayRoute;
+  void init_(const PatchData &initial) { this->banks_.init(initial); }
+  const PatchBanks *banks_ptr_() const { return &this->banks_; }
+
+ private:
+  PatchBanks banks_;
+};
+
+/// One directed route. Owns its compiled rule table, its counters, and the
+/// TX slot pool frames travel in.
+class GatewayRoute {
+ public:
+  GatewayRoute(GatewayPort *from, GatewayPort *to, uint8_t rule_count, bool default_accept);
+
+  /// Codegen: append one compiled rule (see the symbol contract in __init__.py
+  /// for the argument encoding). Runs at construction time, before setup().
+  void add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flags, uint32_t new_id, uint64_t and_mask,
+                uint64_t or_value, RulePatch *patch);
+
+  const RouteCounters &counters() const { return this->counters_; }
+  /// A diagnostics consumer (sensor hub) reads this route's counters; the
+  /// hardware filter offload must then stay off so every frame is counted.
+  void mark_observed() { this->observed_ = true; }
+
+ protected:
+  friend class CanGateway;
+  friend class GatewayPort;
+
+  GatewayPort *from_;
+  GatewayPort *to_;
+  bool observed_{false};
+  FixedVector<RuleEntry> rules_;
+  RouteTable table_{};
+  RouteCounters counters_{};
+  // Invariant coupling: pool_ tracks occupancy of slots_; the driver holds
+  // pointers into slots_ until on_tx_done.
+  SlotPool<CAN_GATEWAY_TX_SLOTS> pool_{};
+  TxSlot slots_[CAN_GATEWAY_TX_SLOTS]{};
+};
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+/// Base for anything that consumes decoded/observed frames from a port (the
+/// signal-decode entities; a future transport layer can subscribe the same
+/// way). A single static trampoline recovers the consumer from the ring-drain
+/// dispatch's `void *ctx`, so the port's subscriber registry stays a flat array
+/// of pointer-sized {fn, ctx} entries — no std::function, no per-frame heap.
+class CanGatewayFrameConsumer {
+ public:
+  virtual ~CanGatewayFrameConsumer() = default;
+  /// Called in loop context (ring drain) with a non-owning view valid only for
+  /// the call. Registration order across consumers is preserved (B24).
+  virtual void on_frame(const FrameView &view) = 0;
+};
+
+inline void can_gateway_consumer_trampoline(void *ctx, const FrameView &view) {
+  static_cast<CanGatewayFrameConsumer *>(ctx)->on_frame(view);
+}
+#endif
+
+/// One TWAI controller. Created by codegen in declaration order — port
+/// index 0 becomes TWAI0, index 1 TWAI1 (driver allocates controllers in
+/// creation order).
+class GatewayPort {
+ public:
+  GatewayPort(uint8_t index, int8_t rx_pin, int8_t tx_pin, uint32_t bit_rate)
+      : index_(index), rx_pin_(rx_pin), tx_pin_(tx_pin), bit_rate_(bit_rate) {}
+
+  void set_listen_only(bool listen_only) { this->listen_only_ = listen_only; }
+  void set_self_test(bool self_test) { this->self_test_ = self_test; }
+  void set_open_drain_tx(bool open_drain_tx) { this->open_drain_tx_ = open_drain_tx; }
+  void set_tx_queue_depth(uint8_t tx_queue_depth) { this->tx_queue_depth_ = tx_queue_depth; }
+
+  template<typename F> void add_on_bus_off_callback(F &&callback) {
+    this->bus_off_callback_.add(std::forward<F>(callback));
+  }
+  template<typename F> void add_on_recovered_callback(F &&callback) {
+    this->recovered_callback_.add(std::forward<F>(callback));
+  }
+
+  /// Frame injection. Loop context only, never blocks.
+  /// Returns false (with a throttled warning) when the port cannot transmit
+  /// (listen-only, bus-off), no inject slot is free, or the TX queue is full.
+  bool inject(uint32_t can_id, bool extended, bool rtr, const uint8_t *data, uint8_t len);
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+  /// Observation registration (A14). Must run before the component's setup()
+  /// (codegen emits these), which freezes the subscribed-ID set. Every added
+  /// subscriber marks the port observed so the hardware filter offload stays
+  /// off (B25) — hardware-rejected frames would silently vanish from the view.
+  ///
+  /// Subscribe to one message ID: the {fn, ctx} pair is invoked in loop context
+  /// with a FrameView for each matching frame. The transport layer passes a
+  /// static trampoline + its object pointer; decode entities use
+  /// subscribe_consumer() below.
+  void subscribe(uint32_t can_id, bool extended, FrameCallbackFn fn, void *ctx) {
+    this->subscribers_.push_back(FrameSubscriber{can_id, extended, false, fn, ctx});
+    this->observed_ = true;
+  }
+  /// Subscribe to every received frame (a raw sniffer). Sets observe_all.
+  void subscribe_all(FrameCallbackFn fn, void *ctx) {
+    this->subscribers_.push_back(FrameSubscriber{0, false, true, fn, ctx});
+    this->observe_all_ = true;
+    this->observed_ = true;
+  }
+  /// Register a decode entity (or any CanGatewayFrameConsumer). Convenience over
+  /// subscribe() that wires the shared consumer trampoline.
+  void subscribe_consumer(uint32_t can_id, bool extended, CanGatewayFrameConsumer *consumer) {
+    this->subscribe(can_id, extended, &can_gateway_consumer_trampoline, consumer);
+  }
+  bool observes() const { return this->observed_; }
+#endif
+
+  // Set from the port config (always emitted by codegen); used only when the
+  // port observes. Bounds the ring records drained per loop iteration (B21).
+  void set_max_frames_per_loop(uint8_t max_frames_per_loop) { this->max_frames_per_loop_ = max_frames_per_loop; }
+
+  bool is_bus_off() const {
+    return this->state_.load(std::memory_order_relaxed) == static_cast<uint8_t>(TWAI_ERROR_BUS_OFF);
+  }
+  const PortCounters &counters() const { return this->counters_; }
+  uint32_t bit_rate() const { return this->bit_rate_; }
+  /// TEC/REC gauges for the sensor hub, via twai_node_get_info().
+  bool read_error_counters(uint16_t &tec, uint16_t &rec) const;
+
+#ifdef USE_CAN_GATEWAY_STATS
+  /// Cumulative estimated on-wire bits seen (RX) and driven (TX) on this port's
+  /// bus. Monotonic; the reader derives a load percentage from the delta over
+  /// its own interval. Written only in ISR context, read in loop.
+  uint32_t rx_bits() const { return this->rx_bits_.load(std::memory_order_relaxed); }
+  uint32_t tx_bits() const { return this->tx_bits_.load(std::memory_order_relaxed); }
+#endif
+
+#ifdef USE_CAN_GATEWAY_LOG_TAP
+  /// The datalogger tap (sd_logger source S2). This component only *offers* the
+  /// ring — it never knows who drains it — so a logger can layer on top without
+  /// can_gateway growing a dependency on it, and the RX ISR keeps a direct
+  /// inlined push instead of an indirect call through a registered sink.
+  /// Null on a port with `log_tap: false`. Drained by the consumer's task.
+  ObserveRing<CAN_GATEWAY_LOG_TAP_DEPTH, TapRecord> *log_tap_ring() { return this->log_tap_ring_; }
+  /// Arm the tap on this port (codegen, before setup). Allocating the ring is
+  /// what makes the ISR push live; a port left unarmed pays one null test.
+  void set_log_tap(bool enable) { this->log_tap_enabled_ = enable; }
+  /// Frames the tap had to drop because the consumer fell behind and the ring
+  /// was full (D4: drop-newest, never block the producer). A logger reports this
+  /// as its own dropped count — a stalled SD write must never stall the ISR.
+  uint32_t log_tap_dropped() const { return this->log_tap_dropped_.load(std::memory_order_relaxed); }
+#endif
+
+  // Fast path, ISR context (definitions in can_gateway.cpp, IRAM_ATTR).
+  // Not public API: these are the driver-callback entry points and must only
+  // be invoked by the TWAI driver through the registered callbacks.
+  void handle_rx_isr();
+  void handle_tx_done_isr(const twai_tx_done_event_data_t *edata);
+  void handle_state_change_isr(const twai_state_change_event_data_t *edata);
+  void handle_error_isr(twai_error_flags_t err_flags);
+
+ protected:
+  friend class CanGateway;
+  friend class GatewayRoute;
+
+  /// Node bring-up: create, filter-offload, register callbacks, enable.
+  /// `route_out` is the port's future outbound route, passed in because
+  /// route_out_ itself is only wired once every port is up. Non-const so an
+  /// observing port can mark it observed (B25) before the filter-offload check.
+  bool start_(GatewayRoute *route_out, const std::atomic<bool> *gateway_enabled, uint8_t interrupt_priority);
+  /// Program the hardware mask filter when the outbound rule set collapses
+  /// onto it and no diagnostics consumer needs to see rejected frames.
+  void try_hw_filter_offload_(const GatewayRoute *route);
+  /// Control-plane duties: recovery backoff, edge automations,
+  /// diagnostics publishing. Called from CanGateway::loop().
+  void loop_(uint32_t now_ms);
+
+#ifdef USE_CAN_GATEWAY_STATS
+  /// Log one bus-statistics line for this port: load since the last call, error
+  /// counters, TEC/REC. When per-ID timings are enabled it also arms the ID
+  /// dump, which log_id_timings_step_() then writes out. Loop context; called
+  /// from CanGateway::loop() on the log interval.
+  void log_statistics_(uint32_t now_ms);
+#ifdef USE_CAN_GATEWAY_ID_STATS
+  /// Emit at most ID_LOG_LINES_PER_PASS lines of the armed per-ID timing dump
+  /// and remember where to resume. Called from CanGateway::loop() on EVERY
+  /// pass, not just the log interval, so a table of up to id_timings_max
+  /// entries drains over consecutive passes instead of stalling one of them.
+  /// No-op (one bool test) while no dump is in flight.
+  void log_id_timings_step_();
+#endif
+#endif
+
+#ifdef CAN_GATEWAY_HAS_RX_TAPS
+  /// Every non-forwarding consumer of a frame this port took off the wire, in
+  /// one place: bus-load bits, per-ID timing, the snapshot ring, the
+  /// observation ring. Runs for every frame retrieved — forwarded, filtered or
+  /// shed — and always before process_frame(), so observation sees the wire
+  /// pre-patch. always_inline like release_slot(): it dissolves into its ISR
+  /// callers, so it needs no flash symbol of its own and the forwarding fast
+  /// path keeps the straight line it had when this block was written out inline.
+  /// `shed` marks a frame that was on this port's wire but was not forwarded.
+  /// It is a compile-time constant at every call site and this function is
+  /// always_inline, so the forwarding fast path folds it away to nothing.
+  CAN_GATEWAY_CORE_INLINE void run_rx_taps_(uint32_t can_id, bool extended, bool rtr, uint8_t dlc, const uint8_t *data,
+                                            bool shed = false) {
+#ifdef USE_CAN_GATEWAY_STATS
+    this->rx_bits_.fetch_add(estimate_frame_bits(extended, rtr, dlc), std::memory_order_relaxed);
+#ifdef USE_CAN_GATEWAY_ID_STATS
+    if (this->id_timing_ != nullptr)
+      this->id_timing_->record(can_id, extended, static_cast<uint32_t>(esp_timer_get_time()));
+#endif
+#endif
+#ifdef USE_CAN_GATEWAY_SNAPSHOT
+    if (this->snapshot_ring_ != nullptr) {
+      FrameSnapshot snapshot;
+      snapshot.can_id = can_id;
+      snapshot.dlc = dlc;
+      snapshot.extended = extended;
+      snapshot.rtr = rtr;
+      for (uint8_t i = 0; i < dlc; i++)
+        snapshot.data[i] = data[i];
+      this->snapshot_ring_->push(snapshot);
+    }
+#endif
+#ifdef USE_CAN_GATEWAY_OBSERVE
+    this->observe_frame_(can_id, extended, rtr, dlc, data);
+#endif
+#ifdef USE_CAN_GATEWAY_LOG_TAP
+    if (this->log_tap_ring_ != nullptr) {
+      TapRecord record;
+      // Stamped here, in the RX ISR, not when the writer task gets round to it:
+      // an SD write-latency spike must shift nothing in the log's time base.
+      record.t_us = static_cast<uint32_t>(esp_timer_get_time());
+      record.can_id = can_id;
+      record.dlc = dlc;
+      record.flags = static_cast<uint8_t>((extended ? TAP_FLAG_EXTENDED : 0) | (rtr ? TAP_FLAG_RTR : 0) |
+                                          (shed ? TAP_FLAG_SHED : 0));
+      record.source = this->index_;
+      for (uint8_t i = 0; i < dlc; i++)
+        record.data[i] = data[i];
+      if (!this->log_tap_ring_->push(record))
+        this->log_tap_dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
+  }
+  /// Does any tap on this port have a consumer at all? Constant true once
+  /// statistics are built in — bus load is measured for every frame on the
+  /// wire — otherwise one or two null checks. Only the shed path asks: a port
+  /// that consumes nothing must not pay a receive for a frame nobody wants.
+  CAN_GATEWAY_CORE_INLINE bool rx_taps_active_() const {
+#ifdef USE_CAN_GATEWAY_STATS
+    return true;
+#else
+    bool active = false;
+#ifdef USE_CAN_GATEWAY_SNAPSHOT
+    active = active || this->snapshot_ring_ != nullptr;
+#endif
+#ifdef USE_CAN_GATEWAY_OBSERVE
+    active = active || this->observe_ring_ != nullptr;
+#endif
+#ifdef USE_CAN_GATEWAY_LOG_TAP
+    // A tapped port has a consumer even in a build with no diagnostics at all,
+    // and a shed frame is exactly the one a log must not silently lose.
+    active = active || this->log_tap_ring_ != nullptr;
+#endif
+    return active;
+#endif
+  }
+  /// RX-ISR receive for every frame that is not forwarded into a TX slot:
+  /// retrieve into the static staging frame, then tap it. Used by a route-less
+  /// port with an RX consumer — an observation ring (A12) or the datalogger
+  /// tap ring — and by the shed path.
+  void receive_into_staging_(bool shed = false);
+  /// RX-ISR shed path: forwarding was declined (disabled / destination bus-off
+  /// / no slot), but the frame was on this port's wire all the same, so its
+  /// taps must still see it — shedding forwarding must not shed observation
+  /// (Issue #1). One predicate on a port with no consumer, which then leaves
+  /// the frame to the driver.
+  void tap_shed_frame_();
+#else
+  /// Nothing consumes a received frame in this build beyond forwarding it, so
+  /// both taps compile away: the fast path runs straight from receive into the
+  /// rule engine, and a shed stays a counter increment and a return with no
+  /// receive at all — the v0.5 data plane, byte for byte.
+  CAN_GATEWAY_CORE_INLINE void run_rx_taps_(uint32_t, bool, bool, uint8_t, const uint8_t *, bool = false) {}
+  CAN_GATEWAY_CORE_INLINE void tap_shed_frame_() {}
+#endif
+
+  uint8_t index_;
+  int8_t rx_pin_;
+  int8_t tx_pin_;
+  uint32_t bit_rate_;
+  bool listen_only_{false};
+  bool self_test_{false};
+  bool open_drain_tx_{false};
+  uint8_t tx_queue_depth_{8};
+
+  twai_node_handle_t node_{nullptr};
+  bool hw_filter_engaged_{false};
+  /// Written by on_state_change (ISR), read by the fast path (peer bus-off
+  /// check) and the control plane (recovery).
+  std::atomic<uint8_t> state_{static_cast<uint8_t>(TWAI_ERROR_ACTIVE)};
+  uint8_t last_loop_state_{static_cast<uint8_t>(TWAI_ERROR_ACTIVE)};
+  RecoveryBackoff backoff_{};
+  PortCounters counters_{};
+  /// The (single) route whose `from` is this port; nullptr for
+  /// destination-only ports. Wired in CanGateway::setup().
+  GatewayRoute *route_out_{nullptr};
+  const std::atomic<bool> *gateway_enabled_{nullptr};
+  SlotPool<CAN_GATEWAY_INJECT_SLOTS> inject_pool_{};
+  TxSlot inject_slots_[CAN_GATEWAY_INJECT_SLOTS]{};
+  uint32_t last_inject_warn_ms_{0};
+  /// Previous TEC/REC read, for deriving bus_err from their upward movement in
+  /// loop_() (loop context only; see the bus_err comment there).
+  static constexpr uint32_t ERR_POLL_INTERVAL_MS = 500;
+  uint16_t last_tec_{0};
+  uint16_t last_rec_{0};
+  bool err_counters_seeded_{false};
+  uint32_t last_err_poll_ms_{0};
+  /// FIFO mirror of every frame handed to THIS port's driver node (forwards
+  /// from the inbound route + own injects), for bus-off orphan reclamation
+  /// (see OutstandingTracker's driver-contract comment). Mutated from the
+  /// peer's RX ISR, this port's tx_done ISR, and loop context under mux_.
+  OutstandingTracker<TxSlot *, CAN_GATEWAY_TX_SLOTS + CAN_GATEWAY_INJECT_SLOTS> outstanding_{};
+  /// Serializes loop-context tracker access against both TWAI ISRs
+  /// (single-core: masking interrupts is sufficient; ISRs never lock).
+  portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
+  /// One eager head-reclaim per bus-off event (loop context only).
+  bool bus_off_head_reclaimed_{true};
+  /// Return a slot to its owning pool (route forward pool or port inject
+  /// pool). Dissolves into its ISR callers (always_inline, no flash symbol).
+  static CAN_GATEWAY_CORE_INLINE void release_slot(TxSlot *slot) {
+    if (slot->route != nullptr) {
+      slot->route->pool_.release(slot->index);
+    } else {
+      slot->port->inject_pool_.release(slot->index);
+    }
+  }
+  /// Release a bus-off orphan back to its pool and account it (tx_fail).
+  void reclaim_orphan_(TxSlot *orphan);
+  LazyCallbackManager<void()> bus_off_callback_{};
+  LazyCallbackManager<void()> recovered_callback_{};
+
+#ifdef USE_CAN_GATEWAY_STATS
+  /// Estimated on-wire bits, accumulated in the RX ISR (rx) and the tx_done ISR
+  /// (tx). Single writer each; the control plane only reads.
+  std::atomic<uint32_t> rx_bits_{0};
+  std::atomic<uint32_t> tx_bits_{0};
+  /// Loop-context bookkeeping for the periodic log's load delta.
+  uint32_t last_log_rx_bits_{0};
+  uint32_t last_log_tx_bits_{0};
+  uint32_t last_log_ms_{0};
+  bool log_seeded_{false};
+#ifdef USE_CAN_GATEWAY_ID_STATS
+  /// Per-ID arrival timings (opt-in). Allocated once at setup in internal RAM;
+  /// null when id_timings is off, so the ISR path is one pointer check.
+  IdTimingTable<CAN_GATEWAY_ID_STATS_MAX> *id_timing_{nullptr};
+  /// Per-ID dump budget: lines written per port per loop pass. Sized so the
+  /// dump never blocks rather than merely blocks less. ESPHome's ESP32 logger
+  /// is uart_write_bytes into a 512-byte driver TX ring at 115200 baud, which
+  /// drains ~184 bytes per ~16 ms loop pass; an ID line is ~70 characters, so
+  /// one line on each of two ports (~140 bytes) stays under the drain rate and
+  /// uart_write_bytes returns without waiting. Anything above that saturates
+  /// the ring and every further line costs its full ~6 ms of wire time. A full
+  /// 128-entry table then takes ~128 passes (~2 s of drip) instead of one
+  /// ~1.5 s stall that trips ESPHome's 50 ms blocking warning.
+  static constexpr uint16_t ID_LOG_LINES_PER_PASS = 1;
+  /// Cursor into the armed per-ID dump: next entry to write, and the table size
+  /// captured when the interval armed it. Loop context only.
+  uint16_t id_log_cursor_{0};
+  uint16_t id_log_total_{0};
+  bool id_log_active_{false};
+#endif
+#endif
+
+#ifdef USE_BINARY_SENSOR
+  binary_sensor::BinarySensor *bus_off_sensor_{nullptr};
+#endif
+#ifdef USE_CAN_GATEWAY_SNAPSHOT
+  static constexpr uint8_t SNAPSHOT_RING_SIZE = 4;
+  SnapshotRing<SNAPSHOT_RING_SIZE> *snapshot_ring_{nullptr};
+#ifdef USE_TEXT_SENSOR
+  text_sensor::TextSensor *last_frame_sensor_{nullptr};
+  uint32_t snapshot_throttle_ms_{1000};
+  uint32_t last_snapshot_publish_ms_{0};
+#endif
+#endif
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+  /// Setup (start_) builds the observation structures from the subscribers
+  /// registered at codegen: the static sorted ID set for the ISR membership
+  /// test and the ISR->loop ring. Both are null (and unallocated) on a port
+  /// with no consumer, so an unobserved port pays nothing (B26). Marks
+  /// `route_out` observed when the port both forwards and observes (B25).
+  void build_observation_(GatewayRoute *route_out);
+  /// RX-ISR push of one received frame to the ring, gated by the subscribed-ID
+  /// set (the bounded N7 cost). Counts observed / observe_overflow. A port that
+  /// both forwards and observes keeps its route's hardware filter offload off
+  /// (B25), so every frame the port accepts reaches this.
+  void observe_frame_(uint32_t can_id, bool extended, bool rtr, uint8_t dlc, const uint8_t *data);
+  /// Loop: drain up to max_frames_per_loop records and dispatch each to its
+  /// subscribers in registration order (A14/B21/B24).
+  void drain_observations_();
+
+  // Subscriber registry, populated by subscribe*() before setup and const
+  // afterward; iterated (read-only) by the loop-side dispatch. The one-time
+  // build allocates; nothing here allocates per frame (N8).
+  std::vector<FrameSubscriber> subscribers_;
+  SubscribedSet<CAN_GATEWAY_MAX_OBSERVE_IDS> *subscribed_set_{nullptr};
+  ObserveRing<CAN_GATEWAY_OBSERVE_QUEUE_DEPTH> *observe_ring_{nullptr};
+  bool observed_{false};
+  bool observe_all_{false};
+#endif
+
+#ifdef USE_CAN_GATEWAY_LOG_TAP
+  ObserveRing<CAN_GATEWAY_LOG_TAP_DEPTH, TapRecord> *log_tap_ring_{nullptr};
+  std::atomic<uint32_t> log_tap_dropped_{0};
+  bool log_tap_enabled_{false};
+#endif
+
+#ifdef CAN_GATEWAY_HAS_RX_TAPS
+  /// Static RX staging frame for every receive that has no TX slot to land in:
+  /// the observe-only (no-route) path (A12) and the shed path. Written and read
+  /// only inside this port's RX ISR, and only for a frame that is not being
+  /// forwarded — the forwarding fast path receives straight into its TX slot
+  /// and never touches this.
+  twai_frame_t rx_staging_frame_{};
+  uint8_t rx_staging_payload_[MAX_FRAME_DATA_LEN]{};
+#endif
+  // Always present (codegen always sets it); consumed only when observing.
+  uint8_t max_frames_per_loop_{CAN_GATEWAY_OBSERVE_QUEUE_DEPTH};
+};
+
+/// A timed (cyclic) frame sender (`cyclic_sends` in YAML). Transmits the latest
+/// staged payload on its port every `interval_ms`, entirely from the main loop
+/// (like `inject`): it never touches the RX fast path and makes no
+/// latency promise. "Preprepared" data — the payload is staged off-path by
+/// set_data() and the timer only hands the most recent bytes to the driver, so
+/// no value is computed per tick. Update, start/stop and send are all loop
+/// context, so the payload needs no cross-context synchronization.
+class CyclicSend {
+ public:
+  CyclicSend(GatewayPort *port, uint32_t can_id, bool extended, bool rtr, uint32_t interval_ms, bool enabled)
+      : port_(port), can_id_(can_id), interval_ms_(interval_ms), extended_(extended), rtr_(rtr), enabled_(enabled) {}
+
+  /// Codegen: initial static payload. Loop-context runtime updates go through
+  /// set_data() (identical semantics).
+  void set_data(const uint8_t *data, uint8_t len) {
+    if (len > MAX_FRAME_DATA_LEN)
+      len = MAX_FRAME_DATA_LEN;
+    for (uint8_t i = 0; i < len; i++)
+      this->data_[i] = data[i];
+    this->len_ = len;
+  }
+  void start() { this->enabled_ = true; }
+  void stop() { this->enabled_ = false; }
+  bool is_running() const { return this->enabled_; }
+
+  /// Called from CanGateway::loop(); transmits when due.
+  void loop(uint32_t now_ms) {
+    if (!this->enabled_ || now_ms - this->last_ms_ < this->interval_ms_)
+      return;
+    // Advance the schedule by exactly one interval so the average period tracks
+    // the configured value despite the ~loop-period granularity of when we run.
+    // If the loop stalled for more than one interval, resync to now instead of
+    // firing on the next few loops to catch up (no catch-up burst).
+    this->last_ms_ += this->interval_ms_;
+    if (now_ms - this->last_ms_ >= this->interval_ms_)
+      this->last_ms_ = now_ms;
+    this->port_->inject(this->can_id_, this->extended_, this->rtr_, this->data_, this->rtr_ ? 0 : this->len_);
+  }
+
+  uint32_t can_id() const { return this->can_id_; }
+  uint32_t interval_ms() const { return this->interval_ms_; }
+  const GatewayPort *port() const { return this->port_; }
+
+ protected:
+  GatewayPort *port_;
+  uint32_t can_id_;
+  uint32_t interval_ms_;
+  uint32_t last_ms_{0};
+  uint8_t data_[MAX_FRAME_DATA_LEN]{};
+  uint8_t len_{0};
+  bool extended_;
+  bool rtr_;
+  bool enabled_;
+};
+
+/// The gateway component: owns both ports, wires the routes, runs the control
+/// plane. The data plane never enters this class after setup().
+class CanGateway : public Component {
+ public:
+  explicit CanGateway(uint8_t interrupt_priority) : interrupt_priority_(interrupt_priority) {}
+
+  void setup() override;
+  void loop() override;
+  void dump_config() override;
+  float get_setup_priority() const override { return setup_priority::HARDWARE; }
+
+  void add_port(GatewayPort *port) { this->ports_.push_back(port); }
+  void add_route(GatewayRoute *route) { this->routes_.push_back(route); }
+
+#ifdef USE_CAN_GATEWAY_CYCLIC
+  void add_cyclic_send(CyclicSend *cyclic) { this->cyclic_sends_.push_back(cyclic); }
+#endif
+#ifdef USE_CAN_GATEWAY_STATS
+  /// Enable the periodic statistics log; 0 leaves only the dump_config summary.
+  void set_stats_log_interval(uint32_t interval_ms) { this->stats_log_interval_ms_ = interval_ms; }
+  /// Request per-port per-ID timing tables (allocated in setup()).
+  void set_id_timings_enabled(bool enabled) { this->id_timings_ = enabled; }
+#endif
+
+  /// Gates forwarding only; reception, diagnostics, recovery and inject keep
+  /// working. A disabled gateway still takes every frame off the wire and runs
+  /// its taps, so bus load, per-ID timing, last_frame and the decode entities
+  /// stay live — only the hand-off to the destination port stops.
+  void set_enabled(bool enabled) { this->enabled_.store(enabled, std::memory_order_relaxed); }
+  bool is_enabled() const { return this->enabled_.load(std::memory_order_relaxed); }
+
+#ifdef USE_BINARY_SENSOR
+  void set_bus_off_binary_sensor(GatewayPort *port, binary_sensor::BinarySensor *sensor) {
+    port->bus_off_sensor_ = sensor;
+  }
+#endif
+#ifdef USE_TEXT_SENSOR
+  void set_last_frame_text_sensor(GatewayPort *port, text_sensor::TextSensor *sensor, uint32_t throttle_ms);
+#endif
+
+ protected:
+  uint8_t interrupt_priority_;
+  std::atomic<bool> enabled_{true};
+  StaticVector<GatewayPort *, 2> ports_;
+  StaticVector<GatewayRoute *, 2> routes_;
+#ifdef USE_CAN_GATEWAY_CYCLIC
+  StaticVector<CyclicSend *, CAN_GATEWAY_CYCLIC_COUNT> cyclic_sends_;
+#endif
+#ifdef USE_CAN_GATEWAY_STATS
+  uint32_t stats_log_interval_ms_{0};
+  uint32_t last_stats_log_ms_{0};
+  bool id_timings_{false};
+#endif
+};
+
+// ---------------------------------------------------------------------------
+// Entity platforms
+// ---------------------------------------------------------------------------
+
+#ifdef USE_SWITCH
+/// Gateway enable switch. Boot state follows restore_mode
+/// (default RESTORE_DEFAULT_ON); without a switch the gateway boots enabled.
+class CanGatewaySwitch : public switch_::Switch, public Component, public Parented<CanGateway> {
+ public:
+  void setup() override {
+    optional<bool> restored = this->get_initial_state_with_restore_mode();
+    // restore_mode: DISABLED yields no value — take no action and publish
+    // nothing, leaving the gateway at its boot default (enabled).
+    if (restored.has_value())
+      this->write_state(*restored);
+  }
+  /// Runs before CanGateway::setup() (HARDWARE priority), so a persisted OFF
+  /// state is applied before the controllers come up — otherwise frames would
+  /// cross during the boot window between the two setups. Safe this early:
+  /// the ESP32 arch initializes preferences in app_main, before any
+  /// component's setup().
+  float get_setup_priority() const override { return setup_priority::HARDWARE + 1.0f; }
+
+ protected:
+  void write_state(bool state) override {
+    this->parent_->set_enabled(state);
+    this->publish_state(state);
+  }
+};
+#endif
+
+#ifdef USE_SENSOR
+/// Polling hub for route counters, port counters, and TEC/REC gauges.
+class CanGatewaySensorHub : public PollingComponent {
+ public:
+  /// Sensor slot indices. Must match ALL_KINDS in sensor.py exactly — the
+  /// Python side emits these indices positionally, and its test suite locks
+  /// the order. Extend both together, appending only.
+  enum KindIndex : uint8_t {
+    KIND_FORWARDED = 0,
+    KIND_FILTERED,
+    KIND_TX_FULL,
+    KIND_BUS_OFF,
+    KIND_DISABLED,
+    KIND_INJECTED,
+    KIND_TX_FAIL,
+    KIND_BUS_ERR,
+    KIND_RECOVERIES,
+    KIND_TEC,
+    KIND_REC,
+    KIND_BUS_LOAD,
+    KIND_OBSERVED,
+    KIND_OBSERVE_OVERFLOW,
+    KIND_COUNT,
+  };
+
+  void set_route(GatewayRoute *route) {
+    this->route_ = route;
+    // Counters become externally observable; the hardware filter offload
+    // must stay off so hardware-rejected frames keep being counted.
+    route->mark_observed();
+  }
+  void set_port(GatewayPort *port) { this->port_ = port; }
+  void set_counter_sensor(uint8_t kind, sensor::Sensor *sensor) {
+    if (kind < KIND_COUNT)
+      this->sensors_[kind] = sensor;
+  }
+
+  void update() override;
+  void dump_config() override;
+
+ protected:
+  GatewayRoute *route_{nullptr};
+  GatewayPort *port_{nullptr};
+  sensor::Sensor *sensors_[KIND_COUNT]{};
+#ifdef USE_CAN_GATEWAY_STATS
+  /// Delta bookkeeping for the bus_load gauge (loop context).
+  uint32_t last_bus_load_rx_bits_{0};
+  uint32_t last_bus_load_tx_bits_{0};
+  uint32_t last_bus_load_ms_{0};
+  bool bus_load_seeded_{false};
+#endif
+};
+#endif
+
+// ---------------------------------------------------------------------------
+// Signal decode entities (v0.6, S9)
+// ---------------------------------------------------------------------------
+// Each decode entity is an ordinary ESPHome entity that also names where in the
+// CAN traffic its value lives (the modbus_controller model). It self-registers
+// into its source port as a per-ID subscriber at codegen; the port's loop-side
+// ring drain hands it a FrameView, which it decodes and publishes on change
+// (B23). Nothing here runs in the ISR or allocates per frame.
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+/// `on_frame:` — every received frame on this port, to a YAML automation.
+///
+/// The one subscriber that does not name an ID: it exists so a config can
+/// answer "what is on this wire?" without knowing in advance what to expect.
+/// The bench topology catcher is the motivating case — nodes announce
+/// themselves by MAC, so the ids cannot be enumerated at codegen time.
+///
+/// Costs: `subscribe_all()` sets `observe_all_`, which keeps the hardware
+/// filter offload off for the port (B25) and routes every frame through the
+/// observation ring, so a port with this trigger pays the full per-frame
+/// observe cost. Fine for diagnostics, deliberately not the default. The
+/// payload is passed as a borrowed pointer + length, never a container, so the
+/// hot path still allocates nothing; a lambda must copy anything it keeps.
+class CanGatewayFrameTrigger : public Trigger<uint32_t, const uint8_t *, uint8_t, bool, bool>,
+                               public CanGatewayFrameConsumer {
+ public:
+  explicit CanGatewayFrameTrigger(GatewayPort *port) {
+    port->subscribe_all(&can_gateway_consumer_trampoline, static_cast<CanGatewayFrameConsumer *>(this));
+  }
+  void on_frame(const FrameView &view) override {
+    this->trigger(view.can_id, view.data, view.dlc, view.extended, view.rtr);
+  }
+};
+
+#ifdef USE_SENSOR
+/// Numeric signal: a byte-aligned or bit-level field (<= 32 bits, either byte
+/// order, optionally signed). Engineering-units scaling is left to the standard
+/// sensor `filters:` — this publishes the raw integer.
+class CanGatewayDecodeSensor : public sensor::Sensor, public CanGatewayFrameConsumer {
+ public:
+  /// bit_mode false: `offset`/`length` are a byte offset (0-7) and byte count
+  /// (1-4). bit_mode true: a bit offset (0-63) and bit length (1-32).
+  void set_signal(uint8_t offset, uint8_t length, bool bit_mode, bool big_endian, bool is_signed) {
+    this->offset_ = offset;
+    this->length_ = length;
+    this->bit_mode_ = bit_mode;
+    this->big_endian_ = big_endian;
+    this->is_signed_ = is_signed;
+  }
+  void set_throttle(uint32_t throttle_ms) { this->throttle_ms_ = throttle_ms; }
+  /// Opt-in SNA handling: an SNA raw value publishes NaN (rendered as unknown)
+  /// instead of a bogus reading. `raw` is read only in SnaMode::EXPLICIT; in
+  /// ALL_ONES the marker is derived from the signal's own width per frame.
+  void set_sna(SnaMode mode, uint32_t raw) {
+    this->sna_mode_ = mode;
+    this->sna_raw_ = raw;
+  }
+  void on_frame(const FrameView &view) override;
+
+ protected:
+  uint8_t offset_{0};
+  uint8_t length_{1};
+  bool bit_mode_{false};
+  bool big_endian_{false};
+  bool is_signed_{false};
+  SnaMode sna_mode_{SnaMode::NONE};
+  uint32_t sna_raw_{0};
+  uint32_t throttle_ms_{0};
+  uint32_t last_raw_{0};
+  uint32_t last_publish_ms_{0};
+  bool have_last_{false};
+};
+#endif  // USE_SENSOR
+
+#ifdef USE_BINARY_SENSOR
+/// Single-bit signal: `bit` is a whole-frame bit index (byte * 8 + bit).
+class CanGatewayDecodeBinarySensor : public binary_sensor::BinarySensor, public CanGatewayFrameConsumer {
+ public:
+  void set_bit(uint8_t bit) { this->bit_ = bit; }
+  void on_frame(const FrameView &view) override;
+
+ protected:
+  uint8_t bit_{0};
+  bool last_state_{false};
+  bool have_last_{false};
+};
+#endif  // USE_BINARY_SENSOR
+
+#ifdef USE_TEXT_SENSOR
+/// One raw-integer -> string mapping entry for the enum text sensor. Values are
+/// codegen-emitted string literals in flash.
+struct CanGatewayEnumEntry {
+  uint32_t key;
+  const char *value;
+};
+
+/// Enum signal: decode a byte-aligned field and map it to a string; an
+/// unmapped value publishes as raw hex (0x...).
+class CanGatewayDecodeTextSensor : public text_sensor::TextSensor, public CanGatewayFrameConsumer {
+ public:
+  void set_signal(uint8_t offset, uint8_t length, bool big_endian) {
+    this->offset_ = offset;
+    this->length_ = length;
+    this->big_endian_ = big_endian;
+  }
+  void set_throttle(uint32_t throttle_ms) { this->throttle_ms_ = throttle_ms; }
+  void set_map(const CanGatewayEnumEntry *entries, uint16_t count) {
+    this->map_ = entries;
+    this->map_count_ = count;
+  }
+  void on_frame(const FrameView &view) override;
+
+ protected:
+  uint8_t offset_{0};
+  uint8_t length_{1};
+  bool big_endian_{false};
+  const CanGatewayEnumEntry *map_{nullptr};
+  uint16_t map_count_{0};
+  uint32_t throttle_ms_{0};
+  uint32_t last_raw_{0};
+  uint32_t last_publish_ms_{0};
+  bool have_last_{false};
+};
+#endif  // USE_TEXT_SENSOR
+#endif  // USE_CAN_GATEWAY_OBSERVE
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+/// Shared payload plumbing for the data-carrying actions: either a pointer to
+/// codegen-emitted static data (lives in flash, no RAM copy) or a templated
+/// producer. Loop context; the temporary vector is the documented cost of
+/// templated data, mirroring canbus.send.
+template<typename... Ts> class DataPayload {
+ public:
+  void set_data_static(const uint8_t *data, uint8_t len) {
+    this->static_data_ = data;
+    this->static_len_ = static_cast<int8_t>(len);
+  }
+  // Stateless lambdas (generated by ESPHome) convert to function pointers.
+  void set_data_template(std::vector<uint8_t> (*func)(Ts...)) {
+    this->template_func_ = func;
+    this->static_len_ = -1;
+  }
+
+ protected:
+  /// Resolve the payload and hand it to `sink(data, len)`.
+  template<typename F> void with_payload_(F &&sink, const Ts &...x) {
+    if (this->static_len_ >= 0) {
+      sink(this->static_data_, static_cast<uint8_t>(this->static_len_));
+      return;
+    }
+    std::vector<uint8_t> data = this->template_func_(x...);
+    uint8_t len = data.size() > MAX_FRAME_DATA_LEN ? MAX_FRAME_DATA_LEN : static_cast<uint8_t>(data.size());
+    sink(data.data(), len);
+  }
+
+  const uint8_t *static_data_{nullptr};
+  int8_t static_len_{0};  ///< >= 0: static mode with length; -1: template mode.
+  std::vector<uint8_t> (*template_func_)(Ts...){nullptr};
+};
+
+template<typename... Ts> class SetPatchAction : public Action<Ts...>, public Parented<RulePatch> {
+ public:
+  /// Codegen: size the byte list before the add_*_byte calls (count is fixed
+  /// by the YAML).
+  void init_bytes(uint8_t count) { this->bytes_.init(count); }
+  void add_static_byte(uint8_t index, uint8_t value) {
+    this->bytes_.push_back(ByteEntry{index, TemplatableValue<uint8_t, Ts...>(value)});
+  }
+  // Stateless lambdas (generated by ESPHome) implicitly convert to function pointers.
+  void add_templated_byte(uint8_t index, uint8_t (*value)(Ts...)) {
+    this->bytes_.push_back(ByteEntry{index, TemplatableValue<uint8_t, Ts...>(value)});
+  }
+  void set_can_id(uint32_t can_id) { this->can_id_ = TemplatableValue<uint32_t, Ts...>(can_id); }
+  void set_can_id_template(uint32_t (*can_id)(Ts...)) { this->can_id_ = TemplatableValue<uint32_t, Ts...>(can_id); }
+
+  void play(const Ts &...x) override {
+    if (this->can_id_.has_value())
+      this->parent_->set_can_id(this->can_id_.value().value(x...));
+    for (size_t i = 0; i < this->bytes_.size(); i++)
+      this->parent_->set_byte(this->bytes_[i].index, this->bytes_[i].value.value(x...));
+    this->parent_->commit();
+  }
+
+ protected:
+  struct ByteEntry {
+    uint8_t index;
+    TemplatableValue<uint8_t, Ts...> value;
+  };
+  FixedVector<ByteEntry> bytes_;
+  optional<TemplatableValue<uint32_t, Ts...>> can_id_{};
+};
+
+/// can_gateway.send (v0.6; can_gateway.inject alias). Sends a frame on a port
+/// from any automation. can_id is templatable; the payload comes from
+/// DataPayload (static or templated).
+template<typename... Ts>
+class InjectAction : public Action<Ts...>, public Parented<GatewayPort>, public DataPayload<Ts...> {
+ public:
+  void set_flags(bool extended, bool rtr) {
+    this->extended_ = extended;
+    this->rtr_ = rtr;
+  }
+  void set_can_id(uint32_t can_id) { this->can_id_ = TemplatableValue<uint32_t, Ts...>(can_id); }
+  void set_can_id_template(uint32_t (*func)(Ts...)) { this->can_id_ = TemplatableValue<uint32_t, Ts...>(func); }
+
+  void play(const Ts &...x) override {
+    uint32_t can_id = this->can_id_.value(x...);
+    this->with_payload_(
+        [this, can_id](const uint8_t *data, uint8_t len) {
+          this->parent_->inject(can_id, this->extended_, this->rtr_, data, len);
+        },
+        x...);
+  }
+
+ protected:
+  TemplatableValue<uint32_t, Ts...> can_id_{};
+  bool extended_{false};
+  bool rtr_{false};
+};
+
+// ---------------------------------------------------------------------------
+// Cyclic-send actions: update the staged payload, start, or stop a timed
+// sender. Loop context, like the timer itself.
+// ---------------------------------------------------------------------------
+
+template<typename... Ts>
+class SetCyclicDataAction : public Action<Ts...>, public Parented<CyclicSend>, public DataPayload<Ts...> {
+ public:
+  void play(const Ts &...x) override {
+    this->with_payload_([this](const uint8_t *data, uint8_t len) { this->parent_->set_data(data, len); }, x...);
+  }
+};
+
+template<typename... Ts> class StartCyclicAction : public Action<Ts...>, public Parented<CyclicSend> {
+ public:
+  void play(const Ts &...x) override { this->parent_->start(); }
+};
+
+template<typename... Ts> class StopCyclicAction : public Action<Ts...>, public Parented<CyclicSend> {
+ public:
+  void play(const Ts &...x) override { this->parent_->stop(); }
+};
+
+}  // namespace esphome::can_gateway
+
+#endif  // USE_ESP32

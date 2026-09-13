@@ -1,0 +1,172 @@
+# Mr. Orange — CONTROL EXPERIMENT: does stock ESPHome see the same thing?
+#
+# Everything that found the fault so far ran through `can_gateway`. This config
+# takes our code out of the loop entirely, so the result cannot be an artefact
+# of our driver:
+#
+#   * NO `external_components:` block at all — nothing from `components/` is
+#     compiled in. Not can_gateway, not linbus, not sd_logger.
+#   * The CAN bus is stock ESPHome `canbus: platform: esp32_can`.
+#   * That component drives the **legacy** IDF API (`driver/twai.h`,
+#     `twai_driver_install_v2` / `twai_transmit_v2`). `can_gateway` drives the
+#     *new* node API (`esp_twai_onchip.h`, `twai_new_node_onchip`). Different
+#     driver, different register-programming path, same silicon — which is
+#     exactly what a control needs.
+#   * The numbers reported below come from Espressif's own
+#     `twai_get_status_info()`, not from any counter we maintain.
+#
+# ONE BUS AT A TIME, on purpose. `twai_get_status_info()` is the v1 API and
+# addresses the first installed controller, so exactly one `esp32_can` instance
+# may exist for its reading to be unambiguous. Run it twice:
+#
+#   # seg1 — GPIO2/GPIO3
+#   .venv/bin/esphome run tests/hil/probe-orange-stock-can.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+#   # seg2 — GPIO10/GPIO11
+#   .venv/bin/esphome -s tx_pin GPIO10 -s rx_pin GPIO11 \
+#     run tests/hil/probe-orange-stock-can.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# Run with Green's load generator live, and CHECK THE RAIL LINE FIRST. The boot
+# log must contain
+#
+#   [rail] GPIO7 high - board awake, +5V domain enabled (needs JP14 bridged)
+#
+# before any reading below means anything. A dead-looking bus with that line
+# absent is a config fault, not a board fault.
+#
+# Then the two outcomes:
+#
+#   rx=0, state=BUS_OFF / RECOVERING, tx_failed and bus_error climbing
+#       -> stock ESPHome sees it too, on a different IDF driver (legacy
+#          driver/twai.h vs can_gateway's esp_twai_onchip.h). The fault is not
+#          in our component. Next stop is the pin, via probe-orange-pins.yaml.
+#
+#   stock transmits cleanly and receives Green's frames
+#       -> the fault IS in `can_gateway`. That is the whole point of running this.
+#
+# HISTORICAL NOTE, 2026-07-29. This file was used to condemn Orange's CAN
+# front-end while it had no GPIO7 raise at all, so it ran with the transceivers
+# unpowered and could only ever return the first outcome. The hardware verdict
+# happened to be correct — a PCB swap fixed the board — but it was reached with
+# an instrument that was not measuring what it claimed. The raise is now in the
+# `esphome:` block below; do not remove it.
+substitutions:
+  tx_pin: GPIO2
+  rx_pin: GPIO3
+  bit_rate: 500KBPS
+
+esphome:
+  name: mr-orange
+  name_add_mac_suffix: false
+  # THE RAIL, RAISED INLINE — without this the whole control is worthless.
+  #
+  # GPIO7 is the C6 adapter's shared sleep rail (LIN SLP_N + 5V_ENA + the Q1/Q2
+  # domain switch) and it is LOW at reset. The CAN transceivers take VCC from
+  # that +5 V domain, so with GPIO7 low they are unpowered and this config
+  # reports rx=0 / BUS_OFF / tx_failed climbing on perfectly good hardware —
+  # which is precisely the reading the header above invites you to read as "the
+  # CAN front-end is open on the board". This file shipped without the raise and
+  # was therefore a control that could only ever confirm the hypothesis.
+  #
+  # It is written out longhand rather than pulled in from hil_common.yaml on
+  # purpose: that package carries `external_components:`, and compiling anything
+  # out of components/ into this config destroys the one property that makes it
+  # a control.
+  on_boot:
+    - priority: 900
+      then:
+        - lambda: |-
+            gpio_config_t rail = {};
+            rail.pin_bit_mask = 1ULL << GPIO_NUM_7;
+            rail.mode = GPIO_MODE_OUTPUT;
+            rail.pull_up_en = GPIO_PULLUP_DISABLE;
+            rail.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            rail.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&rail);
+            gpio_set_level(GPIO_NUM_7, 1);
+            ESP_LOGI("rail", "GPIO7 high - board awake, +5V domain enabled (needs JP14 bridged)");
+    # Identity LED, stock ESPHome only — a C6 is never checked without one.
+    - priority: -100
+      then:
+        - light.turn_on:
+            id: status_led
+            brightness: 20%
+            red: 100%
+            green: 35%
+            blue: 0%
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+# WS2812 on the plug-in DevKitC-1. `esp32_rmt_led_strip` is core ESPHome, so it
+# does not compromise the "nothing of ours is compiled in" property.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO8
+    chipset: ws2812
+    num_leds: 1
+    rgb_order: GRB
+    default_transition_length: 0s
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+globals:
+  - id: rx_count
+    type: uint32_t
+    initial_value: "0"
+  - id: tx_count
+    type: uint32_t
+    initial_value: "0"
+
+canbus:
+  - platform: esp32_can
+    id: bus
+    tx_pin: ${tx_pin}
+    rx_pin: ${rx_pin}
+    can_id: 0x100
+    bit_rate: ${bit_rate}
+    # can_id 0 with mask 0 matches every frame — a raw sniffer.
+    on_frame:
+      - can_id: 0
+        can_id_mask: 0
+        then:
+          - lambda: "id(rx_count)++;"
+
+interval:
+  - interval: 1s
+    then:
+      - canbus.send:
+          canbus_id: bus
+          can_id: 0x100
+          data: [0xAA, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+      - lambda: "id(tx_count)++;"
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          twai_status_info_t st = {};
+          if (twai_get_status_info(&st) != ESP_OK) {
+            ESP_LOGW("stock", "twai_get_status_info() failed");
+            return;
+          }
+          const char *state = "?";
+          switch (st.state) {
+            case TWAI_STATE_STOPPED:    state = "STOPPED"; break;
+            case TWAI_STATE_RUNNING:    state = "RUNNING"; break;
+            case TWAI_STATE_BUS_OFF:    state = "BUS_OFF"; break;
+            case TWAI_STATE_RECOVERING: state = "RECOVERING"; break;
+          }
+          ESP_LOGI("stock",
+                   "TX=${tx_pin} RX=${rx_pin} @ ${bit_rate} | state=%s sent=%" PRIu32
+                   " rx=%" PRIu32 " | TEC=%" PRIu32 " REC=%" PRIu32 " tx_failed=%" PRIu32
+                   " bus_error=%" PRIu32 " arb_lost=%" PRIu32 " queued_tx=%" PRIu32,
+                   state, id(tx_count), id(rx_count), st.tx_error_counter,
+                   st.rx_error_counter, st.tx_failed_count, st.bus_error_count,
+                   st.arb_lost_count, st.msgs_to_tx);

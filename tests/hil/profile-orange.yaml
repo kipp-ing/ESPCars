@@ -1,0 +1,32 @@
+# Mr. Orange, the production-shape DUT, with every CPU measurement layer switched on.
+#
+# This is `stress-orange-gateway.yaml` included whole plus the two profiling packages — not a
+# copy of it. The DUT config has one source of truth, and a profiling run must exercise exactly
+# the configuration whose CPU is in question, down to the queue depths and the rotation bounds.
+#
+#   .venv/bin/esphome run tests/hil/profile-orange.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# It answers three questions, one per layer, in the same log:
+#
+#   [cpu]            100 - idle share            how loaded is the board
+#   [task]           per FreeRTOS task           sdlog_wr vs lin_uart_evt vs loopTask vs IDLE
+#   [runtime_stats]  per component loop()        which component inside loopTask
+#
+# Read them in that order. The first is the only one that is a total; the other two partition it,
+# and neither partitions ISR time — see the caveats in task_stats.yaml, which is where the TWAI
+# RX ISR (all of can_gateway's forwarding) does *not* appear.
+#
+# **Not a gate run.** runtime_stats instruments every component dispatch, so this config's CPU
+# figure is its own and must not be compared against the numbers in M2 stress run (2026-07-26, git history)
+# or against `verify.py`'s 19.4 laps/s baseline — those were measured without it. Profile here,
+# then confirm the change on the unmodified stress config.
+#
+# The node name is deliberately left at `mr-orange`: the bench tooling (script/hil/ports.py,
+# topology.py) identifies boards by MAC and name, and a profiling build that announced itself as
+# a different board would need every --expect on the bench rewritten. The cost is a full rebuild
+# when switching between this config and the stress config, which share a build directory.
+packages:
+  dut: !include stress-orange-gateway.yaml
+  tasks: !include task_stats.yaml
+  runtime: !include runtime_stats.yaml

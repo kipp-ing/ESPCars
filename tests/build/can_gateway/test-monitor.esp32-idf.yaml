@@ -1,0 +1,26 @@
+# Single-bus monitor on a classic ESP32 — one TWAI controller, no routes.
+# This is the target Mr. Purple's phase P4 runs (docs/commissioning-mr-purple.md);
+# it exists so CI keeps compiling can_gateway for a single-controller variant,
+# not just the two-controller C6.
+substitutions:
+  # CAN_LIN_ESP32 native TWAI pins: TX GPIO26 / RX GPIO25 into SN65HVD230 U4.
+  mon_tx_pin: GPIO26
+  mon_rx_pin: GPIO25
+
+esphome:
+  name: can-monitor-esp32
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+packages:
+  can_gateway: !include common_monitor.yaml

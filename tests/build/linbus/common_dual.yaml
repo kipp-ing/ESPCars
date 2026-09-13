@@ -1,0 +1,85 @@
+# Two LIN segments on one chip — the CAN_LIN_ESP32 ("Mr. Purple") layout.
+# LIN0 slave on UART1, LIN1 listener on UART2, no shared pin, no shared UART.
+# See docs/commissioning-mr-purple.md (W1, phase P3).
+#
+# This is also the shape of the P3 bring-up config: a slave that answers the C6
+# partner's poll on 0x20, and a listener sniffing the same wire.
+
+linbus:
+  - id: lin0
+    tx_pin: ${lin0_tx_pin}
+    rx_pin: ${lin0_rx_pin}
+    cs_pin: ${lin0_cs_pin}
+    uart_port: UART_NUM_1
+    baud_rate: 19200
+    mode: slave
+    responses:
+      - lin_id: 0x20
+        data: [0x00, 0x00, 0x00, 0x01]
+        checksum: enhanced
+    rx_ids:
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+    on_frame:
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+        then:
+          - lambda: |-
+              ESP_LOGD("lin0", "master frame 0x21: %02X %02X", data[0], data[1]);
+    on_error:
+      - then:
+          - logger.log:
+              format: "LIN0 fault: %s"
+              args: ["x.c_str()"]
+
+  - id: lin1
+    tx_pin: ${lin1_tx_pin}
+    rx_pin: ${lin1_rx_pin}
+    cs_pin: ${lin1_cs_pin}
+    uart_port: UART_NUM_2
+    baud_rate: 19200
+    mode: listener
+    rx_ids:
+      - lin_id: 0x20
+        length: 4
+        checksum: enhanced
+      - lin_id: 0x21
+        length: 4
+        checksum: enhanced
+    on_frame:
+      - lin_id: 0x20
+        length: 4
+        checksum: enhanced
+        then:
+          - lambda: |-
+              ESP_LOGD("lin1", "sniffed 0x20, %d bytes", data_length);
+
+# Both instances must be addressable independently — that is the whole point of
+# MULTI_CONF, and it is what breaks first if the sensor platforms ever regress
+# to assuming a single parent.
+sensor:
+  - platform: linbus
+    linbus_id: lin0
+    frames_received:
+      name: "LIN0 frames"
+    checksum_errors:
+      name: "LIN0 checksum errors"
+    bus_load:
+      name: "LIN0 bus load"
+  - platform: linbus
+    linbus_id: lin1
+    frames_received:
+      name: "LIN1 frames"
+    checksum_errors:
+      name: "LIN1 checksum errors"
+
+button:
+  - platform: template
+    name: "Stage LIN0 response"
+    on_press:
+      - linbus.update_response:
+          id: lin0
+          lin_id: 0x20
+          data: [0xAA, 0x55, 0xAA, 0x55]

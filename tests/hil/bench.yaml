@@ -1,0 +1,22 @@
+# The physical HIL bench: three ESP32-C6 reference boards on a USB hub.
+# LIN: all three on one 12V bus. CAN: Green and Blue each on their own
+# segment (CAN1 only); Orange bridges the two segments (CAN1<->CAN2).
+# Each board's WS2812 glows its own color, pulses that color's brightness
+# on token handling, and turns red on fault — never white.
+#
+# `mac` is the identity; there is deliberately no `port` here, because hub
+# paths renumber on every reset. script/hil/ports.py resolves name -> port at
+# run time, and both flash.sh and verify.py go through it.
+boards:
+  - name: mr-green
+    config: tests/hil/mr-green.yaml
+    mac: "f0:f5:bd:0e:dd:50" # replacement board, 2026-07-26 (was 20:6e:f1:0a:d5:ac)
+    role: "LIN master + CAN segment 1, ring owner"
+  - name: mr-blue
+    config: tests/hil/mr-blue.yaml
+    mac: "20:6e:f1:0a:d0:f0"
+    role: "LIN slave + CAN segment 2, ring relay"
+  - name: mr-orange
+    config: tests/hil/mr-orange.yaml
+    mac: "20:6e:f1:0a:d1:e0"
+    role: "CAN gateway seg1<->seg2 + LIN listener"

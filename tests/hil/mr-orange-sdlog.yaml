@@ -1,0 +1,109 @@
+# Mr. Orange + SD logger — HW-test variant (see HIL.md "SD logger bench").
+#
+# Layers sd_logger on top of the PROVEN mr-orange.yaml via a package include, so
+# the token-ring release baseline is left completely untouched. Orange is the
+# ideal host: it already runs the CAN gateway (both segments under cyclic load)
+# and the LIN listener, so the logger sits under real bus load.
+#
+# The logger is fed by the generic sd_logger.log action (source S1) from a 50 ms
+# interval — this is the HW test path until the native can_gateway/linbus taps
+# (M2) land. A missing/failed card is non-fatal: the ring stays green, the
+# logger just reports mounted=NO.
+#
+# Pins are the real board wiring (M0 closed 2026-07-26) — see
+# docs/bench-hmi-wiring.md, traced from production/netlist.ipc in the PCB repo.
+# U20 (SP3485) is removed, which is what frees GPIO16/17/23; the RS-485 branch
+# cannot clash because it no longer exists. GPIO23 is NOT free for the card: it
+# is reserved for the CAN gateway bypass relay (TODO-bench-hmi.md SW-8).
+#
+# Flash:  .venv/bin/esphome run --no-logs tests/hil/mr-orange-sdlog.yaml \
+#           --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# What to read out of a run, beyond mounted=1 and dropped=0 (M6):
+#   * `#rotate,<t>,L…LOG` then `#close,<t>,rotate` at the end of every file, one
+#     per minute — the time bound, which nothing has ever exercised on hardware.
+#   * a fresh padded header in the successor, and `file=L…` in the statistics line
+#     advancing by exactly one per rotation. A gap in that sequence means a reopen
+#     failed, which used to be silent (handover §4a.2).
+#   * `script/sdlog.py check --strict` clean over every sealed file afterwards.
+
+packages:
+  orange: !include mr-orange.yaml
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin. GPIO17 reaches header J5.6 (100R, R32) and stops there: the H5
+  # high-side switch on the card's supply was specified but never built, so driving that
+  # pin cycles nothing. Declaring it turns power_cycle on by default (V19) and makes every
+  # recovery line claim a power cycle that cannot happen — which is exactly what the seven
+  # ESP_ERR_TIMEOUT attempts of 2026-07-28 were. Recovery here is the in-band reset
+  # (components/sd_logger/card_reset.h), which needs no switch.
+  # 10 MHz, not the 20 MHz ceiling: 100R series on every header pin plus flying
+  # leads makes 20 MHz marginal (bench-hmi-wiring.md). Raise only with a scope.
+  clock: 10MHz
+  buffer_depth: 4096           # ~80 KB ring: absorbs a 500 ms SD stall under load
+  sync_interval: 1s            # max data-loss window on a hard cut (Layer A)
+  # M6 rotation, and on this rig it is **the time bound that fires** — which is the
+  # arm no other config can reach. The two intervals below produce ~40 rec/s, about
+  # 1.6 KB/s, so 4 MB is 43 minutes away and `max_file_seconds` seals every file
+  # instead. That is exactly the case design §4 added it for: a quiet bus otherwise
+  # traps its newest records in an OPEN file, and an OPEN file is never servable.
+  # Expect a fresh `L…LOG` every 60 s, each ~98 KB, each ending `#close,…,rotate`.
+  #
+  # Rotation has never fired on hardware at all (design §9.4, handover §4b.5) and
+  # the bug where a failed post-rotation reopen ate every later record silently was
+  # found by reading, not running. This rig is the low-rate half of giving it bench
+  # time; tests/hil/stress-orange-sdrotate.yaml is the loaded half.
+  max_file_size: 4MB
+  max_file_seconds: 60s
+  # The card half of collection: the chunk index, "drop oldest un-collected" and
+  # the `#gap` line that states the loss in-band. `serve: false` — this board runs
+  # a token ring and a LIN segment, and WiFi's tasks sit above the LIN task's
+  # priority with an effect on bus timing nobody has measured (design §9.1). Its
+  # own soak comes later; it must not ride along inside this one.
+  #
+  # 90 % is a real threshold, not a soak setting: the card here is not meant to be
+  # emptied. `stress-orange-sdrotate.yaml` is where retention is deliberately made
+  # to fire. If this board ever does log `retention: card 90% full`, that is the
+  # policy working — logging continues and the files say what was dropped.
+  collection:
+    enabled: true
+    serve: false
+    retention_percent: 90
+  vcc_monitor:                 # the close-file emergency (Layer B, §7)
+    # GPIO6 is the on-board R21/R22/C1 divider. Its top is gated by GPIO7, which
+    # linbus drives high in setup() at setup_priority::BUS — i.e. before this
+    # component's DATA-priority setup, so the rail is already sensed when the
+    # monitor task starts. A config WITHOUT linbus would read 0 V here and latch
+    # the one-way trip within 10 ms (VCC_TRIP_SAMPLES=2 x MONITOR_POLL_MS=5).
+    adc_pin: 6
+    threshold: 10.5V           # trip above the 3V3 regulator dropout
+    # The physical R21/R22 ratio, restored 2026-07-28. It carried a per-chip
+    # 14.67 stopgap until then, because monitor_loop_() converted with a naive
+    # raw/4095 * adc_full_scale and applied no adc_cali curve — ~26% low on the
+    # C6 (raw=1087 read as 8.94 V against a true 12.07 V), which tripped the
+    # one-way emergency close on a healthy rail at boot. The component now uses
+    # adc_cali curve fitting, so the honest number works again. If a board ever
+    # logs "UNCALIBRATED estimate" at setup, it has no eFuse curve and this
+    # threshold is not trustworthy on it — check against a meter.
+    divider: 10.8673
+  statistics:
+    log_interval: 5s           # prints "records=.. dropped=.. bytes=.. mounted=.."
+
+# Real, load-correlated log traffic without touching Orange's existing
+# automations: log the token and LIN-sniff progress every 50 ms.
+interval:
+  - interval: 50ms
+    then:
+      - sd_logger.log:
+          source: 1            # 1 = CAN token tap
+          can_id: 0x3B0
+          data: !lambda "return {(uint8_t)(id(last_token_ms) >> 8), (uint8_t)(id(last_token_ms))};"
+      - sd_logger.log:
+          source: 2            # 2 = LIN sniff tap
+          can_id: 0x30
+          data: !lambda "return {(uint8_t)(id(lin_sniffs) & 0xFF)};"

@@ -1,0 +1,30 @@
+# The PERF soak DUT: the M2 stress config at -O2, with per-task CPU attribution.
+#
+# `verify.py` passed at PERF (45 s ring at 125 kbps, ALL GREEN) — that proved PERF does not break
+# the timing contracts. It is not a soak. This is: the production shape, both segments near 90 %
+# at 500 kbit/s, both routes loaded, LIN listening, the writer at the record ceiling, for as long
+# as it takes to trust it.
+#
+#   script/hil/flash-soak-perf.sh          # partners first, DUT last
+#   scratchpad capture.sh, one attach, >= 10 min
+#
+# PASS CRITERIA — unchanged from stress-orange-gateway.yaml, which this includes whole:
+#   * dropped == 0 AND tap_dropped == 0  (two different bottlenecks, never summed)
+#   * bus load >= 90 % on both segments, from the port statistics line, never the configured burst
+#   * no bus-off, tx_fail 0, TEC 0
+#   * LIN error-free
+#
+# task_stats is included and runtime_stats deliberately is NOT. task_stats costs one
+# uxTaskGetSystemState and a print per 10 s and touches neither the per-frame nor the per-loop
+# path, so it cannot move the pass criteria; runtime_stats instruments every component dispatch
+# and would. The CPU figure here is therefore comparable with the plain stress config's.
+#
+# **Known bench issue to judge seg2 against**: seg2 has accumulated bus_err/err_events at load
+# before (~40 bus_err, ~200 err_events per second at 88.9 %) while seg1 stayed at exactly 0/0,
+# on the same DUT and firmware with no SD in the build. That is a property of the seg2 WIRE —
+# check termination first. Errors on seg2 alone are not a PERF finding; errors on seg1, or a
+# change in seg1's behaviour vs the -Os round, would be.
+packages:
+  dut: !include stress-orange-gateway.yaml
+  tasks: !include task_stats.yaml
+  perf: !include opt_perf.yaml

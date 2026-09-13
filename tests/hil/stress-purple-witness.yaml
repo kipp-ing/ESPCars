@@ -1,0 +1,90 @@
+# Mr. Purple — 500 kbit/s ACK partner and witness on **Seg2**, the far side of
+# the gateway.
+#
+# Topology, settled 2026-07-27 (tests/hil/HIL.md): Green loads
+# Seg1, Purple sits on Seg2, and the two are on DIFFERENT ports of Orange. So
+# Purple is no longer Green's neighbour — everything he hears has been forwarded
+# by the DUT, which makes his numbers a measurement OF the gateway:
+#
+#   * ACK. Orange's `seg2` has exactly one partner here. Without Purple running
+#     in normal mode, every forwarded frame fails and seg2 walks to bus-off —
+#     indistinguishable from a wiring fault. Purple boots first, always.
+#   * Witness. The bus load he measures on Seg2 is Orange's forwarding
+#     throughput, seen from outside the DUT, and is the independent check on
+#     Orange's own `fwd seg1->seg2` counter.
+#
+#   .venv/bin/esphome run tests/hil/stress-purple-witness.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py purple)"
+#
+# Deliberately not `listen_only: true`: a listen-only node does not ACK, and the
+# generator would sit in bus-off recovery proving nothing (same reasoning as
+# mr-purple-can.yaml). That matters more here than it did on Seg1 — Purple is
+# now the ONLY thing acknowledging the DUT.
+#
+# H13: this is an ESP32-D0WDQ6 rev v1.0, so the full TWAI errata regime applies
+# and two workarounds reset the peripheral and drop frames. Expect Purple's
+# received count to trail the forwarded count at high load; that is the classic
+# ESP32, not the DUT. The C6 gateway is the reference receiver.
+#
+# Known open question, and the reason his rx figure is corroboration and never
+# the criterion: at 500 kbit/s Purple has reported `bus load 0.0 %` while
+# demonstrably ACKing (M2 stress run §9.9 (2026-07-26, git history), confirmed §10.6 — Green's
+# error counter froze the instant Purple was reset). A silent witness on a
+# working segment is a Purple problem. Read the ACK evidence first: `tx_fail 0`
+# and `TEC 0` on Orange's `seg2`.
+esphome:
+  name: mr-purple-witness
+  name_add_mac_suffix: false
+
+packages:
+  # Beacons "I am purple.bus0" once a second and names whoever else beacons on
+  # this wire — so Purple's console alone answers "am I on the DUT's seg2?".
+  # See tests/hil/topology_rx.yaml for the slot map.
+  topo_rx_can0: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: can0
+      beacon_id: "0x0C6"
+  topo_tx_can0: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: can0
+      beacon_id: "0x0C6"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can0
+      tx_pin: GPIO26
+      rx_pin: GPIO25
+      bit_rate: 500kbps
+      observe_queue_depth: 32
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("wit", "CAN0 bus-off — check 2x120R at the segment ends and the GND wire");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("wit", "CAN0 recovered");'
+  statistics:
+    log_interval: 10s
+
+sensor:
+  - platform: can_gateway
+    port_id: can0
+    bus_load:
+      name: "Witness bus load"
+    bus_err:
+      name: "Witness bus errors"

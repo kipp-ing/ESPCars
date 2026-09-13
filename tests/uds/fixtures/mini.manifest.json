@@ -1,0 +1,531 @@
+{
+ "format": "uds-catalog-manifest/1",
+ "ecu": {
+  "name": "MINI",
+  "variant": "Mini_Var",
+  "request_id": "0x7E7",
+  "response_id": "0x7EF",
+  "block_size": 8,
+  "st_min_raw": 20,
+  "p2_ms": 150,
+  "p2_ext_ms": 2000
+ },
+ "totals": {
+  "groups": 9,
+  "fields": 13,
+  "scale_rows": 17,
+  "array_fields": 1,
+  "array_elements": 16,
+  "names_by_rule": {
+   "service": 5,
+   "presentation": 6,
+   "position": 2
+  },
+  "size_bytes": 1830
+ },
+ "skipped_fields": [],
+ "dropped_scale_rows": [],
+ "warnings": [
+  "DT_Mini_Dual_Same: 'PRES_Mini_Hex_2Byte' at bit 24 needed a positional name ('PRES_Mini_Hex_2Byte@3.0') — no factory name distinguishes it",
+  "DT_Mini_Dual_Same: 'PRES_Mini_Hex_2Byte' at bit 40 needed a positional name ('PRES_Mini_Hex_2Byte@5.0') — no factory name distinguishes it",
+  "PRES_Mini_Cell_2Byte: collapsed 4 fields at stride 16 into one array record (DT_Mini_Cells_Voltage_Cell_1 .. DT_Mini_Cells_Voltage_Cell_4)"
+ ],
+ "groups": [
+  {
+   "name": "DT_Mini_Voltage",
+   "request": "220101",
+   "sid": 34,
+   "did": 257,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 7,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Voltage_Maximum_Cell",
+    "DT_Mini_Voltage_Minimum_Cell"
+   ],
+   "fields": [
+    {
+     "name": "DT_Mini_Voltage_Maximum_Cell",
+     "service": "DT_Mini_Voltage_Maximum_Cell",
+     "name_rule": "service",
+     "would_have_been": "PRES_Mini_Voltage_2Byte",
+     "why_renamed": "'PRES_Mini_Voltage_2Byte' names 2 fields in this group",
+     "bit_pos": 24,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "V",
+     "scales": [
+      {
+       "low": 0,
+       "high": 65534,
+       "factor": 0.0010000000474974513,
+       "offset": 1.5,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": 65535,
+       "high": 65535,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "Signal not available",
+       "invalid": true
+      }
+     ]
+    },
+    {
+     "name": "DT_Mini_Voltage_Minimum_Cell",
+     "service": "DT_Mini_Voltage_Minimum_Cell",
+     "name_rule": "service",
+     "would_have_been": "PRES_Mini_Voltage_2Byte",
+     "why_renamed": "'PRES_Mini_Voltage_2Byte' names 2 fields in this group",
+     "bit_pos": 40,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "V",
+     "scales": [
+      {
+       "low": 0,
+       "high": 65534,
+       "factor": 0.0010000000474974513,
+       "offset": 1.5,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": 65535,
+       "high": 65535,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "Signal not available",
+       "invalid": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_Temperature",
+   "request": "220102",
+   "sid": 34,
+   "did": 258,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 9,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Temperature_Maximum",
+    "DT_Mini_Temperature_Minimum",
+    "DT_Mini_Temperature_Averaged"
+   ],
+   "fields": [
+    {
+     "name": "DT_Mini_Temperature_Maximum",
+     "service": "DT_Mini_Temperature_Maximum",
+     "name_rule": "service",
+     "would_have_been": "PRES_Mini_Temp_2Byte",
+     "why_renamed": "'PRES_Mini_Temp_2Byte' names 3 fields in this group",
+     "bit_pos": 24,
+     "size_bits": 16,
+     "signed": true,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "°C",
+     "scales": [
+      {
+       "low": -2560,
+       "high": 5760,
+       "factor": 0.015625,
+       "offset": 0.0,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": -32768,
+       "high": -32768,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "SNA",
+       "invalid": true
+      }
+     ]
+    },
+    {
+     "name": "DT_Mini_Temperature_Minimum",
+     "service": "DT_Mini_Temperature_Minimum",
+     "name_rule": "service",
+     "would_have_been": "PRES_Mini_Temp_2Byte",
+     "why_renamed": "'PRES_Mini_Temp_2Byte' names 3 fields in this group",
+     "bit_pos": 40,
+     "size_bits": 16,
+     "signed": true,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "°C",
+     "scales": [
+      {
+       "low": -2560,
+       "high": 5760,
+       "factor": 0.015625,
+       "offset": 0.0,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": -32768,
+       "high": -32768,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "SNA",
+       "invalid": true
+      }
+     ]
+    },
+    {
+     "name": "DT_Mini_Temperature_Averaged",
+     "service": "DT_Mini_Temperature_Averaged",
+     "name_rule": "service",
+     "would_have_been": "PRES_Mini_Temp_2Byte",
+     "why_renamed": "'PRES_Mini_Temp_2Byte' names 3 fields in this group",
+     "bit_pos": 56,
+     "size_bits": 16,
+     "signed": true,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "°C",
+     "scales": [
+      {
+       "low": -2560,
+       "high": 5760,
+       "factor": 0.015625,
+       "offset": 0.0,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": -32768,
+       "high": -32768,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "SNA",
+       "invalid": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_Contactor_State",
+   "request": "22D000",
+   "sid": 34,
+   "did": 53248,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 4,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Contactor_State"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_State",
+     "service": "DT_Mini_Contactor_State",
+     "name_rule": "presentation",
+     "bit_pos": 24,
+     "size_bits": 8,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": true,
+     "unit": "",
+     "scales": [
+      {
+       "low": 0,
+       "high": 0,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "open",
+       "invalid": false
+      },
+      {
+       "low": 2,
+       "high": 2,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "closed",
+       "invalid": false
+      },
+      {
+       "low": 255,
+       "high": 255,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "SNA",
+       "invalid": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_VIN",
+   "request": "22F190",
+   "sid": 34,
+   "did": 61840,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 7,
+   "interval": "default",
+   "services": [
+    "DT_Mini_VIN"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_VIN_4Byte",
+     "service": "DT_Mini_VIN",
+     "name_rule": "presentation",
+     "bit_pos": 24,
+     "size_bits": 32,
+     "signed": false,
+     "byteswap": false,
+     "ascii": true,
+     "hexdump": false,
+     "enum": false,
+     "unit": "",
+     "scales": []
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_Serial",
+   "request": "22F18C",
+   "sid": 34,
+   "did": 61836,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 5,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Serial"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_Hex_2Byte",
+     "service": "DT_Mini_Serial",
+     "name_rule": "presentation",
+     "bit_pos": 24,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": true,
+     "enum": false,
+     "unit": "",
+     "scales": []
+    }
+   ]
+  },
+  {
+   "name": "RT_Mini_Routine_Start",
+   "request": "31010300",
+   "sid": 49,
+   "did": null,
+   "safe_read": false,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 5,
+   "interval": "default",
+   "services": [
+    "RT_Mini_Routine_Start"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_Internal_1Byte",
+     "service": "RT_Mini_Routine_Start",
+     "name_rule": "presentation",
+     "bit_pos": 32,
+     "size_bits": 8,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "",
+     "scales": []
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_Guarded_Block",
+   "request": "220318",
+   "sid": 34,
+   "did": 792,
+   "safe_read": true,
+   "needs_session": true,
+   "needs_security": true,
+   "resp_min_len": 5,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Guarded_Block"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_Voltage_2Byte",
+     "service": "DT_Mini_Guarded_Block",
+     "name_rule": "presentation",
+     "bit_pos": 24,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "V",
+     "scales": [
+      {
+       "low": 0,
+       "high": 65534,
+       "factor": 0.0010000000474974513,
+       "offset": 1.5,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": 65535,
+       "high": 65535,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "Signal not available",
+       "invalid": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_Cells_Voltage_Cell",
+   "request": "220208",
+   "sid": 34,
+   "did": 520,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 11,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Cells_Voltage_Cell_1",
+    "DT_Mini_Cells_Voltage_Cell_2",
+    "DT_Mini_Cells_Voltage_Cell_3",
+    "DT_Mini_Cells_Voltage_Cell_4"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_Cell_2Byte",
+     "service": "DT_Mini_Cells_Voltage_Cell",
+     "name_rule": "presentation",
+     "element_count": 4,
+     "element_stride_bits": 16,
+     "element_0": "DT_Mini_Cells_Voltage_Cell_1",
+     "element_last": "DT_Mini_Cells_Voltage_Cell_4",
+     "bit_pos": 24,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": false,
+     "enum": false,
+     "unit": "V",
+     "scales": [
+      {
+       "low": 0,
+       "high": 65534,
+       "factor": 0.0009765629656612873,
+       "offset": 0.0,
+       "text": "",
+       "invalid": false
+      },
+      {
+       "low": 65535,
+       "high": 65535,
+       "factor": 0.0,
+       "offset": 0.0,
+       "text": "SNA",
+       "invalid": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "DT_Mini_Dual_Same",
+   "request": "22F1AA",
+   "sid": 34,
+   "did": 61866,
+   "safe_read": true,
+   "needs_session": false,
+   "needs_security": false,
+   "resp_min_len": 7,
+   "interval": "default",
+   "services": [
+    "DT_Mini_Dual_Same"
+   ],
+   "fields": [
+    {
+     "name": "PRES_Mini_Hex_2Byte@3.0",
+     "service": "DT_Mini_Dual_Same",
+     "name_rule": "position",
+     "would_have_been": "PRES_Mini_Hex_2Byte",
+     "why_renamed": "'PRES_Mini_Hex_2Byte' appears 2 times in this group and service 'DT_Mini_Dual_Same' does not separate them",
+     "bit_pos": 24,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": true,
+     "enum": false,
+     "unit": "",
+     "scales": []
+    },
+    {
+     "name": "PRES_Mini_Hex_2Byte@5.0",
+     "service": "DT_Mini_Dual_Same",
+     "name_rule": "position",
+     "would_have_been": "PRES_Mini_Hex_2Byte",
+     "why_renamed": "'PRES_Mini_Hex_2Byte' appears 2 times in this group and service 'DT_Mini_Dual_Same' does not separate them",
+     "bit_pos": 40,
+     "size_bits": 16,
+     "signed": false,
+     "byteswap": false,
+     "ascii": false,
+     "hexdump": true,
+     "enum": false,
+     "unit": "",
+     "scales": []
+    }
+   ]
+  }
+ ],
+ "source": "mini-source.json",
+ "profile": null
+}

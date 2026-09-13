@@ -1,0 +1,59 @@
+# Mr. Blue + 128 rotating CAN IDs — the load half of Phase 4.
+#
+# Purpose: fill Mr. Orange's per-ID timing table (id_timings_max: 128) so Todo 7a
+# can be exercised at all. The ring's own six IDs cannot produce a table worth
+# dumping.
+#
+# Not done with cyclic_sends: that list is capped at 32 entries (and Blue already
+# uses 2 of them), so 128 IDs is simply not expressible there. A single interval
+# with a *templated* can_id walks the whole range instead — which also puts a
+# templated `can_gateway.send` can_id through a real build, a shape HANDOVER
+# Todo 8 lists as compiled by nothing.
+#
+# Sizing: one frame per pass, IDs 0x400-0x47F (no collision with the ring's
+# 0x150/0x151/0x160/0x161/0x3A0/0x3B0). The table reaches all 128 entries within
+# a couple of seconds and the added load stays modest on a 125 kbps segment, so
+# the ring is measured, not starved.
+#
+# TODO 2 MEASUREMENT rides along here: the interval is configured at 10 ms, which
+# is *below* the ~16 ms main-loop floor Issue #2 is about. `fill injected` over a
+# known window gives the honest achieved rate to compare against the configured
+# 100 f/s — the number Issue #2 has been missing.
+
+packages:
+  blue: !include mr-blue.yaml
+
+globals:
+  - id: fill_idx
+    type: int
+    initial_value: "0"
+  - id: last_fill_inj
+    type: uint32_t
+    initial_value: "0"
+
+interval:
+  - interval: 10ms
+    then:
+      - can_gateway.send:
+          port: can1
+          can_id: !lambda "return 0x400 + (id(fill_idx)++ & 0x7F);"
+          data: [0x5A, 0xA5, 0x00, 0x00]
+  - interval: 10s
+    then:
+      - lambda: |-
+          const uint32_t inj = std::isnan(id(fill_inj).state) ? 0 : (uint32_t) id(fill_inj).state;
+          const uint32_t d = inj - id(last_fill_inj);
+          id(last_fill_inj) = inj;
+          ESP_LOGI("todo2", "fill injected=%u (+%.1f/s, configured 100/s) tx_fail=%.0f", (unsigned) inj,
+                   d / 10.0f, id(fill_txfail).state);
+
+sensor:
+  - platform: can_gateway
+    port_id: can1
+    update_interval: 5s
+    injected:
+      id: fill_inj
+      name: "fill injected"
+    tx_fail:
+      id: fill_txfail
+      name: "fill tx_fail"

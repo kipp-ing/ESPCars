@@ -1,0 +1,225 @@
+# Mr. Orange — the M6 soak: rotation, retention and `#gap`, at production rate.
+#
+# This rig exists because two paths shipped with no bench time at all:
+#
+#   * **rotation has never fired on hardware** (design §9.4, handover §4b.5). The
+#     one bug found in it — a failed post-rotation reopen leaving `fd_ = -1` with
+#     `mounted_` still true, every later record discarded without a counter moving
+#     — was found by reading the code, not by running it. Phase B of collection is
+#     deliberately held back until this path has run.
+#   * **retention has never deleted anything on hardware**, and with it the `#gap`
+#     line that is the *only* in-band record that a chunk was thrown away. `#drop`
+#     carries a lifetime total a reader can recover from; `#gap` carries deltas, so
+#     a line that never reaches the card is a loss stated nowhere, ever.
+#
+# It is deliberately the sdrate rig's shape (tests/hil/stress-orange-sdrate.yaml)
+# minus the ramp: fixed rate, so the variable under test is rotation and not the
+# writer ceiling. Records are pushed straight into the ring by `log_frame()`, the
+# same entry point the can_gateway tap drain uses, so no bus is needed.
+#
+#   .venv/bin/esphome run tests/hil/stress-orange-sdrotate.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# ---------------------------------------------------------------------------
+# THIS RIG DELETES FILES FROM THE CARD. That is the feature being tested.
+# ---------------------------------------------------------------------------
+#
+# With `retention_at` at its default, the logger discards the oldest never-
+# collected chunk every retention pass. Before flashing it:
+#
+#   1. read the card back and keep what matters — handover §3 (`script/sdlog.py
+#      check -v /Volumes/<card>/L*.LOG`) is item 1 of that session and it is the
+#      only copy of `L0000431`-`L0000433`, which no reader has ever seen;
+#   2. `-s retention_at 98` turns retention effectively off if you only want the
+#      rotation half.
+#
+# M1-era `.CSV` files are **never** touched, and not by luck: `parse_chunk_name()`
+# takes `.LOG` and `.UPL` only. An M1 file has no header and no seq to dedup on,
+# so it is not a chunk — it can neither be served nor discarded.
+#
+# ---------------------------------------------------------------------------
+# What to bring back
+# ---------------------------------------------------------------------------
+#
+#   * `card N% full at mount (retention arms at M%)` — printed once at mount,
+#     before any logging, because the *first* f_getfree walks the whole FAT and
+#     doing that mid-run would stall the writer. **This line is the rig's own
+#     calibration**: retention fires from the first pass when N >= M, and never
+#     until the card grows to M. Set `-s retention_at` from it if the default did
+#     not arm.
+#   * `#rotate` -> `#close,…,rotate` -> a fresh padded header, roughly every 12 s
+#     at the default rate, and `file=L…` in the statistics line advancing by
+#     exactly one each time. A skipped number is a reopen that failed.
+#   * `retention: card N% full — discarded L…, K KB never collected (total T)`
+#     and, in the statistics line, `retention: T never-collected chunk(s)
+#     discarded`. That total and the `#gap` lines on the card must add up; they
+#     are computed on different sides of the writer and a disagreement is a real
+#     finding.
+#   * a `#gap,<t_us>,<chunks>,<bytes>,<first_seq>,<last_seq>` line in the files.
+#     `script/sdlog.py check -v` renders it, including the punctured-window
+#     wording — see design §7a for what the two seq fields do and do not claim.
+#   * `chunk index full (255 of 256 entries): L0000433 is untracked, so retention
+#     cannot reclaim it (raise collection.max_chunks; 1 refused so far)`:
+#     **a result, not a bug.** The index holds `collection: max_chunks:` entries,
+#     defaulting to 256 (V26, collection_policy.h), so at these settings it covers
+#     `SD_LOG_MAX_CHUNKS x max_file_size` = ~1 GB of card. If the card has not
+#     reached `retention_at` within that much writing, every later file is
+#     untracked and retention can no longer reclaim it. Whether that line appears
+#     before the first `#gap` is exactly the number this soak is for — and if it
+#     does, `collection: max_chunks:` goes up (2048 is the schema ceiling, 24 KB).
+#
+#     The default was 64 until the PERF soak of 2026-07-28 rotated 29 times with
+#     the index full at the *first* of them: with `max_file_size: 4MB` that was
+#     only 256 MB of coverage, which the card was already past. One entry is held
+#     back for the file the boot is about to open, which is why the count reads
+#     `255 of 256` and not `256 of 256`.
+#   * `index_refused=` in the statistics line, and `collection: retention arms at
+#     N% card fill, index holds M chunk(s)` at boot. The warning above prints once
+#     per rotation and scrolls past on a soak; `index_refused=` is the same fact
+#     standing still, and the boot line is the only place a running board says
+#     what capacity it was *built* with. It is the one counter here that a config
+#     fixes rather than throughput.
+#   * `dropped=0` throughout. Rotation costs a close, an fsync and an open every
+#     12 s at 338 KB/s; if that shows up anywhere, it shows up as ring drops.
+#
+# The measured 338 KB/s ceiling in handover §2 was taken with `max_file_size:
+# 32MB` and no rotation. This rig rotates ~8x more often, so its throughput is a
+# *different* number by construction — comparing the two is how rotation's cost
+# gets measured, and neither invalidates the other.
+#
+# No topology packages here, and that is not an oversight: this config declares no
+# can_gateway port at all, so there is no wire to beacon on and nothing for
+# topology.py to cross-reference. Add both packages to any rig that does.
+#
+# linbus is here on purpose and must not be removed: it drives GPIO7 high in
+# setup() at BUS priority, which gates the top of the 12 V divider the vcc_monitor
+# reads. Without it the monitor sees 0 V and latches its one-way trip within
+# 10 ms, permanently disabling logging at boot.
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+  # Records pushed per main-loop pass. The loop runs ~858 passes/s on this board,
+  # so 12 is ~8460 rec/s / 338 KB/s — the last fully clean rate of the M5.7 sweep
+  # (handover §2). Fixed, not ramping: this rig is about rotation, and a rate that
+  # moves underneath it would make every per-chunk number incomparable.
+  records: "12"
+  # Rotation bounds. 4 MB is the top of the 1-4 MB window design §4 targets and is
+  # ~12 s at the rate above; the time bound only takes over if the producer stops.
+  chunk_size: "4MB"
+  chunk_seconds: "60s"
+  # Card fill that arms "drop oldest un-collected". 2 is the schema floor and is
+  # chosen so retention arms on the first pass of any card that has been used at
+  # all — the point of this rig is to make the discard path run, not to wait a day
+  # for a 32 GB card to fill. `-s retention_at 98` parks it. See the deletion
+  # warning above before picking anything low.
+  retention_at: "2"
+
+packages:
+  base: !include hil_common.yaml
+  cpu: !include cpu_stats.yaml
+
+globals:
+  - id: pushed
+    type: uint32_t
+    initial_value: "0"
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: listener
+  rx_ids:
+    - lin_id: 48
+      length: 4
+      checksum: enhanced
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin. GPIO17 reaches header J5.6 (100R, R32) and stops there: the H5
+  # high-side switch on the card's supply was specified but never built, so driving that
+  # pin cycles nothing. Declaring it turns power_cycle on by default (V19) and makes every
+  # recovery line claim a power cycle that cannot happen — which is exactly what the seven
+  # ESP_ERR_TIMEOUT attempts of 2026-07-28 were. Recovery here is the in-band reset
+  # (components/sd_logger/card_reset.h), which needs no switch.
+  clock: 10MHz                 # 100R series + flying leads make 20MHz marginal
+  buffer_depth: 4096           # ~80 KB ring; only ~570 ms of stall at 7200 rec/s
+  sync_interval: 1s
+  max_file_size: ${chunk_size}
+  max_file_seconds: ${chunk_seconds}
+  # The card half of collection. `serve: false`, so no WiFi: its tasks sit above
+  # the LIN task's priority and their effect on bus timing is unmeasured (design
+  # §9.1). Associating here would put two unknowns in one soak, and this one is
+  # holding Phase B up. The server is Phase B and gets its own bench run.
+  collection:
+    enabled: true
+    serve: false
+    retention_percent: ${retention_at}
+  # Tag 1 is what the lambda below stamps. Declaring it as a 4-character label is
+  # what makes the measured line the production line.
+  sources:
+    - tag: 1
+      kind: can
+      label: seg1
+  # S4: the firmware's own log, inline with the traffic. On this rig it is not
+  # decoration — the retention and rotation lines land *in the file* as `X` lines,
+  # so a card read back afterwards carries its own explanation of every `#gap`.
+  esphome_logs:
+    level: INFO
+    buffer_depth: 32
+  vcc_monitor:
+    adc_pin: 6
+    threshold: 10.5V
+    # The physical ratio. Was a per-chip 14.67 stopgap for the uncalibrated-ADC
+    # bug until 2026-07-28 — see the note in mr-orange-sdlog.yaml.
+    divider: 10.8673
+  statistics:
+    log_interval: 5s
+
+interval:
+  # The producer. log_frame() is the same entry point the can_gateway tap drain
+  # uses, so this exercises the real ring and writer path, just without a bus.
+  - interval: 1ms
+    then:
+      - lambda: |-
+          uint8_t data[8];
+          const uint32_t seq = id(pushed);
+          data[0] = (uint8_t) (seq >> 24);
+          data[1] = (uint8_t) (seq >> 16);
+          data[2] = (uint8_t) (seq >> 8);
+          data[3] = (uint8_t) seq;
+          data[4] = 0xA5;
+          data[5] = 0x5A;
+          data[6] = 0xC3;
+          data[7] = 0x3C;
+          for (uint32_t i = 0; i < ${records}; i++) {
+            id(sd_log)->log_frame(1, 0x200 + (i & 0x0F), 0, data, 8);
+            id(pushed)++;
+          }
+
+  # The verdict line, next to the writer's own statistics. `discarded` is read
+  # from the mirror the writer task publishes, never from the chunk index — the
+  # index belongs to that task (design §8) and this runs on the main loop.
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("sdrot", "pushed=%" PRIu32 " discarded_chunks=%" PRIu32 " discarded=%" PRIu32
+                   " MiB (the writer's own records=/dropped=/file= line is the verdict; "
+                   "file= must advance by exactly one per rotation)",
+                   id(pushed), id(sd_log)->get_discarded_chunks(),
+                   id(sd_log)->get_discarded_kib() / 1024);
+          id(healthy) = id(sd_log)->is_mounted() && id(sd_log)->get_dropped_records() == 0;
+      - script.execute: led_health

@@ -1,0 +1,104 @@
+# Mr. Orange — does the SD card come up AT ALL? The smallest possible answer.
+#
+# Written 2026-07-28 while bisecting a `sdmmc_card_init failed (0x107)` /
+# `mount failed: ESP_ERR_TIMEOUT` that reproduced with can_gateway entirely
+# absent, so "CAN load broke the card" was already ruled out and the question
+# became "card, wiring, or clock rate?".
+#
+# Everything that could plausibly be blamed is REMOVED, so a failure here has
+# almost nowhere left to hide:
+#
+#   no can_gateway     — the bus is not in the picture
+#   no linbus          — hil_common raises GPIO7 (the +5 V / sense rail) itself
+#   no vcc_monitor     — cannot emergency-close, cannot trip on the ADC bug
+#   no record producer — the card is not being hammered while it initialises
+#   no format_if_mount_failed — f_mkfs is the documented card-wedging hazard;
+#                        this probe must never be the thing that destroys the
+#                        evidence it was written to collect
+#
+# What is left is: power the card, init SPI, mount, say what happened.
+#
+# THE ONE KNOB — SPI clock. This is the discriminator worth having:
+#
+#   .venv/bin/esphome -s clock 400kHz run tests/hil/probe-orange-sdcard.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# 400kHz is SD's mandatory card-identification speed — every working card must
+# initialise there, over any wiring that is connected at all. Then walk up:
+# 400kHz -> 1MHz -> 4MHz -> 10MHz -> 20MHz. Read it as:
+#
+#   fails at 400kHz too          the card or its wiring is dead, full stop.
+#                                Not a rate problem — nothing is left to slow
+#                                down. Swap the card before suspecting the C6.
+#   mounts at 400kHz, dies later signal integrity, not a dead card: the 100R
+#                                series resistors, the pull-ups and the flying
+#                                leads. `mr-orange-sdlog.yaml` already notes
+#                                20MHz is marginal on this wiring; if the knee
+#                                is now BELOW the 10MHz the stress configs use,
+#                                that is a real regression in the wiring and
+#                                the stress configs must come down to match.
+#   mounts everywhere            the card is fine and the fault is in the
+#                                combination — back to the stress config.
+#
+# A reset does NOT power-cycle the card. This note used to claim it did — GPIO17
+# reverts to input, the external 10k pulls it down, card VCC drops — and every
+# word of that is true about the *pin*, which reaches header J5.6 and nothing
+# else. The H5 switch was never built, so no reset and no firmware retry has ever
+# removed this card's power; only cycling 12 V on J8 does. What a reset does do is
+# leave the card inside whatever transaction was in flight, which is the wedge
+# itself, and which the in-band reset now addresses without touching power.
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+  # SD-over-SPI identification speed. Raise it to find the knee.
+  clock: 400kHz
+
+packages:
+  base: !include hil_common.yaml
+  # Reads the 12 V rail through the GPIO7-gated divider with esphome's own
+  # CALIBRATED adc, not sd_logger's uncalibrated one — so this number is
+  # trustworthy where vcc_monitor's is not. See docs/HANDOVER.md.
+  rail: !include rail_check.yaml
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin. GPIO17 reaches header J5.6 (100R, R32) and stops there: the H5
+  # high-side switch on the card's supply was specified but never built, so driving that
+  # pin cycles nothing. Declaring it turns power_cycle on by default (V19) and makes every
+  # recovery line claim a power cycle that cannot happen — which is exactly what the seven
+  # ESP_ERR_TIMEOUT attempts of 2026-07-28 were. Recovery here is the in-band reset
+  # (components/sd_logger/card_reset.h), which needs no switch.
+  clock: ${clock}
+  # Smallest ring the schema allows (V-rule: 256..16384). Nothing is produced
+  # here, and a big allocation would only be one more thing that could fail
+  # before the mount is even attempted.
+  buffer_depth: 256
+  sync_interval: 1s
+  max_file_size: 32MB
+  statistics:
+    log_interval: 5s
+
+interval:
+  # The verdict, once, loudly, and then the LED so the answer is readable from
+  # across the room without a console attached (which on this chip is a reset).
+  - interval: 5s
+    then:
+      - lambda: |-
+          const bool ok = id(sd_log)->is_mounted();
+          ESP_LOGI("sdprobe", "clock=${clock} mounted=%d  -> %s", ok ? 1 : 0,
+                   ok ? "CARD OK at this clock" :
+                        "NO CARD at this clock (see the sd_logger mount line above)");
+          id(healthy) = ok;
+      - if:
+          condition:
+            lambda: "return id(healthy);"
+          then:
+            - script.execute: led_health
+          else:
+            - script.execute: led_fault

@@ -1,0 +1,29 @@
+# The self-test, plus a LIN response — flashed on exactly ONE bench board.
+#
+# WHY THIS WRAPPER EXISTS, on top of selftest-master.yaml. A LIN master with no
+# slave puts only *headers* on the wire: it sends a break, a sync and a PID, and
+# then nobody answers. Nothing there is a complete frame, so `frames_received`
+# never moves and every board's LIN gate stays INDETERMINATE — which is what the
+# second bench run of the self-test showed, master and all.
+#
+# LIN needs the pair. Green drives the schedule (selftest-master.yaml), this
+# board answers it, and only then does the bus carry real frames that the
+# listeners can count and checksum. `responses:` is a slave-only key, rejected
+# by the schema in any other mode, so — exactly like the master's `schedule:` —
+# it has to be a wrapper rather than a substitution.
+#
+# The id matches selftest-master.yaml's single schedule slot. Keep the two in
+# step: a schedule entry with no matching response is a header nobody answers,
+# and puts the gate straight back to INDETERMINATE.
+substitutions:
+  lin_mode: slave
+
+packages:
+  selftest: !include selftest.yaml
+
+linbus:
+  id: lin
+  responses:
+    - lin_id: 0x30
+      data: [0x53, 0x54, 0x00, 0x00]
+      checksum: enhanced

@@ -1,0 +1,75 @@
+# The A/B half of the optimiser question: profile-orange.yaml with the IDF optimiser set to PERF
+# (-O2) instead of the esphome default SIZE (-Os). Everything else is held identical, because it
+# is the *same* config included whole.
+#
+#   .venv/bin/esphome run tests/hil/profile-orange-perf.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# Why this is a candidate at all: -Os does not unroll, and the sd_logger line emitters and
+# can_gateway's patch application are byte loops. On the host bench (`make -C tests/host bench`,
+# same source, only BENCH_OPT changed) -Os costs:
+#
+#   line_writer_hex_bytes   26.55 -> 2.73 ns   9.7x
+#   format_record           87.58 -> 24.66 ns  3.6x
+#   process_frame_patch      5.44 -> 2.43 ns   2.2x
+#   rx_frame_full           27.24 -> 18.53 ns  1.5x
+#
+# and costs nothing measurable on the fixed-shape code (the rings, match_rule, the slot pool).
+# Host ratios do not predict C6 ratios — that is what this config is for.
+#
+# MEASURED COST, 2026-07-28, this config vs tests/hil/profile-orange.yaml:
+#
+#   flash   402 974 -> 464 436 B   +61 462  (+15.3 %; 22.0 % -> 25.3 % of the partition)
+#   RAM     106 828 -> 113 604 B    +6 776  (+6.3 %)
+#
+# Both fit with room to spare on the C6 devkit, so the decision is not a size decision — it is
+# whether the CPU actually comes down, and whether the timing shift is benign.
+#
+# MEASURED 2026-07-28 — PERF takes 10.6 CPU points off this board, and all of it off the writer.
+# Both builds on Orange, 94.6 % load on both segments, same generator, mean of the last 10 windows:
+#
+#                      SIZE (-Os)   PERF (-O2)   delta
+#   CPU                    49.5 %       38.9 %   -10.6 points  (-21 %)
+#   sdlog_wr               41.0 %       30.7 %   -10.3 points  (-25 %)
+#   loopTask                2.7 %        2.4 %   -0.3
+#   records/s               4266         4244    unchanged (within noise)
+#   dropped / tap_dropped      0 / frozen         0 / frozen
+#
+# **10.3 of the 10.6 points come out of sdlog_wr alone** — the FATFS + SPI SD path, which is IDF
+# driver code, not ours. That is the same signature the host bench shows (-Os leaves byte loops
+# unrolled: line_writer_hex_bytes 9.7x, format_record 3.6x) applied to the one task that was
+# 82 % of the CPU budget. Idle headroom goes 50.5 % -> 61.1 % for a one-line config change.
+#
+# Read the absolute numbers as profiling-build numbers: both carry runtime_stats' per-dispatch
+# instrumentation, so a production build sits slightly lower. The DELTA is the result.
+#
+# Getting here cost one wedged card, which is worth knowing: reflashing reset the C6 mid-write and
+# **`recovery: power_cycle: true` could not clear it** — seven attempts, all `ESP_ERR_TIMEOUT`,
+# ladder pinned at its 30 s ceiling. It took 12 V cycled on J8.
+#
+# 2026-07-29, why: `power_cycle` drives GPIO17, which reaches header J5.6 and stops there — the H5
+# switch on card VCC was never built. So those seven attempts were seven plain remounts of a card
+# that had never lost power and was still sitting in the CMD25 the reset interrupted. The step that
+# addresses that state is the in-band reset (`components/sd_logger/card_reset.h`), now on from the
+# second attempt. Until it has been proven on hardware, keep budgeting for the 12 V cycle when
+# flashing a logging DUT under load.
+#
+# That failed run did leave one useful number, since its RX ISR path stayed fully loaded
+# (tap_dropped grew at ~4270/s) while the writer sat idle: **card down, both segments at 94.5 %,
+# CPU 8.0-8.6 %.** Against 49.5 - 41.0 = 8.5 from the working run — so the decomposition is
+# confirmed from both directions: the forwarding ISR + LIN + tap path is ~8 % of the C6, and the
+# SD writer was the other ~41 %.
+#
+# **-O2 is not a free lunch on this codebase and must be re-gated, not assumed.** It changes ISR
+# timing everywhere, which is the one thing the forwarding slot tracker and the seqlock rings are
+# written against. Before believing a win:
+#
+#   1. `make -C tests/host` must stay green — it runs ASan+UBSan, which is what would catch the
+#      latent UB that a higher optimisation level is entitled to exploit.
+#   2. `.venv/bin/python script/hil/verify.py --seconds 45 --min-laps 75` must pass on a build
+#      WITHOUT the profiling packages. The gate has never been run at PERF.
+#   3. The CPU comparison itself has to be made between two builds that both carry the profiling
+#      packages, or between two that both omit them — never one of each.
+packages:
+  profile: !include profile-orange.yaml
+  perf: !include opt_perf.yaml

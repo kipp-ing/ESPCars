@@ -1,0 +1,93 @@
+# 12 V rail check — the precondition every bench run should assert FIRST.
+#
+# Include this package in any C6 bench config:
+#
+#   packages:
+#     base: !include hil_common.yaml
+#     rail: !include rail_check.yaml
+#
+# WHY IT COMES FIRST. Without 12 V on J8 the CAN and LIN transceivers are
+# unpowered, and an unpowered transceiver reproduces *every* symptom of broken
+# wiring: it does not echo the node's own TX, it never ACKs, and it delivers no
+# RX. CLAUDE.md states it plainly — "USB-only power makes every transceiver look
+# like broken wiring" — and a full session was spent in 2026-07-27 chasing
+# exactly that symptom set across two boards and a PCB swap before the rail was
+# measured (M2 stress run §10.6 (2026-07-26, git history)). A run that does not report its
+# rail voltage cannot distinguish "no partner on the segment" from "no power",
+# so every probe should print this line before anything else is believed.
+#
+# CALIBRATION. This uses stock ESPHome's `adc` platform, which applies the
+# eFuse `adc_cali` curve. Do NOT reuse `sd_logger`'s `vcc_monitor` number for
+# this: its `monitor_loop_()` converts raw counts linearly with no calibration
+# and reads ~26 % low on the C6 (raw 1087 -> 8.94 V computed vs 12.07 V actual),
+# which is the open bug in docs/HANDOVER.md. That is also why `divider` here is
+# the PHYSICAL 10.8673 and not the per-chip 14.67 stopgap that
+# `mr-orange-sdlog.yaml` carries — a calibrated read needs no fudge factor, and
+# the fudge factor does not port between chips anyway.
+substitutions:
+  # 12 V sense divider on the C6 adapter: GPIO6, ratio 10.8673.
+  rail_adc_pin: GPIO6
+  rail_divider: "10.8673"
+  # Below this the transceivers are not reliably alive. The MCP2025 LIN parts
+  # are dead below ~12 V, so treat anything under 11 V as "not powered" rather
+  # than "a bit low".
+  rail_min_v: "11.0"
+
+globals:
+  - id: rail_v
+    type: float
+    initial_value: "0.0f"
+  - id: rail_ok
+    type: bool
+    initial_value: "false"
+  - id: rail_reported
+    type: bool
+    initial_value: "false"
+
+sensor:
+  - platform: adc
+    id: rail_adc
+    pin: ${rail_adc_pin}
+    attenuation: 12db
+    update_interval: 5s
+    internal: true
+    filters:
+      - multiply: ${rail_divider}
+    on_value:
+      then:
+        - lambda: |-
+            id(rail_v) = x;
+            id(rail_ok) = x >= ${rail_min_v}f;
+            // Shout once as soon as the first conversion lands, then only on
+            // the periodic line below — a rail that is fine should not spam.
+            if (!id(rail_reported)) {
+              id(rail_reported) = true;
+              if (id(rail_ok)) {
+                ESP_LOGI("rail", "12V rail %.2f V -> OK (>= ${rail_min_v} V)", x);
+              } else {
+                // 0 V here does NOT mean "no 12 V". The GPIO6 divider's top is
+                // switched by Q2, enabled by GPIO7 via Q1/D1, so it reads 0
+                // whenever GPIO7 is low even with a perfectly good rail on J8.
+                ESP_LOGE("rail",
+                         "12V rail %.2f V -> NOT POWERED (< ${rail_min_v} V). "
+                         "This reads 0 for THREE different reasons - check in "
+                         "this order: (1) GPIO7 low, so the sense divider and "
+                         "the +5V enable are both gated off; (2) no 12 V on J8; "
+                         "(3) JP14 open, which leaves the +5V domain down and "
+                         "the CAN transceivers unpowered even with the rail up. "
+                         "See PCB docs/MANDATORY-PREREQUISITES.md. Until this "
+                         "reads non-zero, every CAN result below is meaningless.",
+                         x);
+              }
+            }
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (id(rail_ok)) {
+            ESP_LOGI("rail", "12V rail %.2f V OK", id(rail_v));
+          } else {
+            ESP_LOGE("rail", "12V rail %.2f V NOT POWERED - fix J8 before reading anything else",
+                     id(rail_v));
+          }

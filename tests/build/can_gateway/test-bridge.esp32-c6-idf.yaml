@@ -1,0 +1,23 @@
+substitutions:
+  bridge_a_tx_pin: GPIO2
+  bridge_a_rx_pin: GPIO3
+  bridge_b_tx_pin: GPIO10
+  bridge_b_rx_pin: GPIO11
+
+esphome:
+  name: can-bridge-c6
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+packages:
+  can_gateway: !include common_bridge.yaml

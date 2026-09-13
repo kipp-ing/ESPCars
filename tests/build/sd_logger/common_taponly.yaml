@@ -1,0 +1,51 @@
+# The tap-only shape: `log_tap: true` is the ports' ONLY receive consumer.
+# No `routes:`, no decode entities, no `on_frame:` — sd_logger draining a
+# gateway that forwards nothing. This is tests/hil/soak-orange-guest.yaml, the
+# passive dual-segment recorder.
+#
+# This file exists because the shape was compiled by no config and it hid a
+# silent field bug (private/notes/HANDOVER-guest-bms.md §8): the RX ISR's
+# no-route branch armed the receive only for an observation ring, so a
+# tap-only port never received a frame — 0.0 % bus load against a live,
+# several-hundred-frames/s sender, headers-only chunk files, every health line
+# green. Every other tapping config
+# also routes (common_cantap.yaml) or triggers (can_gateway/common.yaml), which
+# is exactly why nothing caught it.
+#
+# Do NOT add routes, `on_frame:` or decode entities here. Any of them arms the
+# receive path by another mechanism and this config stops covering the branch
+# it exists for — the same rule that keeps common_bridge.yaml diagnostics-free.
+can_gateway:
+  id: gw
+  log_tap_queue_depth: 512
+  ports:
+    - id: seg1
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 500kbps
+      log_tap: true
+    - id: seg2
+      rx_pin: GPIO19
+      tx_pin: GPIO18
+      bit_rate: 500kbps
+      log_tap: true
+  # Statistics stay: the bus-load line is fed by the same run_rx_taps_() the
+  # fix makes reachable, and its 0.0 % was the bug's only tell.
+  statistics:
+    log_interval: 10s
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO10
+  cs_pin: GPIO11
+  clock: 10MHz
+  buffer_depth: 2048
+  sync_interval: 2s
+  max_file_size: 16MB
+  can_ports:
+    - seg1
+    - seg2
+  statistics:
+    log_interval: 10s

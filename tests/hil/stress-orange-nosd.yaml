@@ -1,0 +1,201 @@
+# Mr. Orange — HALF B of the SD-vs-CAN bisect: gateway + LIN under full load,
+# with the SD path removed entirely.
+#
+# WHY THIS FILE EXISTS
+# The 2026-07-27 session ran `stress-orange-gateway.yaml` — gateway + LIN + SD
+# logging at once — hit mount failures and card wedges, and left the session
+# suspecting a hardware fault on the card or its wiring. That suspicion is not
+# testable while both subsystems run together: a wedged card, a saturated tap
+# ring and a stalled RX ISR all look alike from the outside. So split the
+# production config down the middle and run each half alone:
+#
+#   half A   SD writer at design rate, NO can_gateway at all
+#            -> tests/hil/stress-orange-sdrate.yaml (already existed; the
+#               writer's ceiling was measured with it at 5276 rec/s, 190 KB/s,
+#               dropped == 0, so a failure there is new and is about the card)
+#   half B   gateway + LIN at design load, NO sd_logger at all
+#            -> this file
+#
+# Read the pair as a 2x2 with the known-good third cell: if both halves pass
+# alone and only the combination fails, the fault is in the interaction (SPI vs
+# TWAI ISR latency, CPU headroom, the tap drain) and NOT in the card. If half A
+# fails on its own, it is the card or its wiring, and half B will still pass.
+#
+# WHAT WAS REMOVED, AND NOTHING ELSE
+# Against stress-orange-gateway.yaml this file drops exactly two things:
+#   * the whole `sd_logger:` block (writer, vcc_monitor, statistics, can_ports)
+#   * `log_tap: true` on both ports — the tap only exists to feed the logger,
+#     and with no drain its ring would fill and count tap_dropped forever, which
+#     is noise rather than a finding
+# linbus, both CAN ports, both routes, both pin maps, the queue depths, the
+# statistics interval, the sensors and the topology beacons are byte-identical
+# on purpose. One variable, or the comparison says nothing.
+#
+# WIRING — measured 2026-07-28 08:06 from this config's own `[topo]` lines:
+#
+#     Seg1:  Orange `seg1` (GPIO2/3)  <-->  Green can1  <-->  Purple can0 (26/25)
+#     Seg2:  Orange `seg2` (GPIO10/11)  <-->  Blue can1 (GPIO2/3)
+#
+# Green and Blue are swapped relative to every pre-2026-07-28 document. Note
+# this config carries the topology beacons itself, so the run that answers the
+# SD/CAN question also re-measures the cabling for free — which is how the swap
+# was found. Re-confirm, never infer: read `[topo]` in the run's own log. Both
+# partners must be running in NORMAL mode before this is flashed — a partner
+# that does not ACK walks the port it faces to bus-off exactly as if the wire
+# were cut.
+#
+#   .venv/bin/esphome run tests/hil/stress-orange-nosd.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# PASS = the CAN half is exonerated:
+#   * bus load >= 90 % on every loaded segment, from the port statistics line,
+#     never the configured burst
+#   * bus_err flat, no `bus-off` lines, tx_fail 0, neither route shedding
+#   * LIN error-free
+#   * runs for the same wall-clock as the combined config did before it failed
+#
+# There is no `dropped`/`tap_dropped` criterion here and there must not be:
+# nothing is being logged. `healthy` therefore tracks LIN plus the absence of
+# bus-off, which is all this half can honestly assert.
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  cpu: !include cpu_stats.yaml
+  # Says which board is on each wire, in the log, every 10 s — including
+  # "seg1 and seg2 are the same wire", which with the two routes below would be
+  # a forwarding loop. See tests/hil/topology_rx.yaml for the slot map.
+  topo_rx_seg1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: seg1
+      beacon_id: "0x0C4"
+  topo_tx_seg1: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: seg1
+      beacon_id: "0x0C4"
+  topo_rx_seg2: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: seg2
+      beacon_id: "0x0C5"
+  topo_tx_seg2: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: seg2
+      beacon_id: "0x0C5"
+
+globals:
+  - id: last_lin_ms
+    type: uint32_t
+    initial_value: "0"
+  # Latched by the bus-off trigger. A recovered port still failed, so this is
+  # never cleared by on_recovered — the run is judged on whether it happened
+  # at all, not on the state at the end.
+  - id: saw_bus_off
+    type: bool
+    initial_value: "false"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: seg1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      tx_queue_depth: 64
+      observe_queue_depth: 48
+      on_bus_off:
+        then:
+          - lambda: |-
+              id(saw_bus_off) = true;
+              ESP_LOGW("hil", "CAN(seg1) bus-off");
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN(seg1) recovered");'
+    - id: seg2
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 500kbps
+      tx_queue_depth: 64
+      observe_queue_depth: 48
+      on_bus_off:
+        then:
+          - lambda: |-
+              id(saw_bus_off) = true;
+              ESP_LOGW("hil", "CAN(seg2) bus-off");
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN(seg2) recovered");'
+  routes:
+    - id: to_seg2
+      from: seg1
+      to: seg2
+    - id: to_seg1
+      from: seg2
+      to: seg1
+  statistics:
+    log_interval: 5s
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: listener
+  rx_ids:
+    - lin_id: 48
+      length: 4
+      checksum: enhanced
+  on_frame:
+    - lin_id: 48
+      then:
+        - lambda: "id(last_lin_ms) = millis();"
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sensor:
+  - platform: can_gateway
+    port_id: seg1
+    bus_load:
+      name: "seg1 bus load"
+    bus_err:
+      name: "seg1 bus errors"
+  - platform: can_gateway
+    port_id: seg2
+    bus_load:
+      name: "seg2 bus load"
+    bus_err:
+      name: "seg2 bus errors"
+  - platform: can_gateway
+    route_id: to_seg2
+    update_interval: 5s
+    forwarded:
+      name: "fwd seg1->seg2"
+  - platform: can_gateway
+    route_id: to_seg1
+    update_interval: 5s
+    forwarded:
+      name: "fwd seg2->seg1"
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool lin_ok = id(last_lin_ms) != 0 && (now - id(last_lin_ms)) < 3000;
+          id(healthy) = lin_ok && !id(saw_bus_off);
+          if (!id(healthy) && now > 10000)
+            ESP_LOGW("hil", "ORANGE degraded: lin=%d bus_off_seen=%d",
+                     lin_ok, id(saw_bus_off) ? 1 : 0);
+      - script.execute: led_health

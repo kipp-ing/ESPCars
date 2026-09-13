@@ -1,0 +1,161 @@
+# A worked example: decode traffic against a small fictional DBC on one port,
+# via the `sna: all_ones` control-sensor pattern.
+#
+# The signals here are the MINI_DBC fixture from
+# tests/can_gateway/test_dbc2yaml.py, not a real vehicle's DBC — same
+# geometry and scale, so the numbers in the comments below line up exactly,
+# but nothing here is tied to any one car. Flash it to any C6 wired onto a
+# live CAN bus; with nothing transmitting on 0x076/0x043 every sensor here
+# reads `nan`.
+#
+# Signal geometry is generated, never hand-copied:
+#
+#   .venv/bin/python script/dbc2yaml.py <file.dbc> --port seg2 --throttle 1s \
+#     --id 0x076 --signal CellVolt_Max --signal CellVolt_Min \
+#     --id 0x043 --signal CutSw_Err
+#
+# ## This config cannot transmit a frame
+#
+# There is exactly one port and **no `routes:` block at all**. That is the part
+# worth checking before every flash: a gateway with a second port and a route
+# naming this one as a destination would relay bus traffic onto whatever else
+# shares that second port at line rate. Passive has to mean passive at the
+# routing table, not merely the absence of a `cyclic_sends:` block.
+#
+#   .venv/bin/esphome run tests/hil/decode-example.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# ## Reading the output
+#
+# With nothing on the wire at 0x076/0x043, expect `nan` from the guarded
+# sensors below: they sit at their SNA (not-available) marker — all-ones at
+# the signal's own width. `sna: all_ones` is what turns that into NaN instead
+# of a confident wrong number: without it `cell_v_max` would read 4095, which
+# scales to **5.595 V**, above the DBC's own declared 4.5 V max. A `nan` here
+# is the honest answer and the feature working, not a broken decode.
+substitutions:
+  node_name: decode-example
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+
+# The base sets DEBUG, which buries the sensor lines under light chatter.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+globals:
+  - id: last_rx_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: seg2
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 500kbps
+      on_frame:
+        - lambda: 'id(last_rx_ms) = millis();'
+  statistics:
+    log_interval: 10s
+
+sensor:
+  # CellMsg (0x076) :: CellVolt_Max
+  - platform: can_gateway
+    name: "cell volt max"
+    id: cell_v_max
+    port_id: seg2
+    can_id: 0x076
+    bit_offset: 0
+    bit_length: 12
+    sna: all_ones
+    throttle: 1s
+    unit_of_measurement: "V"
+    filters:
+      - multiply: 0.001
+      - offset: 1.5
+    accuracy_decimals: 3
+
+  # CellMsg (0x076) :: CellVolt_Min
+  - platform: can_gateway
+    name: "cell volt min"
+    id: cell_v_min
+    port_id: seg2
+    can_id: 0x076
+    bit_offset: 12
+    bit_length: 12
+    sna: all_ones
+    throttle: 1s
+    unit_of_measurement: "V"
+    filters:
+      - multiply: 0.001
+      - offset: 1.5
+    accuracy_decimals: 3
+
+  # ErrMsg (0x043) :: CutSw_Err — an enumerated fault flag whose all-ones
+  # value ("ALL_ERR") is a genuine fault state, not a missing reading, so it
+  # is decoded with no `sna:` at all.
+  - platform: can_gateway
+    name: "cutoff switch error"
+    id: cutsw_err
+    port_id: seg2
+    can_id: 0x043
+    bit_offset: 5
+    bit_length: 3
+    throttle: 1s
+
+  # --- controls, so a screen of `nan` proves something ---
+  #
+  # An ESPHome sensor that never published also reads NaN, so "everything is
+  # nan" on its own is consistent with the decode never running at all. This
+  # separates those cases on the same wire, in the same run:
+  #
+  #   ctrl_cell_v_max_raw  the SAME bits as cell_v_max with `sna:` omitted. It
+  #                        must read 5.595 V — the physically impossible value
+  #                        the feature exists to suppress. If this is nan too,
+  #                        no frame is reaching the sensor and every other nan
+  #                        on this page means nothing.
+  - platform: can_gateway
+    name: "ctrl cell volt max (no sna)"
+    id: ctrl_cell_v_max_raw
+    port_id: seg2
+    can_id: 0x076
+    bit_offset: 0
+    bit_length: 12
+    throttle: 1s
+    unit_of_measurement: "V"
+    filters:
+      - multiply: 0.001
+      - offset: 1.5
+    accuracy_decimals: 3
+
+interval:
+  # LED: identity hue, shimmer while frames arrive, steady 20 % when the wire
+  # is quiet — the same grammar as every other bench config.
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(last_rx_ms) != 0 && (millis() - id(last_rx_ms)) <= 1000;'
+          then:
+            - script.execute: led_token
+          else:
+            - script.execute: led_health
+
+  # One readable line rather than DEBUG-level per-sensor chatter: sensor state
+  # logs are DEBUG, and this file runs at INFO on purpose. %.3f renders a NaN
+  # as "nan", which is exactly the value being demonstrated here.
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("decode", "cell V max=%.3f min=%.3f | cutsw_err=%.0f",
+                   id(cell_v_max).state, id(cell_v_min).state, id(cutsw_err).state);
+      - lambda: |-
+          ESP_LOGI("decode", "  controls: same bits without sna=%.3f V (expect 5.595)",
+                   id(ctrl_cell_v_max_raw).state);

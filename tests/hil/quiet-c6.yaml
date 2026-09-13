@@ -1,0 +1,80 @@
+# Quiet C6 — a board that CANNOT talk on any bus.
+#
+# For "new guest on the wire" sessions: flash this onto every board whose
+# traffic would drown the guest, and its segment goes quiet without touching a
+# cable. Nothing here declares a CAN controller or a LIN device, and on_boot
+# drives GPIO7 LOW — the shared sleep rail — so the +5 V domain is off, the
+# CAN transceivers are unpowered (bus pins high-ohmic, the TWAI pins are never
+# even configured) and the LIN transceiver sleeps. Silence is enforced by the
+# rail, not promised by the config: there is no firmware path to a dominant bit.
+#
+# The board is NOT gone from the bench: the identity LED (DevKit 3V3 off USB,
+# GPIO8) glows the board's own hue at a steady 20 % — "healthy, idle" in the
+# bench LED grammar — so a silenced board stays identifiable and visibly alive,
+# and the console prints a heartbeat line every 10 s.
+#
+#   .venv/bin/esphome -s node_name quiet-blue -s id_b "100%" run tests/hil/quiet-c6.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py blue)"
+#   .venv/bin/esphome -s node_name quiet-green -s id_g "100%" run tests/hil/quiet-c6.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py green)"
+#
+# Distinct node_name per board on purpose: esphome keys the build dir by the
+# name, and a shared name uploads whatever the last compile left there.
+substitutions:
+  node_name: quiet-c6
+  id_r: "0%"
+  id_g: "0%"
+  id_b: "0%"
+
+esphome:
+  name: ${node_name}
+  name_add_mac_suffix: false
+  on_boot:
+    # The inverse of hil_common.yaml's rail raise, same raw-IDF idiom: drive
+    # the sleep rail LOW and hold it. See that file for why gpio_config and
+    # not an `output:` platform.
+    - priority: 900
+      then:
+        - lambda: |-
+            gpio_config_t rail = {};
+            rail.pin_bit_mask = 1ULL << GPIO_NUM_7;
+            rail.mode = GPIO_MODE_OUTPUT;
+            rail.pull_up_en = GPIO_PULLUP_DISABLE;
+            rail.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            rail.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&rail);
+            gpio_set_level(GPIO_NUM_7, 0);
+            ESP_LOGI("quiet", "GPIO7 LOW - +5V domain off, CAN transceivers unpowered, LIN asleep");
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO8
+    chipset: ws2812
+    num_leds: 1
+    rgb_order: GRB
+    default_transition_length: 0s
+
+interval:
+  # Steady identity at 20 %. Repainted every second so the state survives
+  # whatever last touched the strip.
+  - interval: 1s
+    then:
+      - light.turn_on:
+          id: status_led
+          brightness: 20%
+          red: ${id_r}
+          green: ${id_g}
+          blue: ${id_b}
+  - interval: 10s
+    then:
+      - lambda: 'ESP_LOGI("quiet", "silent by design - no CAN, no LIN, rail down");'

@@ -1,0 +1,202 @@
+# Mr. Purple — CAN0 (native TWAI) and CAN1 (MCP2515) wired to EACH OTHER.
+# See docs/commissioning-mr-purple.md phase P5 and finding H17.
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-selfloop.yaml --device $(script/hil/ports.py purple)
+#
+# TOPOLOGY — one board, one bus, no partner, no C6, no inter-board cable:
+#
+#   GPIO26/25 -> U4 SN65HVD230 -> J1.1/J1.2 ─┬─ 120R ─┬─ J1.3/J1.4 <- U3 SN65HVD230 <- MCP2515
+#        (native TWAI, PROVEN GOOD in P4)     └ probe ─┘        (SPI, controller PROVEN GOOD)
+#
+# WHY THIS EXISTS. After R1/R2 (§6) both *controllers* are proven: native TWAI
+# ran 10 min bidirectional in P4, and the MCP2515 answers its registers and does
+# lossless internal loopback. But P5 against the C6 partner's CAN2 was silent in
+# both directions — Purple's MCP2515 reporting ERROR_ALLTXBUSY (all three TX
+# buffers stuck because nothing ever ACKed) and the partner pegged at TEC 128.
+#
+# That left three suspects and no way to separate them: U3 (the transceiver
+# behind the MCP2515, NEVER exercised in this board's life), the J1.3/J1.4
+# wiring, or the C6's own CAN2 port (also never proven — 2026-07-23's "moved to
+# CAN2, identical" was measured while U4 was dead, so it showed nothing).
+#
+# Looping the board's two CAN connectors together deletes two of the three: no
+# inter-board cable and no C6 port is involved. What remains under test is U3 and
+# the two connectors, against a known-good counterpart on the same board.
+#
+# READING THE RESULT — the two directions fail independently, so log both:
+#
+#   native RX 0x301   -> U3's DRIVER works   (MCP2515 TXCAN -> U3 pin1 D -> bus)
+#   mcp    RX 0x201   -> U3's RECEIVER works (bus -> U3 pin4 R -> MCP2515 RXCAN)
+#
+#   both              -> U3 is fine. The P5 failure was the C6's CAN2 port or the
+#                        cable between the boards, NOT this board. Re-run P5.
+#   neither           -> U3 dead / unpowered / not connected to J1.3-J1.4.
+#                        Same suspicion as U4 had: a cold joint from the 2021
+#                        build on a part nothing ever exercised. Reflow it.
+#   RX 0x301 only     -> U3 transmits but does not receive.
+#   RX 0x201 only     -> U3 receives but does not drive.
+#   TEC/tx_fail rising on native, mcp silent
+#                     -> nothing is ACKing native: U3's receiver is the half
+#                        that is dead (an ACK is a receiver function).
+#
+# Both halves run in NORMAL mode and therefore ACK each other — that is the whole
+# point. Do NOT set listen_only / LISTENONLY here: with exactly two nodes on the
+# wire, a non-ACKing node makes every frame fail with an ACK error and nothing is
+# provable. That is what made P5's documented LISTENONLY step unsound.
+
+substitutions:
+  mcp_clock: 16MHZ            # R2 fitted a 16 MHz part; see H8
+  can_tx_pin: GPIO26
+  can_rx_pin: GPIO25
+
+esphome:
+  name: mr-purple-selfloop
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -100
+    then:
+      - logger.log: "SELFLOOP: native CAN0 <-> MCP2515 CAN1 on one wire. Both send, both ACK."
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+globals:
+  - id: n_native_tx
+    type: uint16_t
+    initial_value: "0"
+  - id: n_mcp_tx
+    type: uint16_t
+    initial_value: "0"
+  - id: n_mcp_rx
+    type: uint32_t
+    initial_value: "0"
+  - id: n_native_rx
+    type: uint32_t
+    initial_value: "0"
+
+# ---------------------------------------------------------------- native TWAI
+can_gateway:
+  id: gw
+  ports:
+    - id: can0
+      tx_pin: ${can_tx_pin}
+      rx_pin: ${can_rx_pin}
+      bit_rate: 125kbps
+      observe_queue_depth: 32
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("loop", "CAN0 bus-off — the MCP2515 half is not ACKing (U3 receiver?)");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("loop", "CAN0 recovered");'
+  statistics:
+    log_interval: 10s
+
+# ------------------------------------------------------------- MCP2515 / SPI
+spi:
+  clk_pin: GPIO18
+  miso_pin: GPIO19
+  mosi_pin: GPIO23
+
+canbus:
+  - platform: mcp2515
+    id: mcp
+    cs_pin: GPIO5
+    clock: ${mcp_clock}
+    mode: NORMAL
+    bit_rate: 125KBPS
+    can_id: 0x301
+    on_frame:
+      # 0x201 comes from THIS board's native half, across U4 -> wire -> U3.
+      - can_id: 0x201
+        then:
+          - lambda: |-
+              id(n_mcp_rx)++;
+              if (id(n_mcp_rx) == 1 || id(n_mcp_rx) % 50 == 0)
+                ESP_LOGI("loop", "MCP RX 0x201 from native half  <-- U3 RECEIVER OK  (n=%u)",
+                         (unsigned) id(n_mcp_rx));
+
+sensor:
+  # 0x301 comes from the MCP2515 half, across U3 -> wire -> U4.
+  - platform: can_gateway
+    port_id: can0
+    can_id: 0x301
+    offset: 0
+    length: 2
+    byte_order: big
+    name: "MCP counter"
+    on_value:
+      - lambda: |-
+          id(n_native_rx)++;
+          ESP_LOGI("loop", "NATIVE RX 0x301 from MCP half = %u  <-- U3 DRIVER OK", (unsigned) x);
+
+  - platform: can_gateway
+    port_id: can0
+    bus_load:
+      name: "CAN0 bus load"
+      id: can0_load
+    observed:
+      name: "CAN0 observed"
+      id: can0_observed
+    bus_err:
+      name: "CAN0 bus errors"
+      id: can0_err
+    tec:
+      name: "CAN0 TEC"
+      id: can0_tec
+    rec:
+      name: "CAN0 REC"
+      id: can0_rec
+
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+interval:
+  # native half transmits 0x201
+  - interval: 100ms
+    then:
+      - lambda: 'id(n_native_tx)++;'
+      - can_gateway.send:
+          can_id: 0x201
+          data: !lambda |-
+            return {(uint8_t) (id(n_native_tx) >> 8), (uint8_t) (id(n_native_tx) & 0xFF)};
+
+  # MCP2515 half transmits 0x301
+  - interval: 100ms
+    then:
+      - lambda: 'id(n_mcp_tx)++;'
+      - canbus.send:
+          canbus_id: mcp
+          can_id: 0x301
+          data: !lambda |-
+            return {(uint8_t) (id(n_mcp_tx) >> 8), (uint8_t) (id(n_mcp_tx) & 0xFF),
+                    0xC0, 0xFF, 0xEE, 0x00, 0x00, 0x00};
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("loop",
+                   "rail=%.2fV | native tx=%u rx(0x301)=%u | mcp tx=%u rx(0x201)=%u | "
+                   "can0 observed=%.0f load=%.1f%% err=%.0f tec=%.0f rec=%.0f",
+                   id(rail_12v).state,
+                   (unsigned) id(n_native_tx), (unsigned) id(n_native_rx),
+                   (unsigned) id(n_mcp_tx), (unsigned) id(n_mcp_rx),
+                   id(can0_observed).state, id(can0_load).state,
+                   id(can0_err).state, id(can0_tec).state, id(can0_rec).state);

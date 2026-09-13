@@ -1,0 +1,230 @@
+# Mr. Orange — per-port CAN link probe. "Is this port actually on a segment?"
+#
+# WHY THIS EXISTS. The M2 stress run §9.8 (2026-07-26, git history) concluded "the DUT is not on
+# either CAN segment" from two readings: `seg1` idle at 0.0 % with zero errors,
+# and `seg2` walking to bus-off. Only the second one is evidence. **An idle port
+# and a disconnected port look identical** — 0.0 % bus load with no errors is
+# what you see when the wire is perfect and nobody is transmitting on it, which
+# is exactly the case for `seg2` under the settled topology: its partner is
+# Purple, who ACKs everything and transmits nothing.
+#
+# The probe that does distinguish them is TRANSMISSION, because ACK is
+# mandatory: every error-active node that correctly receives a frame drives the
+# ACK slot dominant, whether or not it has anything to send. So
+#
+#   probe frame completes (tx_fail 0, TEC 0)  -> at least one other node is on
+#                                                this wire and is listening
+#   probe frame never completes (TEC climbs,
+#   bus-off, tx_fail counts up)               -> this port is ALONE: no partner,
+#                                                or the wiring/jumpers are open
+#
+# and independently, the `rx` half of the port statistics line says whether the
+# port *hears* the segment. The two together separate the three failure modes
+# that were previously indistinguishable: not wired at all, wired to a silent
+# segment, and wired with one broken direction (TX ok / RX open reads as
+# "ACKed but rx 0.0 %").
+#
+# Deliberately NO routes: forwarding would push Green's flood onto the other
+# segment and a bus-off there would mask the probe result. This config only
+# measures.
+#
+# The probe frames ARE the topology beacons (0x0C4 seg1 / 0x0C5 seg2, payload
+# "TOPO"), so one transmission does both jobs: its ACK decides the verdict here,
+# and every other node's topology_rx names Orange in its own log. Those ids win
+# arbitration against the load generator's 0x200-0x20F, so they reach the wire
+# promptly even against a 91 % loaded segment; at 1 frame/s per port they add no
+# measurable load.
+#
+#   .venv/bin/esphome run tests/hil/probe-orange-links.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# Read the VERDICT lines. Run it with BOTH partners live — Green's generator on
+# Seg1 and Purple's witness on Seg2 — because the verdict is "does anything ACK
+# me?", so a partner that is not running reads as a wiring fault.
+#
+# Expected under the settled topology (tests/hil/HIL.md:
+# Green CAN1 — Orange seg1, Orange seg2 — Purple native TWAI):
+#
+#   seg1  LINKED, clean   rx %% tracking Green's load
+#   seg2  LINKED, clean   rx 0.0 %% — correct, Purple ACKs but never transmits
+#
+# SAME-WIRE CHECK, worth one run after any re-cabling. Power Green and Purple
+# down and probe Orange alone: both ports must read ALONE. If they read LINKED
+# they are ACKing *each other*, i.e. seg1 and seg2 are the same wire — which
+# under stress-orange-gateway.yaml's two routes is a forwarding loop. The ACK is
+# the detector; 1 frame/s is far too little traffic to show up as rx %%.
+#
+# SECOND PASS — `-s self_test true` separates the two ways ALONE can happen.
+# TWAI self-test mode transmits without requiring an ACK, but bit monitoring
+# stays on: the controller still compares every bit it drives against what it
+# reads back on RX. So the transmission has to survive the round trip
+#
+#     MCU TX pin -> transceiver -> CAN_H/CAN_L -> transceiver -> MCU RX pin
+#
+# with no other node involved at all. That splits the diagnosis cleanly:
+#
+#   self-test PASSES (tx_fail 0, TEC 0)  -> Orange's own CAN front-end is
+#       healthy end to end. The port is simply the only node on its wire, so the
+#       normal-mode failure was nothing but a missing ACK partner: a wiring /
+#       topology problem, out on the segment.
+#   self-test STILL FAILS (TEC climbs)   -> the loop through Orange's own
+#       transceiver is broken, so the fault is ON THIS BOARD, before the
+#       segment: RX jumper open, transceiver unpowered, or transceiver dead.
+#       No amount of re-cabling the segment fixes this one.
+#
+#   .venv/bin/esphome -s self_test true run tests/hil/probe-orange-links.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+  # "true" puts both ports in TWAI self-test (no-ACK) mode — see above.
+  self_test: "false"
+  # The proven ring ran at 125 kbps; every stress config since moved to
+  # 500 kbps. Sweep it: bit monitoring failing only at the higher rate is
+  # signal integrity (loop delay, termination, stub length), not a dead
+  # front-end, and it needs the opposite fix.
+  bit_rate: "500kbps"
+  # "true" puts both ports in listen-only: the controller never transmits and
+  # never ACKs, so it can never be knocked into bus-off. That isolates the RX
+  # half on its own — a port that reports a healthy rx %% here has good wiring
+  # and a good receiver, and any failure in normal mode is then the TX half.
+  # Mutually exclusive with self_test (the schema rejects both at once).
+  listen_only: "false"
+
+packages:
+  base: !include hil_common.yaml
+  # Rail first: an unpowered transceiver fakes every symptom below.
+  rail: !include rail_check.yaml
+  # The verdicts below prove a partner EXISTS; these lines name it. Keep both:
+  # ACK still answers "is anyone there?" when a partner is too old, too dumb or
+  # too listen-only to beacon.
+  #
+  # RX half only. The TX half is a `cyclic_send`, which the schema rejects on a
+  # listen-only port whatever its enabled flag — and this config's whole second
+  # pass is `-s listen_only true`. The probe interval below sends the beacon
+  # frames itself instead, past the same listen-only guard.
+  topo_rx_seg1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: seg1
+      beacon_id: "0x0C4"
+  topo_rx_seg2: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: seg2
+      beacon_id: "0x0C5"
+
+# The base sets DEBUG, which buries the verdict under linbus/light chatter.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+globals:
+  - id: linked_seg1
+    type: bool
+    initial_value: "false"
+  - id: linked_seg2
+    type: bool
+    initial_value: "false"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: seg1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: ${bit_rate}
+      tx_queue_depth: 8
+      self_test: ${self_test}
+      listen_only: ${listen_only}
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("probe", "seg1 BUS-OFF - no partner ACKing on this wire");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("probe", "seg1 recovered");'
+    - id: seg2
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: ${bit_rate}
+      tx_queue_depth: 8
+      self_test: ${self_test}
+      listen_only: ${listen_only}
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("probe", "seg2 BUS-OFF - no partner ACKing on this wire");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("probe", "seg2 recovered");'
+  statistics:
+    log_interval: 5s
+
+interval:
+  # One probe frame per port per second. Slow on purpose: the question is
+  # whether a single frame is acknowledged, and a slow rate keeps TEC readable
+  # (TEC +8 per unacknowledged attempt, -1 per success, so a lone port walks to
+  # bus-off in a few seconds and a partnered one sits at 0 forever).
+  - interval: 1s
+    then:
+      - lambda: |-
+          // A listen-only port must not be asked to transmit; the call would
+          // only fail and make the verdict line read like a bus fault.
+          if (${listen_only})
+            return;
+          // These are the topology beacons (topology_tx.yaml's payload and ids),
+          // sent by hand because a cyclic_send cannot be declared on a port that
+          // might be listen-only. Two jobs, one frame: the ACK decides the
+          // LINKED/ALONE verdict below, and the far side's topology_rx names
+          // Orange in its own log. 0x0C4/0x0C5 also outrank the load generator's
+          // 0x200-0x20F, so the probe still reaches a 91 %-loaded wire.
+          //
+          // Byte 5 must roll: the receiving decode entity publishes on change,
+          // so a fixed payload would name Orange once and then leave every other
+          // board's topology line claiming the wire went quiet.
+          static uint8_t seq = 0;
+          uint8_t data[8] = {0x54, 0x4F, 0x50, 0x4F, 0x01, seq++, 0x00, 0x00};
+          id(seg1)->inject(0x0C4, false, false, data, 8);
+          id(seg2)->inject(0x0C5, false, false, data, 8);
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          struct { const char *name; can_gateway::GatewayPort *p; bool *linked; } probes[] = {
+            {"seg1", id(seg1), &id(linked_seg1)},
+            {"seg2", id(seg2), &id(linked_seg2)},
+          };
+          for (auto &pr : probes) {
+            const auto &c = pr.p->counters();
+            uint16_t tec = 0, rec = 0;
+            pr.p->read_error_counters(tec, rec);
+            const uint32_t injected = c.injected.load(std::memory_order_relaxed);
+            const uint32_t tx_fail = c.tx_fail.load(std::memory_order_relaxed);
+            // Linked == every probe frame so far was acknowledged by somebody.
+            // In listen-only there is nothing injected, so "linked" is not the
+            // question — read the rx %% off the port statistics line instead.
+            const bool acked = injected > 0 && tx_fail == 0;
+            const bool linked = acked && tec == 0 && rec == 0;
+            *pr.linked = linked;
+            ESP_LOGI("probe",
+                     "%s: injected=%" PRIu32 " tx_fail=%" PRIu32 " bus_err=%" PRIu32
+                     " err_events=%" PRIu32 " TEC=%u REC=%u -> %s",
+                     pr.name, injected, tx_fail,
+                     c.bus_err.load(std::memory_order_relaxed),
+                     c.err_events.load(std::memory_order_relaxed), tec, rec,
+                     linked ? "LINKED, clean"
+                     : acked ? "LINKED but ERRORED - ACKed, so a partner is there; "
+                               "bus fault (termination / bit rate / stub)"
+                             : "ALONE (nothing ACKs - check wiring/jumpers/termination)");
+          }
+      # Brightness is the state, hue stays the board identity (CLAUDE.md):
+      # 35 % both links up, 20 % one, 10 % none.
+      - light.turn_on:
+          id: status_led
+          red: ${id_r}
+          green: ${id_g}
+          blue: ${id_b}
+          brightness: !lambda |-
+            const int n = (id(linked_seg1) ? 1 : 0) + (id(linked_seg2) ? 1 : 0);
+            return n == 2 ? 0.35f : (n == 1 ? 0.20f : 0.10f);

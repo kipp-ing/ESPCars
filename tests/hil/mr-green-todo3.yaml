@@ -1,0 +1,68 @@
+# Mr. Green + inject soak — Phase 3, Todo 3 (inject() bus-off TOCTOU).
+#
+# SCOPE, stated up front because it is smaller than Todo 3's definition of done:
+# the race needs a state-change ISR to flip the destination port to bus-off in
+# the ~100-200 cycle window between inject()'s outer is_bus_off() read and its
+# critical section. On this bench the dead port never *transitions* at all — it
+# sits dominant, TEC 0, and never reaches bus-off (see Phase 1a). So this soak
+# does NOT open the TOCTOU window and cannot prove the fix.
+#
+# What it does prove is worth having anyway: moving the bus-off read inside
+# portENTER_CRITICAL did not break or slow the inject path, on both a healthy
+# port and a permanently-jammed one, under full ring load for ten minutes.
+# Report it as a soak with its attempt count, never as "Todo 3 proven".
+#
+# Layers on the Issue #1 repro (dead port + forward-all routes + 250 ms inject
+# onto the dead port) and adds a 100 ms inject onto the *healthy* port, which is
+# the mainstream path the fix also touches.
+#
+# Flash:  .venv/bin/esphome run --no-logs tests/hil/mr-green-todo3.yaml \
+#           --device "$(.venv/bin/python script/hil/ports.py green)"
+
+packages:
+  issue1: !include mr-green-issue1.yaml
+
+interval:
+  # Healthy-port inject, 10/s. Competes with the 0x15x/0x16x cyclic load and the
+  # token for the same TX slots and the same critical section.
+  - interval: 100ms
+    then:
+      - can_gateway.send:
+          port: can1
+          can_id: 0x456
+          data: [0xA5, 0x5A]
+  - interval: 10s
+    then:
+      - lambda: |-
+          ESP_LOGI("todo3", "can1 inj=%.0f txfail=%.0f err=%.0f ovf=%.0f | dead inj=%.0f txfail=%.0f",
+                   id(t3_can1_inj).state, id(t3_can1_txfail).state, id(t3_can1_err).state,
+                   id(t3_can1_ovf).state, id(t3_dead_inj).state, id(t3_dead_txfail).state);
+
+sensor:
+  # Everything Todo 3's failure mode would move: a 4 ms interrupts-masked UART
+  # write inside the critical section overruns BOTH RX FIFOs, so lost frames
+  # would surface as observe overflow and bus errors, not just as tx_fail.
+  - platform: can_gateway
+    port_id: can1
+    update_interval: 10s
+    injected:
+      id: t3_can1_inj
+      name: "can1 injected"
+    tx_fail:
+      id: t3_can1_txfail
+      name: "can1 inject tx_fail"
+    bus_err:
+      id: t3_can1_err
+      name: "can1 bus_err soak"
+    observe_overflow:
+      id: t3_can1_ovf
+      name: "can1 observe overflow soak"
+  - platform: can_gateway
+    port_id: dead
+    update_interval: 10s
+    injected:
+      id: t3_dead_inj
+      name: "dead injected"
+    tx_fail:
+      id: t3_dead_txfail
+      name: "dead inject tx_fail"

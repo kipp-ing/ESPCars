@@ -1,0 +1,17 @@
+esphome:
+  name: isotp-c6
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+packages:
+  isotp: !include common.yaml

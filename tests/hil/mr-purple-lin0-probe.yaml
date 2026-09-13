@@ -1,0 +1,135 @@
+# Mr. Purple — DC probe of the LIN0 transceiver (U6, MCP2025) before driving it.
+# See docs/commissioning-mr-purple.md — findings H1 and H2.
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-lin0-probe.yaml --device /dev/cu.usbserial-0001
+#
+# U6 has never been driven (§2.5). This wakes it and answers two questions at DC
+# without a scope and without ever transmitting, so nothing on the LIN wire can
+# collide with the master.
+#
+# Q1 — H1, the strap risk. GPIO12 is MTDI: HIGH at reset selects 1.8 V flash and
+# the board will not boot. It hangs on U6's TXD input, and LIN transceivers
+# commonly pull TXD high internally. Every strap reading so far was taken with
+# U6 ASLEEP (GPIO27 low at reset kills its regulator), which is the residual the
+# doc keeps flagging.
+#
+# The obvious test — hold GPIO27 high across a reset with gpio_hold_en() and
+# re-read the strap — is deliberately NOT what this does. If U6 does pull TXD
+# high, that test leaves the board selecting 1.8 V flash and unable to boot until
+# someone power-cycles it, and on this bench 12 V arrives through the C6's LIN
+# connector (H14), so a power cycle means unplugging a cable by hand.
+#
+# Reading the pull directly is equivalent and cannot brick anything: wake U6,
+# release GPIO12 to high-Z, and see whether an internal pull-down can win.
+#   holds HIGH against the internal pull-down -> U6 pulls TXD up. H1 IS REAL,
+#                                                fit bodge B1 before LIN0 runs.
+#   follows both pulls (floats)               -> U6 does not pull TXD. H1 RETIRED.
+#
+# Q2 — is U6 alive at all? GPIO13 is its RXD output. With the bus idle
+# (recessive) RXD should idle HIGH and be actively driven, so it must hold HIGH
+# against an internal pull-down. If it floats, U6 is unpowered or dead — the
+# same signature H15 found on U4, and worth knowing before blaming the driver.
+#
+# Note this says nothing about H2's voltage question: a logic 1 reads as 1
+# whether it is 3.3 V or 5 V. H2 is cleared by the top marking, not by this.
+
+esphome:
+  name: mr-purple-lin0-probe
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - lambda: |-
+          const gpio_num_t CS   = GPIO_NUM_27;  // U6 pin 2, transceiver+regulator enable
+          const gpio_num_t TXD  = GPIO_NUM_12;  // U6 pin 6, MTDI strap  <-- H1
+          const gpio_num_t RXD  = GPIO_NUM_13;  // U6 pin 5, receiver output
+
+          // Baseline: U6 asleep. This is the state every previous strap read saw.
+          gpio_reset_pin(CS);
+          gpio_set_direction(CS, GPIO_MODE_OUTPUT);
+          gpio_set_level(CS, 0);
+          delay(100);
+
+          gpio_reset_pin(TXD);
+          gpio_set_direction(TXD, GPIO_MODE_INPUT);
+          gpio_set_pull_mode(TXD, GPIO_PULLDOWN_ONLY);
+          delay(20);
+          int tx_asleep = gpio_get_level(TXD);
+          ESP_LOGI("probe", "U6 ASLEEP: GPIO12 with pull-down reads %d", tx_asleep);
+
+          // Wake U6: CS high enables the transceiver and its internal regulator.
+          gpio_set_level(CS, 1);
+          delay(250);
+          ESP_LOGI("probe", "U6 awake (GPIO27 high), regulator settled");
+
+          // --- Q1: does U6 pull GPIO12 (MTDI) up? ---
+          gpio_set_pull_mode(TXD, GPIO_PULLUP_ONLY);
+          delay(20);
+          int tx_pu = gpio_get_level(TXD);
+          gpio_set_pull_mode(TXD, GPIO_PULLDOWN_ONLY);
+          delay(20);
+          int tx_pd = gpio_get_level(TXD);
+          gpio_set_pull_mode(TXD, GPIO_FLOATING);
+
+          ESP_LOGI("probe", "Q1 GPIO12 (U6 TXD, MTDI): pull-up %d, pull-down %d", tx_pu, tx_pd);
+          if (tx_pd == 1) {
+            ESP_LOGE("probe", "Q1 VERDICT: H1 IS REAL - U6 holds MTDI HIGH against the "
+                              "internal pull-down. Fit bodge B1 (1k-2.2k GPIO12->GND) "
+                              "BEFORE resetting with U6 awake, or the board boots 1.8V flash.");
+          } else if (tx_pu == 1 && tx_pd == 0) {
+            ESP_LOGI("probe", "Q1 VERDICT: H1 RETIRED - GPIO12 floats with U6 awake, "
+                              "so U6 does not pull MTDI up. No B1 needed.");
+          } else {
+            ESP_LOGW("probe", "Q1 VERDICT: unexpected (pu=%d pd=%d)", tx_pu, tx_pd);
+          }
+
+          // --- Q2: is U6's receiver output alive? ---
+          gpio_reset_pin(RXD);
+          gpio_set_direction(RXD, GPIO_MODE_INPUT);
+          gpio_set_pull_mode(RXD, GPIO_PULLUP_ONLY);
+          delay(20);
+          int rx_pu = gpio_get_level(RXD);
+          gpio_set_pull_mode(RXD, GPIO_PULLDOWN_ONLY);
+          delay(20);
+          int rx_pd = gpio_get_level(RXD);
+          gpio_set_pull_mode(RXD, GPIO_FLOATING);
+
+          ESP_LOGI("probe", "Q2 GPIO13 (U6 RXD): pull-up %d, pull-down %d", rx_pu, rx_pd);
+          if (rx_pu == 1 && rx_pd == 1) {
+            ESP_LOGI("probe", "Q2 VERDICT: DRIVEN HIGH - U6 is powered and its receiver "
+                              "is alive (bus idle = recessive). LIN0 is safe to bring up.");
+          } else if (rx_pu == 1 && rx_pd == 0) {
+            ESP_LOGE("probe", "Q2 VERDICT: FLOATING - nothing drives GPIO13. U6 unpowered, "
+                              "dead, or not routed - same signature as U4 in H15.");
+          } else {
+            ESP_LOGW("probe", "Q2 VERDICT: reads LOW (pu=%d pd=%d) - bus held dominant?", rx_pu, rx_pd);
+          }
+
+          // Leave U6 asleep again so the next reset is taken under known conditions.
+          gpio_set_level(CS, 0);
+          ESP_LOGI("probe", "U6 returned to sleep (GPIO27 low)");
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+sensor:
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: 'ESP_LOGI("probe", "rail=%.2fV", id(rail_12v).state);'

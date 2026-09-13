@@ -1,0 +1,194 @@
+# Mr. Purple — P4, native TWAI (CAN0) on the classic ESP32.
+# See docs/commissioning-mr-purple.md §4 (P4) and §9 step 4.
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-can.yaml --device /dev/cu.usbserial-0001
+#   .venv/bin/esphome run tests/hil/mr-purple-partner.yaml --device <c6-port>
+#
+# Pins: TX GPIO26 / RX GPIO25 into SN65HVD230 U4 -> J1.1/J1.2. 125 kbps, to
+# match mr-purple-partner.yaml. (tests/build/can_gateway/test-monitor.esp32-idf.yaml
+# is the *compile* target and runs at 500 kbps — do not flash that one here and
+# expect traffic.)
+#
+# Two stages in one image, because the bench is USB-only with no API and no
+# WiFi, so there is no way to flip a switch at runtime:
+#
+#   stage 1  first 30 s   RX only — never initiates a frame, but DOES ACK.
+#   stage 2  after 30 s   transmits 0x301 every 100 ms; the partner logs it.
+#
+# Deliberately NOT `listen_only: true`, which is what P4 step 1 nominally asks
+# for. Two reasons, both practical: a listen-only node does not ACK, so the
+# partner would cycle bus-off for the whole observe window and prove nothing
+# about the segment; and the component rejects `can_gateway.send` on a
+# listen-only port at config time, so the two stages could not share an image.
+# Stage 1 gives the same RX/decode evidence with the segment actually healthy.
+#
+# H13: this is ESP32-D0WDQ6 rev v1.0 — the full TWAI errata set applies and two
+# of the workarounds reset the peripheral and drop frames. Expect a lower
+# error-free ceiling than the C6 and do not file a component bug without first
+# comparing against a run with the errata fixes disabled.
+#
+# SELF-TEST — isolating this board from the bench, no partner required:
+#
+#   .venv/bin/esphome -s can_self_test true -s tx_delay 2s \
+#     run tests/hil/mr-purple-can.yaml --device /dev/cu.usbserial-0001
+#
+# self_test is TWAI no-ACK mode: a frame completes with nobody to acknowledge
+# it. That turns TX success into a hardware verdict, because CAN transmitters
+# bit-monitor — every bit sent is compared against what the receiver reads back.
+# A dominant bit that does not read back dominant is a bit error. So a clean
+# self-test TX proves the whole local loop, GPIO26 -> U4 driver -> bus wire ->
+# U4 receiver -> GPIO25, without another node existing.
+#
+#   tx_fail 0, TEC 0        -> Mr. Purple's CAN front-end is good; look at the
+#                              cable and which connector it lands on
+#   tx_fail rising, bit err -> U4, its wiring, or the GPIO26/25 routing
+
+#   .venv/bin/esphome -s can_self_test true -s tx_delay 2s \
+#     -s can_tx_pin GPIO25 -s can_rx_pin GPIO26 run ... --device ...
+#
+# The pin pair is a substitution because §1's GPIO table is derived from the
+# netlist and marked "not yet verified against the physical board". Swapping
+# TX/RX is the one failure mode that looks exactly like a dead transceiver —
+# the controller would drive U4's R output and read its D input, so no dominant
+# bit ever reads back — and it costs one build to rule out.
+
+substitutions:
+  can_self_test: "false"
+  tx_delay: 30s
+  can_tx_pin: GPIO26
+  can_rx_pin: GPIO25
+
+esphome:
+  name: mr-purple-can
+  name_add_mac_suffix: false
+  on_boot:
+    # Same strap readback as mr-purple-bringup.yaml: this is the first config
+    # that runs with a bus peripheral live, so it is worth re-confirming H1.
+    - priority: 800
+      then:
+        - lambda: |-
+            uint32_t s = *(volatile uint32_t *) 0x3FF44038;
+            ESP_LOGI("strap", "GPIO_STRAP_REG=0x%04X  GPIO12(LIN0_TX)=%d  GPIO0=%d",
+                     (unsigned) (s & 0xFFFF), (int) ((s >> 5) & 1), (int) ((s >> 4) & 1));
+    - priority: -100
+      then:
+        - logger.log: "P4 stage 1: RX + ACK only, no TX from this board"
+        - delay: ${tx_delay}
+        - globals.set:
+            id: tx_enabled
+            value: "true"
+        - logger.log: "P4 stage 2: transmitting 0x301 @100ms — partner TEC must stay 0"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+globals:
+  - id: tx_enabled
+    type: bool
+    initial_value: "false"
+  - id: tx_counter
+    type: uint16_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can0
+      tx_pin: ${can_tx_pin}
+      rx_pin: ${can_rx_pin}
+      bit_rate: 125kbps
+      observe_queue_depth: 32
+      self_test: ${can_self_test}
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("p4", "CAN0 bus-off — partner not ACKing? check 120R at the C6 end + GND wire");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("p4", "CAN0 recovered");'
+  statistics:
+    log_interval: 10s
+
+sensor:
+  # The partner's beacon. Publishes once (the payload is constant) — that single
+  # line is the proof that decode dispatch reached the application. Ongoing RX is
+  # what `observed` below counts.
+  - platform: can_gateway
+    port_id: can0
+    can_id: 0x201
+    offset: 0
+    length: 2
+    byte_order: big
+    name: "Partner beacon"
+    on_value:
+      - lambda: 'ESP_LOGI("p4", "decoded 0x201 from partner = 0x%04X", (unsigned) x);'
+
+  - platform: can_gateway
+    port_id: can0
+    bus_load:
+      name: "CAN0 bus load"
+      id: can0_load
+    observed:
+      name: "CAN0 observed"
+      id: can0_observed
+    observe_overflow:
+      name: "CAN0 observe overflow"
+      id: can0_overflow
+    bus_err:
+      name: "CAN0 bus errors"
+      id: can0_err
+    tec:
+      name: "CAN0 TEC"
+      id: can0_tec
+    rec:
+      name: "CAN0 REC"
+      id: can0_rec
+
+  # H14: the boards share one 12 V rail, so a silent bus may just be a power
+  # event. Every Mr. Purple config carries this line for that reason.
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+  - platform: uptime
+    id: up
+    name: "Uptime"
+    update_interval: 10s
+
+interval:
+  - interval: 100ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(tx_enabled);'
+          then:
+            - lambda: 'id(tx_counter)++;'
+            - can_gateway.send:
+                can_id: 0x301
+                data: !lambda |-
+                  return {(uint8_t) (id(tx_counter) >> 8), (uint8_t) (id(tx_counter) & 0xFF)};
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("p4", "up=%.0fs rail=%.2fV tx=%s n=%u | rx=%.0f load=%.1f%% ovf=%.0f err=%.0f tec=%.0f rec=%.0f",
+                   id(up).state, id(rail_12v).state,
+                   id(tx_enabled) ? "on" : "off", (unsigned) id(tx_counter),
+                   id(can0_observed).state, id(can0_load).state,
+                   id(can0_overflow).state, id(can0_err).state,
+                   id(can0_tec).state, id(can0_rec).state);

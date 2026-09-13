@@ -1,0 +1,157 @@
+# Mr. Purple — raw SPI probe of the MCP2515 (U1), bypassing ESPHome entirely.
+# See docs/commissioning-mr-purple.md phase P5 and findings H7 / H8 / H9.
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-mcp2515-probe.yaml --device /dev/cu.usbserial-0001
+#
+# WHY: `tests/hil/mr-purple-mcp2515.yaml` fails in setup() with
+# "[mcp2515] Failed to set mode" — the chip does not answer. That was the first
+# byte it has ever seen (§2.5: the 2021 firmware had three of four SPI pins
+# wrong), so nothing about this link has ever been proven, including the pinout.
+#
+# This config bit-bangs the SPI transaction by hand at ~100 kHz. That removes
+# three variables at once: ESPHome's SPI component, the 8 MHz clock rate the
+# stock driver uses, and any signal-integrity doubt at speed. If the chip
+# answers here but not there, the fault is speed or driver config. If it does
+# not answer here either, the fault is the chip, its power, or its wiring.
+#
+# Sequence (MCP2515 datasheet §12): RESET (0xC0), wait, then READ (0x03) of
+# CANSTAT (0x0E) and CANCTRL (0x0F). After a reset the part MUST be in
+# Configuration mode, so the expected values are fixed and known:
+#
+#   CANSTAT = 0x80   (OPMOD = 100, Configuration)
+#   CANCTRL = 0x87   (CLKEN set, CLKPRE = Fosc/8)
+#
+# Reading exactly those is proof of a working SPI link AND of H7's premise that
+# a software RESET reaches the part. Reading 0x00 or 0xFF is the signature of no
+# answer at all — 0xFF meaning MISO idles high (pulled/floating), 0x00 meaning it
+# is held low.
+#
+# Also probes whether MISO is driven while CS is asserted, the same DC technique
+# that found H15 on U4 and cleared U6 — a floating MISO with CS low means the
+# part is not driving the bus at all.
+
+esphome:
+  name: mr-purple-mcp-probe
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - lambda: |-
+          const gpio_num_t CS   = GPIO_NUM_5;
+          const gpio_num_t SCK  = GPIO_NUM_18;
+          const gpio_num_t MOSI = GPIO_NUM_23;
+          const gpio_num_t MISO = GPIO_NUM_19;
+          const gpio_num_t INT  = GPIO_NUM_34;
+
+          for (gpio_num_t p : {CS, SCK, MOSI}) {
+            gpio_reset_pin(p);
+            gpio_set_direction(p, GPIO_MODE_OUTPUT);
+          }
+          gpio_reset_pin(MISO);
+          gpio_set_direction(MISO, GPIO_MODE_INPUT);
+          gpio_reset_pin(INT);
+          gpio_set_direction(INT, GPIO_MODE_INPUT);
+
+          gpio_set_level(CS, 1);
+          gpio_set_level(SCK, 0);
+          gpio_set_level(MOSI, 0);
+          delayMicroseconds(100);
+
+          // ~100 kHz, SPI mode 0: MOSI set while clock low, slave samples on
+          // the rising edge; we sample MISO just before driving the clock low.
+          auto xfer = [&](uint8_t out) -> uint8_t {
+            uint8_t in = 0;
+            for (int i = 7; i >= 0; i--) {
+              gpio_set_level(MOSI, (out >> i) & 1);
+              delayMicroseconds(5);
+              gpio_set_level(SCK, 1);
+              delayMicroseconds(5);
+              in = (in << 1) | (uint8_t) gpio_get_level(MISO);
+              gpio_set_level(SCK, 0);
+              delayMicroseconds(5);
+            }
+            return in;
+          };
+
+          // --- Is MISO driven while CS is asserted? ---
+          gpio_set_level(CS, 1);
+          gpio_set_pull_mode(MISO, GPIO_PULLDOWN_ONLY);
+          delay(5);
+          int miso_idle_pd = gpio_get_level(MISO);
+          gpio_set_level(CS, 0);
+          delay(5);
+          int miso_sel_pd = gpio_get_level(MISO);
+          gpio_set_pull_mode(MISO, GPIO_PULLUP_ONLY);
+          delay(5);
+          int miso_sel_pu = gpio_get_level(MISO);
+          gpio_set_pull_mode(MISO, GPIO_FLOATING);
+          gpio_set_level(CS, 1);
+          ESP_LOGI("mcp", "MISO: CS high + pulldown = %d | CS low + pulldown = %d, + pullup = %d",
+                   miso_idle_pd, miso_sel_pd, miso_sel_pu);
+
+          // --- RESET (0xC0) ---
+          gpio_set_level(CS, 0);
+          delayMicroseconds(10);
+          xfer(0xC0);
+          delayMicroseconds(10);
+          gpio_set_level(CS, 1);
+          delay(20);
+          ESP_LOGI("mcp", "sent RESET (0xC0), waited 20 ms");
+
+          // --- READ CANSTAT (0x0E) and CANCTRL (0x0F) ---
+          auto read_reg = [&](uint8_t addr) -> uint8_t {
+            gpio_set_level(CS, 0);
+            delayMicroseconds(10);
+            xfer(0x03);
+            xfer(addr);
+            uint8_t v = xfer(0x00);
+            delayMicroseconds(10);
+            gpio_set_level(CS, 1);
+            delayMicroseconds(50);
+            return v;
+          };
+
+          uint8_t canstat = read_reg(0x0E);
+          uint8_t canctrl = read_reg(0x0F);
+          ESP_LOGI("mcp", "CANSTAT(0x0E) = 0x%02X   (expect 0x80 = Configuration mode)", canstat);
+          ESP_LOGI("mcp", "CANCTRL(0x0F) = 0x%02X   (expect 0x87)", canctrl);
+          ESP_LOGI("mcp", "/INT (GPIO34) idle level = %d   <-- H9", gpio_get_level(INT));
+
+          if (canstat == 0x80 && canctrl == 0x87) {
+            ESP_LOGI("mcp", "VERDICT: MCP2515 ANSWERS. SPI wiring and the part are good, "
+                            "and a software RESET reaches it (H7 premise holds). "
+                            "The stock driver's failure is then speed or config, not hardware.");
+          } else if ((canstat == 0xFF && canctrl == 0xFF) || (canstat == 0x00 && canctrl == 0x00)) {
+            ESP_LOGE("mcp", "VERDICT: NO ANSWER (all 0x%02X). The part is unpowered, dead, "
+                            "or SP_CLK/SP_MOSI/SP_MISO/SP_CS1 are not GPIO18/23/19/5 as "
+                            "the netlist claims. Check 3V3 on U1 pin 18 first.", canstat);
+          } else {
+            ESP_LOGW("mcp", "VERDICT: partial/garbled answer. Suspect a marginal joint or "
+                            "one wrong SPI pin - a stuck MISO gives clean 0x00/0xFF, this "
+                            "did not.");
+          }
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+sensor:
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 5s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: 'ESP_LOGI("mcp", "rail=%.2fV", id(rail_12v).state);'

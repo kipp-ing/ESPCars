@@ -1,0 +1,90 @@
+# Mr. Orange — raw-frame watcher for both segments. "What is the guest sending?"
+#
+# The counterpart of quiet-c6.yaml: with Blue and Green silenced, Orange sits
+# on both wires and records every frame via canwatch.h — first sight of an id
+# logs immediately, then a per-id summary every 5 s (count, rate, latest
+# payload, moving bytes marked '*'). Which port logs answers which segment the
+# guest is on. This config never transmits a frame.
+#
+# It DOES acknowledge by default, on purpose: with the rest of the bench
+# silenced this board is the only ACK source left, and a transmitter with no
+# ACK partner retransmits the same frame back-to-back and walks to
+# error-passive — you would see one frame and a wall of bus errors instead of
+# the guest's real cadence. `-s listen_only true` turns even the ACK off if a
+# session needs the wire untouched (expect exactly that picture, and read the
+# rx half of the statistics line instead).
+#
+#   .venv/bin/esphome run tests/hil/watch-orange.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# If the statistics line shows err_events climbing while no frames land, the
+# guest is probably on a different bit rate — sweep it:
+#
+#   .venv/bin/esphome -s bit_rate 125kbps run tests/hil/watch-orange.yaml ...
+substitutions:
+  node_name: watch-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+  bit_rate: 500kbps
+  listen_only: "false"
+
+packages:
+  base: !include hil_common.yaml
+
+esphome:
+  includes:
+    - canwatch.h
+
+# The base sets DEBUG, which buries the watch lines under light chatter.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+can_gateway:
+  id: gw
+  ports:
+    - id: seg1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: ${bit_rate}
+      listen_only: ${listen_only}
+      on_frame:
+        - lambda: 'canwatch::observe("seg1", can_id, data, dlc, extended, rtr);'
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("watch", "seg1 BUS-OFF");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("watch", "seg1 recovered");'
+    - id: seg2
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: ${bit_rate}
+      listen_only: ${listen_only}
+      on_frame:
+        - lambda: 'canwatch::observe("seg2", can_id, data, dlc, extended, rtr);'
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("watch", "seg2 BUS-OFF");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("watch", "seg2 recovered");'
+  statistics:
+    log_interval: 5s
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: 'canwatch::report(5000);'
+  # LED: identity hue, shimmer while frames arrive, steady 20 % when the wire
+  # is quiet — the same grammar as every other bench config.
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: 'return canwatch::rx_recent(1000);'
+          then:
+            - script.execute: led_token
+          else:
+            - script.execute: led_health

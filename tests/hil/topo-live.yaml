@@ -1,0 +1,148 @@
+# LIVE topology catcher — flash it on every C6 board, then move cables and watch.
+#
+# **BOTH CAN PORTS ARE ALWAYS DECLARED, cabled or not, and that is the whole
+# trick.** Every C6 adapter has CAN1 (GPIO2/3) and CAN2 (GPIO10/11) whether
+# anything is plugged into them or not, so a catcher that only watches the port
+# you *think* is in use cannot see the tap you forgot about — and a stray second
+# tap is copper that silently bridges two segments with no controller anywhere
+# to reveal it. Beaconing on all of them turns every port into evidence: one
+# that is cabled names its partners, one that is not says `= nothing`, and the
+# difference between those two is the answer you were looking for.
+#
+# Use topo-live-1can.yaml only for a board that genuinely has one TWAI
+# controller — the classic ESP32 (Mr. Purple), whose second CAN is an MCP2515
+# over SPI and not a can_gateway port at all.
+#
+# Each node beacons its own MAC at 1.5 Hz on every CAN port it owns, and decodes
+# every beacon it hears. Plugging a tap in prints a line within ~1 s; pulling one
+# prints a line within ~3 s. No slot map, no board table, nothing to keep in
+# sync — see tests/hil/topology_live.h for why MAC and not a slot number.
+#
+#   [topo] seg1 + 20:6E:F1:0A:D1:E0.bus1 id=0x3E1 (NEW)
+#   [topo] seg1 - F0:F5:BD:0E:DD:50.bus0 id=0x140 (LOST, silent 3004 ms)
+#   [topo] seg1 = F0:F5:BD:0E:DD:50.bus0(0x140) 94:B9:7E:E4:80:C0.bus0(0x2C0)
+#
+# Flash all three, then attach to any console — every board reports the same
+# wiring from its own side, so the pictures cross-check.
+#
+#   # Orange — takes the defaults below
+#   .venv/bin/esphome run tests/hil/topo-live.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+#   # Green — same board type, both its ports too. Names are local labels only;
+#   # remote boards are identified by MAC, so they never have to agree.
+#   .venv/bin/esphome -s node_name mr-green -s port_a can1 -s port_b can2 \
+#     run tests/hil/topo-live.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py green)"
+#
+#   # Purple — one TWAI controller, so the single-port file
+#   .venv/bin/esphome -s node_name mr-purple -s board esp32dev \
+#     -s port_a can0 -s pin_a_tx GPIO26 -s pin_a_rx GPIO25 \
+#     run tests/hil/topo-live-1can.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py purple)"
+#
+# BENCH ONLY: it transmits unconditionally, on ids chosen for identity rather
+# than for politeness. Never in tests/build/, an example, or a car config.
+substitutions:
+  node_name: mr-orange
+  board: esp32-c6-devkitc-1
+  port_a: seg1
+  pin_a_tx: GPIO2
+  pin_a_rx: GPIO3
+  bus_a: "0"
+  port_b: seg2
+  pin_b_tx: GPIO10
+  pin_b_rx: GPIO11
+  bus_b: "1"
+  bit_rate: 500kbps
+
+esphome:
+  name: ${node_name}
+  name_add_mac_suffix: false
+  includes:
+    - topology_live.h
+  on_boot:
+    # The +5 V domain gates the CAN transceivers, and it is off by default:
+    # GPIO7 is the shared sleep rail (LIN SLP_N + 5V_ENA via JP14 + the Q1/Q2
+    # switch). Raise it before anything tries to talk, or every port looks like
+    # broken wiring. JP14 still has to be physically bridged — no log line can
+    # see that, so a board that is mute on EVERY port while a sibling port links
+    # is a jumper question, not a cabling one.
+    - priority: 900
+      then:
+        - lambda: |-
+            gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_7, 1);
+            ESP_LOGI("rail", "GPIO7 high - +5V domain enabled (needs JP14 bridged)");
+
+esp32:
+  board: ${board}
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+can_gateway:
+  id: gw
+  ports:
+    - id: ${port_a}
+      tx_pin: ${pin_a_tx}
+      rx_pin: ${pin_a_rx}
+      bit_rate: ${bit_rate}
+      on_frame:
+        - lambda: 'topo::observe("${port_a}", ${bus_a}, can_id, data, dlc, extended, rtr);'
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("topo", "${port_a} BUS-OFF - nothing is ACKing this port");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("topo", "${port_a} recovered");'
+    - id: ${port_b}
+      tx_pin: ${pin_b_tx}
+      rx_pin: ${pin_b_rx}
+      bit_rate: ${bit_rate}
+      on_frame:
+        - lambda: 'topo::observe("${port_b}", ${bus_b}, can_id, data, dlc, extended, rtr);'
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("topo", "${port_b} BUS-OFF - nothing is ACKing this port");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("topo", "${port_b} recovered");'
+
+globals:
+  - id: seq_a
+    type: uint8_t
+  - id: seq_b
+    type: uint8_t
+
+interval:
+  # TX port A. 1.5 Hz: fast enough that a re-plug shows while your hand is still
+  # on the connector. A refused inject is ignored on purpose — this is
+  # diagnostics, the next beacon is 666 ms away, and a port that cannot transmit
+  # is exactly what the far end's LOST line is about to report.
+  - interval: 666ms
+    then:
+      - lambda: |-
+          uint8_t data[8];
+          const uint32_t id_a = topo::fill_beacon("${port_a}", data, ${bus_a}, &id(seq_a));
+          id(${port_a})->inject(id_a, false, false, data, 8);
+          uint8_t data_b[8];
+          const uint32_t id_b = topo::fill_beacon("${port_b}", data_b, ${bus_b}, &id(seq_b));
+          id(${port_b})->inject(id_b, false, false, data_b, 8);
+
+  - interval: 500ms
+    then:
+      - lambda: "topo::sweep();"
+
+  # Full picture every 5 s, so a console attached midway still learns the state
+  # without waiting for something to change.
+  - interval: 5s
+    then:
+      - lambda: "topo::report();"

@@ -1,0 +1,9 @@
+# Blue's half of the bidirectional PERF soak: the seg2 generator at -O2.
+#
+# No substitution override needed — stress-blue-load.yaml already defaults to `burst: 2`, which is
+# the matched half of the ~3600 f/s budget. See soak-perf-green.yaml for why the two must stay
+# equal, and stress-blue-load.yaml's header for the id-space split (Green 0x200-0x20F,
+# Blue 0x240-0x24F; two nodes must never share an id).
+packages:
+  gen: !include stress-blue-load.yaml
+  perf: !include opt_perf.yaml

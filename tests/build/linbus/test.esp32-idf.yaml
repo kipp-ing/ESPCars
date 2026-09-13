@@ -1,0 +1,21 @@
+substitutions:
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  cs_pin: GPIO5
+
+esphome:
+  name: linbus-esp32
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+<<: !include common.yaml

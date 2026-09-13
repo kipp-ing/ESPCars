@@ -1,0 +1,50 @@
+# Raw sniffer only (A14): one port whose *only* subscriber is `on_frame:`.
+#
+# Why this exists as its own target, when common.yaml also carries an on_frame
+# block: there, the observation path is already compiled in by the decode
+# sensors, which emit USE_CAN_GATEWAY_OBSERVE from the sensor platforms. Here
+# nothing else does, so the define can only come from the trigger's own
+# `cg.add_define(...)` — and CanGatewayFrameTrigger lives inside that #ifdef.
+# Drop the define from can_gateway/__init__.py and this is the config that
+# fails to compile; every other one stays green.
+#
+# The shape mirrors tests/hil/topo-live-1can.yaml, the bench topology catcher:
+# nodes announce themselves by MAC, so the ids are MAC-derived and cannot be
+# enumerated at codegen time — which is the reason a no-id subscriber exists at
+# all. Deliberately no decode entities, no diagnostic sensors, no statistics.
+esphome:
+  on_boot:
+    then:
+      # A single port may omit `port:` (V22). Gives the sniffer something to
+      # transmit, so the config also covers TX on an observe_all port.
+      - can_gateway.send:
+          can_id: 0x100
+          data: [0x01]
+
+can_gateway:
+  id: sniff
+  ports:
+    - id: wire
+      rx_pin: ${sniff_rx_pin}
+      tx_pin: ${sniff_tx_pin}
+      bit_rate: 500kbps
+      # Every received frame, whatever its id. Two automation blocks on one
+      # port (the list-of-automations form): each builds its own trigger and
+      # its own subscribe_all() registration.
+      #
+      # ESP_LOGD, not ESP_LOGV: the default log level is DEBUG, and a macro
+      # compiled out takes its arguments' type checking with it — which is half
+      # of what this target is here to do.
+      on_frame:
+        - then:
+            - lambda: |-
+                ESP_LOGD("sniff", "%s%03X [%u]%s", extended ? "x" : "",
+                         (unsigned) can_id, dlc, rtr ? " rtr" : "");
+        - then:
+            - lambda: |-
+                if (dlc >= 2 && !rtr) {
+                  ESP_LOGD("sniff", "%02X %02X", data[0], data[1]);
+                }
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("sniff", "bus-off - nothing is ACKing this port");'

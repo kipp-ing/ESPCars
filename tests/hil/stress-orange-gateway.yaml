@@ -1,0 +1,300 @@
+# Mr. Orange — the M2 stress test DUT: gateway + LIN + logging, all at once.
+#
+# This is the production configuration in the car, on one ESP32-C6, which is why
+# every function is proven on this one board rather than spread across the bench
+# (M2 stress run §1 (2026-07-26, git history)).
+#
+# Pass criteria:
+#   * `dropped == 0` AND `tap_dropped == 0` — two different bottlenecks, never
+#     summed: `dropped` is a producer finding the logger's ring full,
+#     `tap_dropped` is the gateway's RX ISR finding a tap ring full.
+#   * CAN bus load >= 90 % on every loaded segment (achieved, from the port
+#     statistics line — never the configured burst).
+#   * CPU > 80 % from the idle-task share, never inferred from loop rate.
+#   * LIN error-free; log record count reconciles with the ports' received
+#     counters. Note the log also contains the topology beacons — ids 0x0C0-0x0C7
+#     at 1 frame/s per beaconing port, ~2 records/s against ~3600. They are in
+#     the ports' received counters as well, so the reconciliation is unaffected;
+#     they are only worth knowing about when eyeballing the CSV.
+#
+#   .venv/bin/esphome run tests/hil/stress-orange-gateway.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# WIRING — re-measured 2026-07-28 08:06 from Orange's own `[topo]` lines:
+#
+#     Seg1:  Orange `seg1` (GPIO2/3)  <-->  Green CAN1 (GPIO2/3)
+#                                      <-->  Purple native TWAI (GPIO26/25)
+#     Seg2:  Orange `seg2` (GPIO10/11)  <-->  Blue CAN1 (GPIO2/3)
+#
+# **GREEN AND BLUE ARE SWAPPED** relative to every earlier revision of this
+# header, which had Blue joining Purple on seg1 and Green alone on seg2. The
+# beacons say Green sits on seg1 with Purple and Blue is alone on seg2. That
+# swap inverts the source tags described further down: the tap records tagged
+# `source: 1` are Green's and `source: 2` are Blue's, not the other way round.
+# Re-measure before trusting either version — `[topo]` in any run's own log.
+#
+# Running Blue as a second generator —
+# tests/hil/stress-blue-load.yaml — makes this a bidirectional round: both
+# routes carry load instead of `to_seg2` sitting idle. Read that file's header
+# before the run; it changes two expectations stated below, and it requires
+# Green's burst to come down so the two generators share the 3600 f/s budget.
+# Blue is a third node on seg1, so seg1's termination must still be 2 x 120 R at
+# the two physical ends and NOT a third terminator on Blue's PCB (§1 of
+# tests/hil/HIL.md: jumpers belong to the PCB, not to the name).
+#
+# **The generator is on seg2 and the ACK partner on seg1 — mirrored from what
+# earlier revisions of this header and the handovers assumed.** Nothing in this
+# config cares: both routes exist, and neither partner's config knows which DUT
+# port it faces. The one thing that flips is which source tag the tap records
+# carry — see the source-tag note below. Measured 2026-07-27 with
+# `script/hil/topo-watch.py`; trust that over any wiring table, this one
+# included.
+#
+# 2 x 120 R per segment at its two physical ends. The two
+# partners on DIFFERENT DUT ports is the whole point: Orange is then the only
+# path between them, so forwarding is on the critical path and the route
+# counters, Purple's reception and the seg2 tap all say something about the
+# gateway. The previous arrangement (Green and Purple ACKing each other on one
+# wire, Orange elsewhere) exercised nothing in here.
+#
+# Both partners must be running in NORMAL mode before this config is flashed:
+# an unpowered, reset or listen-only partner does not ACK, and the port it
+# should be ACKing walks to bus-off exactly as if it were unwired. Gate with
+# probe-orange-links.yaml — both ports `LINKED, clean`.
+#
+# Two routes on ports that share a wire is a forwarding loop; the same-wire
+# check in tests/hil/HIL.md (probe Orange with both partners
+# powered down — both ports must read ALONE) rules that out once, after any
+# re-cabling.
+#
+# EXPECTED RECORD RATE, and why it is half what the handover assumed.
+# With forwarding on, a frame injected on one segment is *transmitted* onto the
+# other, and a TWAI node does not receive its own transmissions. So if the two
+# generators offer G1 and G2 frames/s:
+#     wire traffic on each segment = G1 + G2   (own + forwarded)
+#     tap records                  = G1 + G2   (RX on seg1 + RX on seg2)
+# 90 % of 500 kbit/s is ~3600 f/s, so G1 + G2 = 3600 and the tap sees
+# ~3600 rec/s total — not the ~7200 rec/s M2 stress run §5 (2026-07-26, git history)
+# predicted. 7200 needs forwarding OFF, with each segment independently loaded,
+# which is a pure-logger stress rather than the production role.
+#
+# WITH BLUE GENERATING (stress-blue-load.yaml), the paragraph below no longer
+# describes the run: G1 is Blue's ~1800 f/s, G2 is Green's ~1800 f/s, each wire
+# carries G1 + G2 ≈ 3600 f/s, and the tap total is unchanged at ~3600 rec/s —
+# but it arrives as **source 1 ≈ source 2**, not as source 2 alone, and seg1's
+# bus load stops being a forwarding measurement because Blue fills whatever gap
+# forwarding leaves. Use Blue's `fwd:` line for that instead. Everything below
+# is the single-generator baseline, kept because it is what an unmodified
+# Green-only round still does.
+#
+# In that baseline G1 == 0 — only Green generates; Purple ACKs and listens. So
+# Seg2 carries Green's ~3600 f/s, Seg1 carries the same frames again as
+# forwarded copies, and every tap record is tagged `source: 2` — because Green
+# now sits on seg2. **A near-zero source-1 count is the expected result, not a
+# dead tap**: seg1's RX never sees Orange's own transmissions and Purple never
+# transmits. (Swap the two tags back if the generator ever moves to seg1; the
+# reasoning is symmetric and only the labels change.) It also means Seg1's
+# 90 % is produced by the DUT rather than by a generator — if forwarding sheds
+# or stalls, Seg1's load falls below 90 % and that is the finding.
+#
+# That matters, because ~3600 rec/s is ~144 KB/s of CSV and the writer was
+# measured on this board at **5276 rec/s / 190 KB/s sustained with
+# dropped == 0** (2026-07-26, tests/hil/stress-orange-sdrate.yaml). The
+# production topology fits with ~30 % headroom; the 7200 rec/s variant does not,
+# and is where the binary record format stops being optional.
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  cpu: !include cpu_stats.yaml
+  # Says which board is on each wire, in the log, every 10 s — including
+  # "seg1 and seg2 are the same wire", which with the two routes below would be
+  # a forwarding loop. See tests/hil/topology_rx.yaml for the slot map.
+  topo_rx_seg1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: seg1
+      beacon_id: "0x0C4"
+  topo_tx_seg1: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: seg1
+      beacon_id: "0x0C4"
+  topo_rx_seg2: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: seg2
+      beacon_id: "0x0C5"
+  topo_tx_seg2: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: seg2
+      beacon_id: "0x0C5"
+
+globals:
+  - id: last_lin_ms
+    type: uint32_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  # 1024 records/port. At ~1800 rec/s per segment that is ~570 ms of writer
+  # stall absorbed before the ISR has to start dropping — and a drop here is
+  # counted as tap_dropped, separately from the logger's own ring.
+  log_tap_queue_depth: 1024
+  ports:
+    - id: seg1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      tx_queue_depth: 64
+      observe_queue_depth: 48
+      log_tap: true
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("hil", "CAN(seg1) bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN(seg1) recovered");'
+    - id: seg2
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 500kbps
+      tx_queue_depth: 64
+      observe_queue_depth: 48
+      log_tap: true
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("hil", "CAN(seg2) bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN(seg2) recovered");'
+  routes:
+    - id: to_seg2
+      from: seg1
+      to: seg2
+    - id: to_seg1
+      from: seg2
+      to: seg1
+  statistics:
+    log_interval: 5s
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: listener
+  rx_ids:
+    - lin_id: 48
+      length: 4
+      checksum: enhanced
+  on_frame:
+    - lin_id: 48
+      then:
+        - lambda: "id(last_lin_ms) = millis();"
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin. GPIO17 reaches header J5.6 (100R, R32) and stops there: the H5
+  # high-side switch on the card's supply was specified but never built, so driving that
+  # pin cycles nothing. Declaring it turns power_cycle on by default (V19) and makes every
+  # recovery line claim a power cycle that cannot happen — which is exactly what the seven
+  # ESP_ERR_TIMEOUT attempts of 2026-07-28 were. Recovery here is the in-band reset
+  # (components/sd_logger/card_reset.h), which needs no switch.
+  clock: 10MHz                 # 100R series + flying leads make 20MHz marginal
+  buffer_depth: 4096
+  sync_interval: 1s
+  # M6 rotation, at the production numbers design §4 sizes it from: ~148 KB/s from
+  # the two taps puts a 4 MB chunk at ~28 s, and the time bound seals an idle bus
+  # so its newest records do not sit in an OPEN file (which is never servable).
+  # 32 MB used to be ~3.6 minutes here and no run ever reached it — rotation has
+  # never fired on hardware at all, which is why Phase B of collection waits on it.
+  #
+  # This is the *production-shape* half of that evidence: gateway, LIN, taps and
+  # the writer on one C6, rotating under load. tests/hil/stress-orange-sdrotate.yaml
+  # is the isolated half, and tests/hil/mr-orange-sdlog.yaml the quiet one where
+  # the time bound is the bound that fires. Pass criteria below are unchanged:
+  # rotation must cost neither `dropped` nor `tap_dropped`.
+  max_file_size: 4MB
+  max_file_seconds: 60s
+  # The card half of collection: the chunk index and "drop oldest un-collected".
+  # `serve: false` — this rig is the M2 stress DUT and WiFi's tasks preempt the LIN
+  # task (design §9.1, unmeasured), so no interface is asked for and no port bound.
+  # 90 % is a real threshold, not a soak setting; sdrotate.yaml is where retention
+  # is deliberately made to fire.
+  collection:
+    enabled: true
+    serve: false
+    retention_percent: 90
+  # The native taps (S2). Source tags 1 and 2 keep the two segments apart in one
+  # file; tag 0 stays the sd_logger.log action, which nothing uses here.
+  can_ports:
+    - port: seg1
+      source: 1
+    - port: seg2
+      source: 2
+  vcc_monitor:
+    adc_pin: 6
+    threshold: 10.5V
+    # Per-chip stopgap for the uncalibrated-ADC bug, NOT the physical 10.8673 —
+    # see the long note in mr-orange-sdlog.yaml and docs/HANDOVER.md. If the
+    # logger reports mounted=0 right after boot, look for "VCC sag: emergency
+    # close" before suspecting the card.
+    divider: 14.67
+  statistics:
+    log_interval: 5s
+
+sensor:
+  - platform: can_gateway
+    port_id: seg1
+    bus_load:
+      name: "seg1 bus load"
+    bus_err:
+      name: "seg1 bus errors"
+  - platform: can_gateway
+    port_id: seg2
+    bus_load:
+      name: "seg2 bus load"
+    bus_err:
+      name: "seg2 bus errors"
+  - platform: can_gateway
+    route_id: to_seg2
+    update_interval: 5s
+    forwarded:
+      name: "fwd seg1->seg2"
+  - platform: can_gateway
+    route_id: to_seg1
+    update_interval: 5s
+    forwarded:
+      name: "fwd seg2->seg1"
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool lin_ok = id(last_lin_ms) != 0 && (now - id(last_lin_ms)) < 3000;
+          const bool log_ok = id(sd_log)->is_mounted() &&
+                              id(sd_log)->get_dropped_records() == 0;
+          id(healthy) = lin_ok && log_ok;
+          if (!id(healthy) && now > 10000)
+            ESP_LOGW("hil", "ORANGE degraded: lin=%d mounted=%d dropped=%" PRIu32,
+                     lin_ok, id(sd_log)->is_mounted() ? 1 : 0,
+                     id(sd_log)->get_dropped_records());
+      - script.execute: led_health

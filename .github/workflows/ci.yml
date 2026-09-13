@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Schema tests + config validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements_test.txt
+      - name: Run component schema tests
+        run: python -m pytest tests/ -q
+      - name: Validate build configs
+        run: |
+          set -e
+          for y in tests/build/*/test*.yaml; do
+            echo "::group::$y"
+            esphome config "$y" > /dev/null
+            echo "::endgroup::"
+          done
+
+  host-tests:
+    name: Host unit tests (freestanding cores)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Several headers are deliberately ESPHome- and IDF-free so the exact code that
+      # runs on the device also runs here: gateway_core.h (the RX ISR), sd_logger's
+      # tap translation, and the uds catalog reader / decoder / scheduler. The
+      # Makefile globs test_*.cpp, so a new suite is covered by adding the file.
+      # Builds with ASan+UBSan and -fno-sanitize-recover, so a finding cannot exit 0.
+      - name: Build and run host tests
+        run: make -C tests/host
+
+  compile:
+    name: Compile ${{ matrix.config }}
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - tests/build/can_gateway/test.esp32-c6-idf.yaml
+          - tests/build/can_gateway/test-monitor.esp32-c6-idf.yaml
+          # Bridge with no diagnostics at all: the only config that compiles the
+          # no-RX-taps branch and try_hw_filter_offload_. See common_bridge.yaml.
+          - tests/build/can_gateway/test-bridge.esp32-c6-idf.yaml
+          # Classic ESP32: one TWAI controller, so this is the single-
+          # controller code path (and the target of docs/commissioning-mr-purple.md).
+          - tests/build/can_gateway/test-monitor.esp32-idf.yaml
+          # Sniffer: `on_frame:` is the only observation subscriber, so it is the
+          # only config where USE_CAN_GATEWAY_OBSERVE (and with it
+          # CanGatewayFrameTrigger) can come from the trigger's own codegen.
+          # See common_sniffer.yaml.
+          - tests/build/can_gateway/test-sniffer.esp32-c6-idf.yaml
+          # Tap-only: `log_tap:` is the ports' only receive consumer — no
+          # routes, no on_frame, no decode entities. The shape no config
+          # compiled while it silently never received (HANDOVER-guest-bms.md
+          # §8). See common_taponly.yaml.
+          - tests/build/sd_logger/test-taponly.esp32-c6-idf.yaml
+          - tests/build/linbus/test.esp32-idf.yaml
+          - tests/build/linbus/test.esp32-c3-idf.yaml
+          - tests/build/linbus/test.esp32-c6-idf.yaml
+          - tests/build/isotp/test.esp32-c6-idf.yaml
+          # uds with `embed: true`: the whole decode path — catalog open, name
+          # resolution, group scheduling, bit extraction, scale evaluation,
+          # entity publishing — compiled with NOTHING flashed. This is the only
+          # config CI can build without a device, which is why the second
+          # catalog source exists at all (DESIGN-uds.md §2).
+          - tests/build/uds/test.esp32-c6-idf.yaml
+          # uds with a memory-mapped partition: the case that actually runs on
+          # the bench, and the only one that compiles esp_partition_mmap() and
+          # esp32.add_partition(). It also builds two hubs sharing one `diag`
+          # partition, so it proves codegen requests the partition exactly once
+          # — add_partition() refuses a duplicate name.
+          - tests/build/uds/test-partition.esp32-c6-idf.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements_test.txt
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ matrix.config }}-${{ hashFiles('requirements_test.txt') }}
+      - name: Compile
+        run: esphome compile ${{ matrix.config }}
+
+  clang-format:
+    name: C++ formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check clang-format
+        run: |
+          pip install clang-format==13.0.1
+          find components -name '*.cpp' -o -name '*.h' -o -name '*.tcc' | \
+            xargs clang-format --dry-run --Werror

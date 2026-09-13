@@ -1,0 +1,48 @@
+# Per-component CPU attribution inside the ESPHome main loop, via esphome core's own
+# `runtime_stats` component (2026.7.0, `USE_RUNTIME_STATS`).
+#
+# Third and narrowest of the three measurement layers:
+#
+#   cpu_stats.yaml      how loaded is the board          (100 - idle share)
+#   task_stats.yaml     which FreeRTOS task              (sees sdlog_wr, lin_uart_evt, loopTask)
+#   runtime_stats.yaml  which component inside loopTask  (this file)
+#
+# Include it only for a profiling run:
+#
+#   packages:
+#     base:    !include hil_common.yaml
+#     cpu:     !include cpu_stats.yaml
+#     tasks:   !include task_stats.yaml
+#     runtime: !include runtime_stats.yaml
+#
+# Output, every log_interval, at INFO:
+#
+#   [runtime_stats]: Component Runtime Statistics
+#     Period stats (last 30000ms): 7 active components
+#       sd_logger: count=29412, avg=0.012ms, max=1.84ms, total=352.9ms
+#       ...
+#       main_loop: iters=29412, active_avg=0.041ms, active_max=2.10ms, ...
+#
+# **It cannot see the two places this project's CPU actually goes**, and reading it without that
+# in mind is how a profiling session goes wrong:
+#
+#   - ISR work is invisible. can_gateway's forwarding path — match_rule, the slot pool, the tap
+#     push — runs in the TWAI RX ISR, so a `can_gateway` line near zero means "its loop() is
+#     cheap", never "forwarding is cheap". Bill that against the idle share in cpu_stats.
+#   - Other tasks are invisible. sd_logger formats and writes in `sdlog_wr`; its loop() only hands
+#     work over. task_stats.yaml is the one that sees them.
+#
+# What it *is* good for: finding the component whose loop() got expensive, and splitting main-loop
+# overhead from component time (the `main_loop` / `main_loop_overhead_section` lines).
+#
+# **This one perturbs what it measures — keep it out of baseline and gate runs.** It puts two
+# micros() reads around every component dispatch on every loop pass; at ~1000 loop passes/s and a
+# handful of components that is thousands of timer reads per second that the gate run does not
+# have. `verify.py`'s 19.4 laps/s baseline and the CPU figures in M2 stress run (2026-07-26, git history) were
+# measured without it, and stay comparable only against configs that also omit it.
+#
+# 30 s rather than the component's 60 s default: a bench run is minutes, and the period block is
+# the useful one — the since-boot block averages the profile together with card mount and bus
+# bring-up.
+runtime_stats:
+  log_interval: 30s

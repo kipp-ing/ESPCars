@@ -1,0 +1,14 @@
+# Mr. green of the token ring, built at PERF (-O2) instead of the default SIZE (-Os).
+#
+# The ring config included whole plus tests/hil/opt_perf.yaml — no fork, so the gate runs against
+# exactly the same rig definition it always does. All three boards must be flashed from the
+# ring-perf-*.yaml set together: a ring with one board at -O2 and two at -Os measures nothing.
+#
+#   script/hil/flash-perf.sh
+#   .venv/bin/python script/hil/verify.py --seconds 45 --min-laps 75
+#
+# Node name stays mr-green, so ports.py, verify.py and the build directory all resolve as usual —
+# which also means switching between this and mr-green.yaml forces a full rebuild each way.
+packages:
+  ring: !include mr-green.yaml
+  perf: !include opt_perf.yaml

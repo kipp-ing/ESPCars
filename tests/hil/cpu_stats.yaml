@@ -1,0 +1,73 @@
+# CPU load measurement for the bench, via FreeRTOS run-time stats.
+#
+# Include as a package alongside a node config:
+#
+#   packages:
+#     base: !include hil_common.yaml
+#     cpu:  !include cpu_stats.yaml
+#
+# CPU = 100 - idle-task share, sampled as a delta between reports so it is the
+# load over the last window, not since boot.
+#
+# Measured, not inferred. Main-loop iteration rate is NOT a CPU proxy: this
+# board runs ~1000 loop passes/s whether it is forwarding 4000 frames/s or
+# sitting idle, because the loop blocks on its own scheduling, not on work.
+#
+# Two sdkconfig options are required. `esp32: framework: sdkconfig_options:` is
+# merged into the package, but VERIFY it actually took — a raw option that
+# collides with a Kconfig *choice* symbol set by esphome's own esp32 codegen is
+# silently lost (that is how `log_level:` beat a raw option earlier):
+#
+#   grep -E "RUN_TIME_STATS|TRACE_FACILITY" \
+#     tests/hil/.esphome/build/<name>/sdkconfig.<name>
+#
+# Both must read `=y`. If they do not, the lambda still compiles but every
+# counter reads 0 and the reported CPU sticks at 0.0 %.
+esp32:
+  framework:
+    sdkconfig_options:
+      CONFIG_FREERTOS_USE_TRACE_FACILITY: y
+      CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS: y
+
+globals:
+  - id: cpu_last_total
+    type: uint32_t
+    initial_value: "0"
+  - id: cpu_last_idle
+    type: uint32_t
+    initial_value: "0"
+  - id: cpu_percent
+    type: float
+    initial_value: "0.0f"
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          // 24 slots is generous: this firmware runs well under 20 tasks, and
+          // uxTaskGetSystemState silently returns 0 if the array is too small.
+          TaskStatus_t tasks[24];
+          uint32_t total = 0;
+          UBaseType_t count = uxTaskGetSystemState(tasks, 24, &total);
+          if (count == 0) {
+            ESP_LOGW("cpu", "run-time stats unavailable — check sdkconfig "
+                            "CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS/USE_TRACE_FACILITY");
+            return;
+          }
+          uint32_t idle = 0;
+          // "IDLE" on single-core, "IDLE0"/"IDLE1" on the dual-core parts —
+          // prefix match covers both, and summing is correct either way.
+          for (UBaseType_t i = 0; i < count; i++) {
+            if (strncmp(tasks[i].pcTaskName, "IDLE", 4) == 0)
+              idle += tasks[i].ulRunTimeCounter;
+          }
+          const uint32_t d_total = total - id(cpu_last_total);
+          const uint32_t d_idle = idle - id(cpu_last_idle);
+          id(cpu_last_total) = total;
+          id(cpu_last_idle) = idle;
+          if (d_total == 0)
+            return;  // first pass, or the counter wrapped onto itself
+          const uint32_t busy = d_total > d_idle ? d_total - d_idle : 0;
+          id(cpu_percent) = 100.0f * (float) busy / (float) d_total;
+          ESP_LOGI("cpu", "CPU %.1f%% (idle %.1f%%, %u tasks)", id(cpu_percent),
+                   100.0f - id(cpu_percent), (unsigned) count);

@@ -1,0 +1,240 @@
+# Mr. Blue — 500 kbit/s burst load generator on seg1, the second half of a
+# BIDIRECTIONAL M2 stress. Sibling of stress-green-load.yaml; read that file's
+# header for why a burst and not `cyclic_sends` (issue #2), and for the knobs.
+#
+# WIRING this is written against — re-measured 2026-07-28 08:06 from Orange's
+# own `[topo]` lines, not assumed:
+#
+#     Seg1:  Orange `seg1` (GPIO2/3)  <-->  Green can1 (GPIO2/3)  <-->  Purple can0 (26/25)
+#     Seg2:  Orange `seg2` (GPIO10/11)  <-->  Blue can1 (GPIO2/3)
+#     loose: Blue can2, Green can2
+#
+# **BLUE IS ON SEG2, NOT SEG1** — the reverse of what this header said until
+# 2026-07-28, and Green moved with it. Blue is now the LONE partner on seg2, so
+# it is seg2 that has two nodes and seg1 that has three; the termination note
+# below therefore applies to seg1's THREE nodes (Orange, Green, Purple), and
+# seg2 must have its 2 x 120 R at Orange and Blue. Re-confirm before every run —
+# this table is a snapshot and the bench reports the truth.
+#
+# Under this wiring seg2 accumulated bus_err/err_events steadily during the
+# 2026-07-28 CAN-only run (~40 bus_err and ~200 err_events per second at 88.9 %
+# load) while seg1 stayed at exactly 0/0, with no bus-off, tx_fail 0 and no TEC
+# escalation. Same DUT, same firmware, no SD in the build at all — so it is a
+# property of the seg2 WIRE, and termination is the first thing to check.
+#
+# ---------------------------------------------------------------------------
+# WHY A SECOND GENERATOR, AND WHAT IT CHANGES
+#
+# Until now G1 == 0: only Green generated, so Orange's `to_seg1` route carried
+# everything and `to_seg2` carried nothing. Half the forwarding path — one of
+# two routes, one of two TX queues, one of two slot-tracker directions — was
+# never under load in an M2 run. With Blue generating on seg1, both routes work
+# at once, which is the arrangement the production config actually faces.
+#
+# The frame budget does NOT double, and this is the part to get right before
+# flashing anything. A TWAI node never receives its own transmissions, so with
+# generators offering G1 (Blue, seg1) and G2 (Green, seg2):
+#
+#     wire traffic on seg1 = G1 + G2      (Blue's own + Orange's forwarded G2)
+#     wire traffic on seg2 = G2 + G1      (Green's own + Orange's forwarded G1)
+#     tap records          = G1 + G2      (seg1 RX sees G1, seg2 RX sees G2)
+#
+# 90 % of 500 kbit/s is ~3600 f/s, so **G1 + G2 = 3600, i.e. ~1800 f/s each** —
+# Green must come down to make room for Blue. Flash Green with a matching burst
+# in the same round:
+#
+#   .venv/bin/esphome -s burst 2 run tests/hil/stress-green-load.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py green)"
+#   .venv/bin/esphome run tests/hil/stress-blue-load.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py blue)"
+#
+# Leaving Green at its solo `burst: 58` puts both wires past 100 % demand: Blue's
+# TX then competes with Orange's forwarding TX on seg1, Orange's TX queue backs
+# up and the route sheds. A shedding gateway is a bench misconfiguration here,
+# not a finding.
+#
+# The logger load is unchanged at ~3600 rec/s (~144 KB/s), still well inside the
+# 5276 rec/s / 190 KB/s the writer was measured at on this board. What changes
+# is the mix.
+#
+# TWO EXPECTATIONS FLIP vs M2 run handover §4 (2026-07-27, git history):
+#
+#   * Tap records are no longer almost all `source: 2`. Both taps now see real
+#     RX traffic, so **source 1 ≈ source 2 ≈ 1800 rec/s**. A near-zero count on
+#     either side is now a dead tap, which is the opposite of what §4 says —
+#     §4 is correct for the single-generator topology it was written for.
+#   * Seg1's bus load no longer measures the DUT. §4 says seg1 falling below
+#     90 % is the forwarding finding; that only held while seg1's traffic was
+#     entirely Orange's forwarded copies. Blue's own burst now fills any gap
+#     forwarding leaves, so seg1 stays ~90 % even if `to_seg1` dies completely.
+#     **Use the `fwd:` line below instead** — Blue counts the frames that
+#     reached it through the gateway, which measures forwarding directly rather
+#     than inferring it from a wire that two nodes are feeding.
+#
+# ID SPACE IS DISJOINT ON PURPOSE. Green bursts 0x200-0x20F, Blue 0x240-0x24F,
+# and Orange forwards both without rewriting ids, so each wire carries both
+# ranges. Two nodes must never transmit the same id: arbitration separates ids,
+# not payloads, so a shared id corrupts both senders' data instead of queueing
+# them (the same reasoning tests/hil/topology_live.h documents for beacons).
+#
+# NO LIN HERE. Green runs the LIN master and Orange listens; Blue was the ring's
+# LIN slave in the old topology but stays off the LIN wire now, so this round
+# changes exactly one thing about the LIN criterion (nothing). That also keeps
+# M2 run handover §7 (2026-07-27, git history)'s unexplained "Green LIN Bus Load 0.0 %" a
+# one-variable question.
+substitutions:
+  node_name: mr-blue
+  id_r: "0%"
+  id_g: "20%"
+  id_b: "100%"
+  # Frames enqueued per main-loop pass. At the ~1000 passes/s this board runs,
+  # burst=2 offers ~2000 f/s ≈ half a 500 kbit/s wire — the starting point for
+  # ~1800, NOT a measurement. Dial it from the achieved "bus load x %" line and
+  # keep Green's burst equal; the granularity is coarse (1 ≈ 25 %, 2 ≈ 50 %).
+  burst: "2"
+  burst_interval: 1ms
+  # Distinct ids the burst rotates through. Base is disjoint from Green's 0x200
+  # — see ID SPACE above.
+  id_base: "0x240"
+  id_span: "16"
+  # Green's burst range, which arrives here only by way of Orange's `to_seg1`
+  # route. Anything in [fwd_lo, fwd_hi) counts as forwarded.
+  fwd_lo: "0x200"
+  fwd_hi: "0x210"
+
+packages:
+  base: !include hil_common.yaml
+  cpu: !include cpu_stats.yaml
+  # Assert the 12 V rail before any bus number is believed. An unpowered
+  # transceiver reproduces every symptom of broken wiring.
+  rail: !include rail_check.yaml
+  # Names, in the log, whoever else is on this wire — a burst makes a segment
+  # look busy whether or not anything is listening. Slot 2 (0x0C2) is Blue bus0
+  # in topology_rx.yaml's map.
+  topo_rx_can1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C2"
+  topo_tx_can1: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C2"
+
+globals:
+  - id: burst_seq
+    type: uint32_t
+    initial_value: "0"
+  - id: burst_sent
+    type: uint32_t
+    initial_value: "0"
+  - id: burst_refused
+    type: uint32_t
+    initial_value: "0"
+  # Frames that reached Blue through the gateway (Green's range), and everything
+  # else Blue heard. Written from the observation path in loop context, not the
+  # ISR, so plain uint32_t is enough.
+  - id: fwd_rx
+    type: uint32_t
+    initial_value: "0"
+  - id: other_rx
+    type: uint32_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      # The whole point: a deep queue the burst can actually fill.
+      tx_queue_depth: 64
+      # Sized for the forwarded stream this port must drain: ~1800 f/s against
+      # ~1000 main-loop passes/s is ~2 frames per pass, so 48 is ~24 passes of
+      # slack. max_frames_per_loop defaults to this depth (V23).
+      observe_queue_depth: 48
+      # Raw sniffer (A14): the forwarding witness. It names no id, so this port
+      # runs observe_all and every frame reaches the lambda — which is what the
+      # `fwd:` count needs, since the question is how many of Green's frames the
+      # gateway delivered, not whether any particular id arrived.
+      on_frame:
+        - lambda: |-
+            if (can_id >= ${fwd_lo} && can_id < ${fwd_hi}) {
+              id(fwd_rx)++;
+            } else {
+              id(other_rx)++;
+            }
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("load", "CAN1 bus-off - is anything ACKing seg1?");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("load", "CAN1 recovered");'
+  statistics:
+    log_interval: 10s
+
+# The burst itself. `interval: 1ms` fires once per main-loop pass (the loop
+# period is the floor): top the TX queue back up every pass and let the wire be
+# the limit.
+interval:
+  - interval: ${burst_interval}
+    then:
+      - lambda: |-
+          uint8_t data[8];
+          const uint32_t seq = id(burst_seq)++;
+          data[0] = (uint8_t) (seq >> 24);
+          data[1] = (uint8_t) (seq >> 16);
+          data[2] = (uint8_t) (seq >> 8);
+          data[3] = (uint8_t) seq;
+          for (int i = 0; i < ${burst}; i++) {
+            data[4] = (uint8_t) i;
+            data[5] = 0x5A;
+            data[6] = 0xA5;
+            data[7] = (uint8_t) (i ^ seq);
+            // Stop at the first refusal: the queue is full, so every further
+            // call this pass would only spin and log.
+            if (!id(can1)->inject(${id_base} + (i % ${id_span}), false, false, data, 8)) {
+              id(burst_refused)++;
+              break;
+            }
+            id(burst_sent)++;
+          }
+
+  - interval: 10s
+    then:
+      - lambda: |-
+          ESP_LOGI("load", "burst: passes=%" PRIu32 " sent=%" PRIu32 " refused=%" PRIu32
+                   " (%.0f f/s offered over the last 10s window)",
+                   id(burst_seq), id(burst_sent), id(burst_refused), id(burst_sent) / 10.0f);
+          // The forwarding measurement. Blue cannot hear Green directly — they
+          // are on different wires and only Orange bridges them — so every
+          // frame counted here crossed the gateway. Compare against Green's
+          // offered rate: equal means to_seg1 is keeping up, a shortfall is the
+          // route shedding, zero is forwarding dead while seg1 still reads
+          // ~90 % because this board is filling it.
+          ESP_LOGI("load", "fwd: %.0f f/s through the gateway, %.0f f/s other (beacons etc)",
+                   id(fwd_rx) / 10.0f, id(other_rx) / 10.0f);
+          if (id(fwd_rx) == 0) {
+            ESP_LOGE("load", "fwd: NOTHING arrived from seg2 - to_seg1 is dead, "
+                             "seg1 bus load says nothing about it");
+          }
+          id(burst_sent) = 0;
+          id(burst_refused) = 0;
+          id(fwd_rx) = 0;
+          id(other_rx) = 0;
+          id(healthy) = true;
+      - script.execute: led_health
+
+sensor:
+  - platform: can_gateway
+    port_id: can1
+    bus_load:
+      name: "CAN1 bus load"
+    bus_err:
+      name: "CAN1 bus errors"
+    observe_overflow:
+      # If this climbs, the witness count below is under-reporting rather than
+      # the gateway under-forwarding — a distinction worth one entity.
+      name: "CAN1 observe overflow"

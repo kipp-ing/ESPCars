@@ -1,0 +1,76 @@
+# Mr. Purple — P2 bring-up (CAN_LIN_ESP32 rev 1, classic ESP32)
+# See docs/commissioning-mr-purple.md. This config deliberately touches NO bus
+# pin: it proves boot, strapping, console and the 12 V divider, nothing else.
+# CAN/LIN belong to P3/P4/P5 and get their own configs.
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-bringup.yaml --device <port>
+#
+# The board is a NodeMCU-32 with a USB-UART bridge, so the console is UART0 on
+# GPIO1/GPIO3 and the port is NOT a usbmodem* like the C6 boards.
+
+esphome:
+  name: mr-purple
+  name_add_mac_suffix: false
+  on_boot:
+    priority: 800
+    then:
+      # Strapping pins latched at reset, read back from GPIO_STRAP_REG.
+      # ESP32 TRM / soc/gpio_reg.h: {10'b0, MTDI, GPIO0, GPIO2, GPIO4, MTDO, GPIO5}
+      # bit5 MTDI(GPIO12) bit4 GPIO0 bit3 GPIO2 bit2 GPIO4 bit1 MTDO(GPIO15) bit0 GPIO5
+      #
+      # bit5 is the one that matters: GPIO12 carries LIN0_TX on this board and
+      # selects the flash voltage. HIGH at reset = 1.8 V flash = the board must
+      # not be expected to boot (finding H1). If we are reading this log, it was
+      # low *this* boot — repeat the check with 12 V applied and the LIN
+      # transceivers enabled, which is when the risk actually appears.
+      - lambda: |-
+          uint32_t s = *(volatile uint32_t *) 0x3FF44038;
+          ESP_LOGI("strap", "GPIO_STRAP_REG=0x%04X", (unsigned) (s & 0xFFFF));
+          ESP_LOGI("strap", "  GPIO12 MTDI (LIN0_TX) = %d   <-- must be 0, else 1.8V flash",
+                   (int) ((s >> 5) & 1));
+          ESP_LOGI("strap", "  GPIO0  (AUX_1)        = %d   <-- must be 1, else download mode",
+                   (int) ((s >> 4) & 1));
+          ESP_LOGI("strap", "  GPIO2  (AUX_2)        = %d", (int) ((s >> 3) & 1));
+          ESP_LOGI("strap", "  GPIO4  (AUX_0)        = %d", (int) ((s >> 2) & 1));
+          ESP_LOGI("strap", "  GPIO15 MTDO           = %d", (int) ((s >> 1) & 1));
+          ESP_LOGI("strap", "  GPIO5  (MCP2515 /CS)  = %d   <-- expect 1 from R1 100k pull-up",
+                   (int) ((s >> 0) & 1));
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+sensor:
+  # 12 V rail through R7 47k / R8 4.7k -> ADC1_CH0. Nominal ratio 1:11.0 (the
+  # divider is 4.7/(47+4.7) = 0.0909). `multiply` is the nominal value; P2's job
+  # is to sweep the bench supply 11-14 V and correct it against the DMM.
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+  - platform: uptime
+    id: up
+    name: "Uptime"
+    update_interval: 10s
+
+  - platform: internal_temperature
+    name: "ESP32 temperature"
+    update_interval: 10s
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("bringup", "up=%.0fs rail=%.2fV heap=%u",
+                   id(up).state, id(rail_12v).state,
+                   (unsigned) esp_get_free_heap_size());

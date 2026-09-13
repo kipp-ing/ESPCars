@@ -1,0 +1,143 @@
+# Mr. Blue — /dev/cu.usbmodem211101 (MAC …0a:d0:f0)
+# LIN slave + CAN1 on segment 2 (bridged to Mr. Green by Mr. Orange).
+# Ring relay: hears the token on LIN (0x30), stages it into its own LIN
+# response (0x31) and re-emits it on CAN (0x3B0) — every LIN cycle,
+# level-based. Sees the lap-close ack (0x3A0) come back through the gateway.
+substitutions:
+  node_name: mr-blue
+  id_r: "0%"
+  id_g: "20%"
+  id_b: "100%"
+
+packages:
+  base: !include hil_common.yaml
+  # Topology beacon: names whoever else is on this wire, every 10 s, in the
+  # console. See tests/hil/topology_rx.yaml for the slot map.
+  topo_rx_can1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C2"
+  topo_tx_can1: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C2"
+
+globals:
+  - id: token_n
+    type: int
+    initial_value: "0"
+  - id: last_relay_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: last_ack_ms
+    type: uint32_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 125kbps
+      observe_queue_depth: 32
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("hil", "CAN bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN recovered");'
+  cyclic_sends:
+    - id: load_fast
+      port: can1
+      can_id: 0x151
+      interval: 4ms
+      data: [0xDE, 0xAD, 0xBE, 0xEF, 0x99, 0xAA, 0xBB, 0xCC]
+    - id: load_slow
+      port: can1
+      can_id: 0x161
+      interval: 10ms
+      data: [0xCA, 0xFE, 0xBA, 0xBE, 0xDD, 0xEE, 0xFF, 0x00]
+  statistics:
+    log_interval: 15s
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: slave
+  responses:
+    - lin_id: 49
+      data: [0x00, 0x00, 0xB1, 0x0E]
+      checksum: enhanced
+  rx_ids:
+    - lin_id: 48
+      length: 4
+      checksum: enhanced
+  on_frame:
+    - lin_id: 48
+      then:
+        - lambda: |-
+            const int n = (((int) data[0]) << 8) | data[1];
+            id(last_relay_ms) = millis();
+            if (n != id(token_n)) {
+              id(token_n) = n;
+              if (n % 25 == 0)
+                ESP_LOGI("ring", "RING relay %d LIN->CAN", n);
+              id(led_token).execute();
+            }
+        - linbus.update_response:
+            lin_id: 49
+            data: !lambda "return std::vector<uint8_t>{data[0], data[1], 0xB1, 0x0E};"
+        - can_gateway.send:
+            port: can1
+            can_id: 0x3B0
+            data: !lambda "return {data[0], data[1]};"
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sensor:
+  - platform: can_gateway
+    port_id: can1
+    can_id: 0x3A0
+    offset: 0
+    length: 2
+    byte_order: big
+    name: "Ring ack"
+    on_value:
+      - lambda: |-
+          id(last_ack_ms) = millis();
+          if (((int) x) % 25 == 0)
+            ESP_LOGI("ring", "RING ack %d seen", (int) x);
+  - platform: can_gateway
+    port_id: can1
+    bus_load:
+      name: "CAN bus load"
+    observed:
+      name: "CAN observed"
+    bus_err:
+      name: "CAN bus errors"
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool lin_ok = id(last_relay_ms) != 0 && (now - id(last_relay_ms)) < 3000;
+          const bool can_ok = id(last_ack_ms) != 0 && (now - id(last_ack_ms)) < 3000;
+          id(healthy) = lin_ok && can_ok;
+          if (id(healthy)) {
+            id(led_health).execute();
+          } else {
+            if (now > 10000)
+              ESP_LOGW("ring", "BLUE degraded: lin=%d can=%d", lin_ok, can_ok);
+            id(led_fault).execute();
+          }

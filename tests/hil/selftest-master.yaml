@@ -1,0 +1,93 @@
+# The self-test, plus the LIN schedule — flashed on exactly ONE bench board.
+#
+# WHY THIS WRAPPER EXISTS. `selftest.yaml`'s LIN gate asks "am I seeing frames
+# with no checksum errors?", and a bus where every node is a listener carries no
+# frames at all, so the gate is unmeasurable on every board at once. The first
+# bench run of the self-test reported `lin INDETERMINATE` three times over for
+# exactly that reason — honest, but useless.
+#
+# Somebody has to drive the schedule, and it cannot be done with a substitution:
+# `linbus`'s schema rejects `schedule:` outright unless `mode: master`
+# (components/linbus/__init__.py:138), and there is no "send one frame" action to
+# reach for instead — `linbus.update_response` sets a slave's answer, it does not
+# transmit. So the master needs a config key the listeners must not have, which
+# is a wrapper, not a substitution.
+#
+# `script/hil/selftest.py` flashes this onto whichever board has `lin_mode:
+# master` in its profile (Mr. Green, who is the LIN master in every other bench
+# config too) and plain `selftest.yaml` onto the rest.
+#
+# The schedule is deliberately tiny: one 50 ms slot, which is the same cadence
+# the ring uses, and enough to make every listener's LIN gate provable within a
+# single 10 s report window. This is a self-test, not a load generator.
+substitutions:
+  lin_mode: master
+  lin_selftest: "true"
+
+packages:
+  selftest: !include selftest.yaml
+
+linbus:
+  id: lin
+  self_test: true
+  schedule:
+    - lin_id: 0x30
+      interval: 50ms
+
+# THE LIN SELF-TEST GATE, and what it is honestly worth.
+#
+# `self_test: true` arms the component's built-in exerciser. It is easy to read
+# the name as "single-node loopback, proves my transceiver on its own" — it is
+# NOT that. `LINCommunication::selfTestTick()` returns immediately unless
+# `mode_ == LIN_MODE_MASTER`, and what it evaluates is whether every SCHEDULED id
+# is actually coming back with fresh data: `seen_updates >= 2` per id, plus the
+# min/max interval against the scheduled one, and only after 5 s of running does
+# it latch `BASIC PASS (all IDs active)`.
+#
+# So it still needs the slave to answer, exactly like the frame-count gate — but
+# it is strictly stronger than that gate, because it checks the schedule is met
+# ON TIME rather than merely that bytes arrived. A LIN wire that works but jitters
+# badly passes "frames > 0" and fails this.
+#
+# It is only on the master because it can only BE on the master.
+#
+# WHY THIS GATE READ INDETERMINATE UNTIL 2026-07-29, and what was wrong with the
+# first diagnosis. It was recorded here as "the exerciser never emits its status
+# block, so `self_test_passed_` stays false and the binary sensor is dead". Both
+# halves of that were wrong, and the reasoning that produced them is the useful
+# part to keep:
+#
+#  1. The missing log lines were an artifact of the BUILD, not of the code.
+#     `LINCommunication.cpp` includes IDF's `esp_log.h`, and ESPHome ships
+#     `CONFIG_LOG_MAXIMUM_LEVEL=1` (ERROR) — a COMPILE-TIME ceiling, so every
+#     ESP_LOGI in that file was removed by the preprocessor. "No lines under the
+#     LIN_COMM tag" was therefore evidence about sdkconfig and nothing else.
+#     `selftest.yaml` now raises that ceiling; the status block prints every 2 s.
+#
+#  2. With it visible, the exerciser passes and always did: all nine ids report
+#     `upd` climbing, `miss=0`, and min/max intervals within a few ms of the
+#     scheduled ones, and `LIN self-test: BASIC PASS (all IDs active)` latches at
+#     ~6.3 s. So `self_test_passed_` was true the whole time.
+#
+#  3. The break was in the last link — this binary sensor. ESPHome defaults
+#     `trigger_on_initial_state` to **false**, which suppresses the callback for
+#     the FIRST state a sensor publishes; and `send_state_internal()` then
+#     early-returns on every later publish because the value has not changed.
+#     `self_test_pass` is a latch that goes false->true exactly once, so its one
+#     and only transition was the suppressed one and `on_state` could never fire.
+#     A latch sensor plus a suppressed initial trigger is a trigger that never
+#     runs at all.
+binary_sensor:
+  - platform: linbus
+    linbus_id: lin
+    self_test_pass:
+      id: lin_self_test_pass
+      internal: true
+      # Not optional here — see (3) above. Without it this whole gate is dead.
+      trigger_on_initial_state: true
+      # Feed the base config's verdict chain rather than reporting alongside it.
+      # One verdict per board, computed in one place — a second, separate
+      # pass/fail that the chain does not know about is how a board ends up
+      # green in the table and broken on the bench.
+      on_state:
+        - lambda: "id(lin_st_ok) = x;"

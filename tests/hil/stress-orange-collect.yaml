@@ -1,0 +1,141 @@
+# Mr. Orange — the whole job at once: gateway + LIN + logging + serving, with a
+# puller actually dragging chunks off the card while it all runs.
+#
+# This is M6 load run §4.3 (2026-07-29, git history), the centre of the M6-under-load session,
+# and it is the first rig in the tree where design §6's acceptance criterion can
+# be stated as a measurement rather than as an intention:
+#
+#   **dropped_records == 0 AND tap_dropped == 0 while a transfer is in flight at
+#   production rate.**
+#
+# Everything proven in that handover's §2 was measured on an *idle* board — no
+# CAN, no LIN, no writer traffic, one sequential client a metre from the AP. None
+# of it transfers to a loaded board. This rig is the one that finds out what does.
+#
+# IT IS `soak-wifi-orange.yaml` PLUS ONE KEY. That is deliberate and it is what
+# makes the attribution work: the same DUT config, the same PERF build, the same
+# per-task CPU attribution, the same radio — and the only thing that moves is that
+# the collection server is asked to bind and a puller is pointed at it. Read the
+# two runs side by side and any delta is the *server and the transfer*, not the
+# radio. Run §4.2 (soak-wifi-orange.yaml, `serve: false`) FIRST; without it the
+# radio and the server are confounded and a LIN failure has two possible causes.
+#
+#   script/hil/flash-soak-perf.sh green blue       # partners first, radio-free
+#   .venv/bin/esphome run tests/hil/stress-orange-collect.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#   .venv/bin/python script/hil/topology.py --expect green.bus0=orange.seg1 \
+#                                           --expect purple.bus0=orange.seg2
+#   .venv/bin/python script/sdlog_collect.py pull http://<ip>:8080 --into /tmp/arch
+#
+# Run topology.py BEFORE the DUT is flashed, never during the run: it opens every
+# board's console, which is one reset per board.
+#
+# NEEDS tests/hil/secrets.yaml (copy secrets.yaml.example).
+#
+# ---------------------------------------------------------------------------
+# BLOCKED AS OF 2026-07-29 — Mr. Orange has no working CAN front end
+# ---------------------------------------------------------------------------
+#
+# Measured with tests/hil/probe-orange-pins.yaml, at the pin, with no TWAI in the
+# picture: both of Orange's ports read `loopback OPEN (no echo)` and the RX pins
+# float (alternating "0 edges -> silent" and ~3600 edges/20 ms of noise, which is
+# an unconnected CMOS input, not traffic). Mr. Green, same firmware, same 12 V
+# supply, reads `CLOSED (transceiver echoes)` on both channels, rock steady.
+#
+# Both software gates that could explain it are PASSED on Orange: 11.86 V on the
+# GPIO6 sense (so 12 V is on J8 and GPIO7 is high, since that divider is gated by
+# GPIO7), and LIN receives Green's master schedule with 0 checksum errors (so the
+# shared sleep rail is awake at the LIN transceiver too). What is left is
+# downstream of GPIO7: the +5 V domain that feeds the CAN transceivers — U18, its
+# enable, or the rail itself. That is a meter-and-soldering-iron job, and note
+# that docs/TODO-bench-hmi.md SW-9 disputes the "via JP14" wording every other
+# document in this repo repeats: the netlist has U18 pin 1 on GPIO7 directly, and
+# JP14 is the GPIO22<->FUSB_SCL jumper. Check the rail before chasing a jumper.
+#
+# Until that is fixed this rig cannot run, and **tests/hil/stress-orange-sdcollect.yaml
+# is the half of it that can** — same writer, same radio, same server, same pull,
+# no bus. Read that file's own "what a green run does not mean" list before
+# quoting anything from it here.
+#
+# ---------------------------------------------------------------------------
+# WHAT WILL BREAK FIRST — the ranked predictions, so a symptom does not get
+# attributed to whatever somebody happens to be reading (handover §5)
+# ---------------------------------------------------------------------------
+#
+#   1. httpd starves the writer through the FATFS lock — `dropped` climbs while
+#      `tap_dropped` stays 0. `CollectionServer::backpressure_()` sleeps 5 ms per
+#      block above 50 % ring fill, at most 8 times, so **40 ms per block is the
+#      ceiling**; whether that covers a 4096-slot (~80 KB) ring at 338 KB/s is
+#      arithmetic nobody has checked against a real card. First thing to compute
+#      if `dropped` moves. `SD_LOG_SEND_WAIT_S = 2` is the second suspect.
+#   2. WiFi (prio ~23) preempts `lin_uart_evt` (18) — LIN Checksum/framing errors,
+#      or `Frames RX (window)` below 20/s. **Only conclusive if §4.2 was clean.**
+#   3. Rail sag under TX — one `vcc_monitor` emergency close, then `mounted=0` for
+#      the rest of the run. Not a software bug: check 12 V and the hold-up cap.
+#      (docs/TODO-bench-hmi.md: the H6 hold-up energy does not exist on this
+#      board, so the emergency close is best-effort by construction.)
+#   4. Index streaming blocks other routes — a pull stalls for seconds while
+#      `/sdlog/index` is served. Three `httpd_resp_send_chunk` per entry on the
+#      single httpd task (Phase B §6.5).
+#   5. Retention and a transfer collide — `retention:` reports nothing discarded
+#      while the card fills. The reservation reuses the `serving` flag, so one
+#      pass may pick nothing; self-corrects in ~5 s. If it does not, that is new.
+#
+# `laps/s` falling with LIN counters clean is **not** #2 — that is the main loop
+# being preempted, which `[loop] max` prices. Costly, not incorrect.
+#
+# ---------------------------------------------------------------------------
+# THE TWO OVERRIDES, and why each is one line rather than a copy of the DUT
+# ---------------------------------------------------------------------------
+#
+# stress-orange-gateway.yaml already carries everything else this rig needs —
+# `buffer_depth: 4096`, `max_file_size: 4MB`, `max_file_seconds: 60s`,
+# `retention_percent: 90`, both taps, both topology packages per port, and
+# `collection: {enabled: true, serve: false}`. Overriding rather than forking
+# keeps the M2 stress DUT the single definition of "the production configuration
+# in the car"; a forked copy drifts, and the drift is invisible.
+substitutions:
+  node_name: mr-orange
+
+packages:
+  # The §4.2 soak, whole: stress-orange-gateway.yaml + task_stats + opt_perf +
+  # wifi_probe. Including the soak rather than its four parts is what makes
+  # "this run minus that run == the server and the transfer" literally true.
+  soak: !include soak-wifi-orange.yaml
+
+sd_logger:
+  # The card stays at the DUT's 10 MHz. 20 MHz (schema default, and the SDSPI
+  # driver's ceiling on the C6) was tried on 2026-07-29 — clean mount, ~40 min
+  # without a single card error, visibly milder stall profile — but the run's
+  # load shape drifted from §4.3's (bidirectional, legacy chunks drained), so
+  # the throughput claim is unresolved, and the same window collapsed the heap
+  # floor to 152 B and produced the first LIN checksum blips. Full account:
+  # HANDOVER-m6-headroom.md §7a. Re-raise it deliberately, after the WiFi
+  # buffer caps land, with an A/B this file's numbers can anchor.
+  collection:
+    # Override 1 of 2. The DUT sets `serve: false` because WiFi's tasks preempt
+    # the LIN task and that was unmeasured; measuring it is this rig's job.
+    #
+    # CONFIRM THE MERGE TOOK: read `collection: serving on port 8080` out of the
+    # boot dump_config. Do not assume YAML package precedence did what you meant —
+    # a rig that silently kept `serve: false` is indistinguishable from a server
+    # that failed to bind until the puller times out.
+    serve: true
+    port: 8080
+  vcc_monitor:
+    # Override 2 of 2, and the one that makes §9.2 answerable at all.
+    #
+    # stress-orange-gateway.yaml still carries `divider: 14.67`, the per-chip
+    # stopgap for the uncalibrated-ADC bug. That bug was fixed on 2026-07-28
+    # (curve-fitted `adc_cali`, linear fallback announced loudly as `UNCALIBRATED
+    # estimate`), and stress-orange-sdrotate.yaml has run clean on the physical
+    # ratio since. 14.67 on a calibrated chip OVER-reads by ~35 %, which parks a
+    # 12 V rail near 16 V and means the 10.5 V threshold can never be crossed —
+    # a monitor that cannot trip, in the one run whose question is whether it
+    # trips. The physical ratio restores the instrument.
+    #
+    # Check `vcc_monitor: ... (eFuse-calibrated)` in the boot dump before trusting
+    # a quiet rail: on a chip that reports `UNCALIBRATED estimate` the physical
+    # divider is NOT safe, it reads ~26 % low, and it will latch the one-way trip
+    # at boot on a perfectly good supply.
+    divider: 10.8673

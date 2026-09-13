@@ -1,0 +1,299 @@
+# Mr. Orange — SD front-end continuity + a hand-driven CMD0, at the pin.
+#
+# Sibling of probe-orange-pins.yaml (which does this for the CAN front-end) and
+# the escalation from probe-orange-sdcard.yaml. That one still used `sd_logger`,
+# so an IDF driver, an SPI peripheral and a DMA channel all sat between the
+# question and the answer. This one instantiates **no sd_logger and no spi:** —
+# the five pins are plain GPIOs and every bit below is driven by hand, so the
+# result depends on nothing but copper, the card, and this file.
+#
+# WHY, in one line: two quality cards fail identically, which moves the
+# suspicion off the media and onto the board, the harness or the jumpers.
+#
+# WHAT WE ALREADY KNOW, so this does not re-ask it (M2 run handover §9 (2026-07-27, git history)):
+#   * the failures are at CMD8/CMD5 — card IDENTIFICATION, not data transfer
+#   * `clock:` is irrelevant to them. ESP-IDF applies max_freq_khz in
+#     `sdmmc_init_host_frequency`, the SECOND-TO-LAST init step; identification
+#     always runs at SDMMC_FREQ_PROBING (400 kHz). The 10 MHz and the 400 kHz
+#     runs were byte-identical up to the point they died. Do not "try slower".
+#   * the 12 V rail is 11.83 V on the calibrated ADC, and the +5 V domain is up
+#     (the CAN transceivers work), so it is not power to the board.
+#
+# ---------------------------------------------------------------------------
+# TEST 1 — is the harness even there? Every SD line has a known external
+# pull-up (docs/bench-hmi-wiring.md): 2.2k on SCK/MOSI, 4.7k on MISO/CS, and
+# **JP5 is what feeds the R15/R16 rail from 3V3**. So: make the pin an input
+# with the INTERNAL pull-down (~45k) enabled. A 2.2k or 4.7k external pull-up
+# beats it roughly 10:1 and the pin still reads HIGH.
+#
+#     reads HIGH with internal pull-down  -> external pull-up present, line wired
+#     reads LOW  with internal pull-down  -> NO external pull-up: that line's
+#                                            harness is open, or JP5/the pull-up
+#                                            rail jumper is not closed
+#
+# A control read with the internal pull-UP follows each one: that must read HIGH
+# whatever happens, and if it does not the pin itself is shorted low.
+#
+# This is the test that can convict a moved module. Per §1 of
+# tests/hil/HIL.md the jumpers belong to the PCB and the name belongs to
+# the DevKit, so "orange" sitting in a PCB whose JP5 is open is a perfectly
+# ordinary way to arrive here — and it looks exactly like a dead card.
+#
+# TEST 2 — does SD_PWR do anything? Read MISO with card power off, then on.
+# The card only drives DO while CS is asserted, so both reads are the pull-up's
+# doing; what this actually catches is a MISO that tracks SD_PWR, which would
+# mean the pull-up rail is downstream of the high-side switch rather than on
+# permanent 3V3.
+#
+# TEST 3 — CMD0 (GO_IDLE_STATE), bit-banged, mode 0, ~160 kHz.
+# The card's power-on ritual: >=74 clocks with CS de-asserted, then CS low and
+# the one command every SD card in every mode must answer.
+#
+#     R1 = 0x01   the card is ALIVE and the harness is good. Idle state, exactly
+#                 as specified. If this passes while sd_logger still fails, the
+#                 fault is above the wire and this becomes a driver question.
+#     R1 = 0xFF   nothing drove MISO low, ever: no card responding. With Test 1
+#                 passing that is the card or its socket; with Test 1 failing
+#                 it is the harness, and Test 1 already named the line.
+#     R1 = other  the card answered but not with idle — it is alive and talking,
+#                 which alone rules out the harness. Decode the bits: 0x04
+#                 illegal command, 0x08 CRC error.
+#
+# CMD0's CRC7 is the constant 0x95 and is checked even in SPI mode, where CRC is
+# otherwise off — that is why it is hardcoded rather than computed.
+#
+#   .venv/bin/esphome run tests/hil/probe-orange-sdpins.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  # Rail first: an unpowered board fakes every symptom below.
+  rail: !include rail_check.yaml
+
+globals:
+  - id: sd_probe_ok
+    type: bool
+    initial_value: "false"
+  # The intermittency is the finding, so it gets counted rather than eyeballed.
+  # A fault that shows up in 2 rounds out of 5 is invisible to a single probe
+  # run and is exactly what "two quality cards both fail" looks like from above.
+  - id: probe_rounds
+    type: uint32_t
+    initial_value: "0"
+  - id: drop_clk
+    type: uint32_t
+    initial_value: "0"
+  - id: drop_mosi
+    type: uint32_t
+    initial_value: "0"
+  - id: drop_miso
+    type: uint32_t
+    initial_value: "0"
+  - id: drop_cs
+    type: uint32_t
+    initial_value: "0"
+  - id: drop_wit
+    type: uint32_t
+    initial_value: "0"
+
+script:
+  - id: sd_pin_probe
+    then:
+      - lambda: |-
+          const gpio_num_t PIN_CLK = GPIO_NUM_21;   // J3.3, 100R + 2.2k pull-up (R6)
+          const gpio_num_t PIN_MOSI = GPIO_NUM_22;  // J3.4, 100R + 2.2k pull-up (R3)
+          const gpio_num_t PIN_MISO = GPIO_NUM_20;  // J4.6, 100R + 4.7k pull-up (R16), JP5
+          const gpio_num_t PIN_CS = GPIO_NUM_15;    // J4.5, 100R + 4.7k pull-up (R15), JP5
+          const gpio_num_t PIN_PWR = GPIO_NUM_17;   // J5.6, 100R + external 10k pull-down
+
+          auto cfg_in = [](gpio_num_t p, bool pu, bool pd) {
+            gpio_config_t c = {};
+            c.pin_bit_mask = 1ULL << p;
+            c.mode = GPIO_MODE_INPUT;
+            c.pull_up_en = pu ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
+            c.pull_down_en = pd ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE;
+            c.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&c);
+          };
+          auto cfg_out = [](gpio_num_t p) {
+            gpio_config_t c = {};
+            c.pin_bit_mask = 1ULL << p;
+            c.mode = GPIO_MODE_OUTPUT;
+            c.pull_up_en = GPIO_PULLUP_DISABLE;
+            c.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            c.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&c);
+          };
+
+          // ---- TEST 1: external pull-up present on each line? ----
+          // Card power ON for this: the card's own input pins must be at their
+          // normal bias or a floating card could drag a line either way.
+          cfg_out(PIN_PWR);
+          gpio_set_level(PIN_PWR, 1);
+          delay(50);
+
+          // GPIO0 is the RAIL WITNESS. R13 pulls it to the same NET-(JP3-A)
+          // rail as R15/R16, but it is nowhere near the SD pads. So it splits
+          // the two ways that rail can read low:
+          //   GPIO0 low too  -> the whole rail is grounded: JP3 closed, or a
+          //                     short at the rail itself
+          //   GPIO0 fine     -> the rail is healthy and the short is LOCAL to
+          //                     the R15/R16 pads — i.e. a rework blob
+          // Read-only, never driven: on this board GPIO0 is the FUSB302 INT
+          // line (docs/bench-hmi-wiring.md says leave it open).
+          const gpio_num_t PIN_W = GPIO_NUM_0;
+          struct { const char *name; gpio_num_t pin; const char *expect; uint32_t *drops; } lines[] = {
+            {"CLK ", PIN_CLK,  "2.2k R6, J3 rail",  &id(drop_clk)},
+            {"MOSI", PIN_MOSI, "2.2k R3, J3 rail",  &id(drop_mosi)},
+            {"MISO", PIN_MISO, "4.7k R16, JP3-A rail", &id(drop_miso)},
+            {"CS  ", PIN_CS,   "4.7k R15, JP3-A rail", &id(drop_cs)},
+            {"GPIO0 witness", PIN_W, "4.7k R13, JP3-A rail, away from SD pads", &id(drop_wit)},
+          };
+          bool harness_ok = true;
+          id(probe_rounds)++;
+          ESP_LOGI("sdpins", "--- TEST 1: external pull-ups (harness continuity) ---");
+          for (auto &l : lines) {
+            cfg_in(l.pin, false, true);          // internal pull-DOWN
+            delay(2);
+            const int with_pd = gpio_get_level(l.pin);
+            cfg_in(l.pin, true, false);          // internal pull-UP (control)
+            delay(2);
+            const int with_pu = gpio_get_level(l.pin);
+            const bool ok = (with_pd == 1);
+            if (!ok) { harness_ok = false; (*l.drops)++; }
+            ESP_LOGI("sdpins", "  %s int_pd=%d int_pu=%d [%s] %" PRIu32 "/%" PRIu32 " dropped -> %s",
+                     l.name, with_pd, with_pu, l.expect, *l.drops, id(probe_rounds),
+                     ok ? "external pull-up PRESENT (line wired)"
+                        : (with_pu == 1 ? "NO external pull-up: harness open or JP5 not closed"
+                                        : "PIN STUCK LOW even with internal pull-up"));
+          }
+          // The two 4.7k lines share the JP5-fed rail; the two 2.2k lines do
+          // not. Dropping TOGETHER is the signature of that rail, not of two
+          // coincidental bad joints — say so in the log rather than leaving it
+          // to whoever reads the table.
+          if (id(drop_miso) + id(drop_cs) > 0 && id(drop_clk) + id(drop_mosi) == 0) {
+            if (id(drop_wit) > 0) {
+              // int_pu tells GROUNDED from FLOATING, and they are different
+              // repairs. Held low against the internal ~45k pull-up means a
+              // low-impedance path to GND (4.7k to GND divides 3V3 to ~0.31 V);
+              // a rail left floating by two open jumpers would let the internal
+              // pull-up win and read HIGH.
+              const bool grounded = (gpio_get_level(PIN_W) == 0);
+              ESP_LOGW("sdpins", "  ^ the WHOLE JP3-A rail is bad (the GPIO0 witness fails too, and "
+                                 "it is nowhere near the SD pads) — not a local solder bridge. %s",
+                       grounded ? "Rail is HELD AT GND: JP3 is closed. Open JP3."
+                                : "Rail is FLOATING: JP4 and/or JP5 is open. Close both.");
+            }
+            else
+              ESP_LOGW("sdpins", "  ^ MISO+CS fail but the GPIO0 witness on the SAME rail is fine: "
+                                 "the rail is healthy and the fault is LOCAL to the R15/R16 pads — "
+                                 "look for a rework bridge, not for a jumper.");
+          }
+
+          // ---- TEST 2: does SD_PWR move MISO? ----
+          cfg_in(PIN_MISO, false, false);
+          gpio_set_level(PIN_PWR, 0);
+          delay(50);
+          const int miso_unpowered = gpio_get_level(PIN_MISO);
+          gpio_set_level(PIN_PWR, 1);
+          delay(50);
+          const int miso_powered = gpio_get_level(PIN_MISO);
+          ESP_LOGI("sdpins", "--- TEST 2: SD_PWR --- MISO unpowered=%d powered=%d  -> %s",
+                   miso_unpowered, miso_powered,
+                   miso_unpowered == miso_powered
+                       ? "no change (pull-up rail is permanent 3V3, as designed)"
+                       : "MISO tracks SD_PWR (pull-up rail is downstream of the switch)");
+
+          // ---- TEST 3: bit-banged CMD0 ----
+          cfg_out(PIN_CLK);
+          cfg_out(PIN_MOSI);
+          cfg_out(PIN_CS);
+          cfg_in(PIN_MISO, false, false);        // rely on the external pull-up
+          gpio_set_level(PIN_CLK, 0);
+          gpio_set_level(PIN_MOSI, 1);
+          gpio_set_level(PIN_CS, 1);
+          delay(10);
+
+          // SPI mode 0 at ~160 kHz: MOSI set while CLK is low, MISO sampled
+          // after the rising edge. Deliberately slow — this is a continuity
+          // test, and 3 us of setup makes flying leads a non-issue.
+          auto xfer = [&](uint8_t out) -> uint8_t {
+            uint8_t in = 0;
+            for (int i = 7; i >= 0; i--) {
+              gpio_set_level(PIN_MOSI, (out >> i) & 1);
+              gpio_set_level(PIN_CLK, 0);
+              delayMicroseconds(3);
+              gpio_set_level(PIN_CLK, 1);
+              delayMicroseconds(3);
+              in = (uint8_t) ((in << 1) | (gpio_get_level(PIN_MISO) & 1));
+            }
+            return in;
+          };
+
+          // >=74 clocks with CS and MOSI high: the mandatory power-on ritual
+          // that puts a card into SPI mode at all.
+          for (int i = 0; i < 10; i++)
+            xfer(0xFF);
+
+          gpio_set_level(PIN_CS, 0);
+          delayMicroseconds(10);
+          const uint8_t cmd0[6] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+          for (uint8_t b : cmd0)
+            xfer(b);
+
+          uint8_t r1 = 0xFF;
+          int tries = 0;
+          for (tries = 0; tries < 16; tries++) {
+            r1 = xfer(0xFF);
+            if (r1 != 0xFF)
+              break;
+          }
+          gpio_set_level(PIN_CS, 1);
+          xfer(0xFF);
+
+          // An R1 token ALWAYS has bit 7 clear — that is how the host finds the
+          // response in the stream at all. So "not 0xFF" is NOT good enough:
+          // 0xBF looks like an answer and is not one, it is a line that idled
+          // high with one bit glitched low. Check the framing bit, or a noisy
+          // MISO reads as a talking card.
+          const bool r1_valid = ((r1 & 0x80) == 0);
+          ESP_LOGI("sdpins", "--- TEST 3: CMD0 --- R1=0x%02X after %d polls -> %s", r1, tries,
+                   r1 == 0x01    ? "CARD ALIVE, idle state. Harness and card are BOTH good."
+                   : r1_valid    ? "valid R1, not idle (0x04=illegal cmd, 0x08=CRC). The card "
+                                   "is talking, so the harness carried it."
+                   : r1 == 0xFF  ? "NO RESPONSE: MISO never went low. See Test 1 for which line."
+                                 : "INVALID R1 (bit 7 set): not a response at all — MISO idled "
+                                   "high and glitched. Noise or a floating line, not a card.");
+
+          ESP_LOGI("sdpins", "VERDICT: harness=%s card=%s",
+                   harness_ok ? "OK" : "SUSPECT", r1_valid ? "RESPONDS" : "SILENT");
+          const bool card_alive = r1_valid;
+          id(sd_probe_ok) = harness_ok && card_alive;
+          id(healthy) = id(sd_probe_ok);
+
+          // Leave the card powered and the bus idle-high, so a following
+          // sd_logger run starts from the same state a cold boot gives it.
+          gpio_set_level(PIN_PWR, 1);
+
+esphome:
+  on_boot:
+    - priority: -200
+      then:
+        - script.execute: sd_pin_probe
+
+interval:
+  - interval: 15s
+    then:
+      - script.execute: sd_pin_probe
+      - if:
+          condition:
+            lambda: "return id(sd_probe_ok);"
+          then:
+            - script.execute: led_health
+          else:
+            - script.execute: led_fault

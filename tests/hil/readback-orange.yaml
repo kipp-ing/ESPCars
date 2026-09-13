@@ -1,0 +1,137 @@
+# The first time this project reads a card back — and the first time any board serves a chunk.
+#
+# M6 Phase B is built and committed (fd0a071) and **has never been on hardware**. No board has
+# served a chunk, no `#gap` line has ever been read off a card, no v1 file has ever been read back
+# at all. This rig is the config that was missing: every other `tests/hil/` rig with a
+# `collection:` block sets `serve: false` on purpose, and `tests/build/sd_logger/common.yaml` — the
+# only config in the tree with `serve: true` — is compiled by CI and never flashed.
+#
+#   .venv/bin/esphome run tests/hil/readback-orange.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#   .venv/bin/python script/sdlog_collect.py index http://<ip>:8080
+#   .venv/bin/python script/sdlog_collect.py pull  http://<ip>:8080 --into /tmp/arch
+#   .venv/bin/python script/sdlog.py check -v /tmp/arch/mr-orange/*.LOG
+#
+# NEEDS tests/hil/secrets.yaml (copy secrets.yaml.example). Without it `esphome config` fails
+# loudly rather than compiling a board that cannot associate.
+#
+# WHAT THIS ASKS, AND — just as important — WHAT IT DOES NOT
+#
+# One question: *does the device serve its sealed chunks over WiFi, and do the bytes parse?*
+# There is no can_gateway here, no linbus, no bus load and not one `sd_logger.log` action. That is
+# deliberate. `script/sdlog_collect.py` and its 66 tests were written before the firmware and pass
+# against a Python `FakeDevice`, so they pass *regardless of what the device does*; a
+# firmware/client mismatch is invisible to every test in this repo
+# (docs/sdlog-phase-b-wire-contract.md, written for exactly that reason). The proof has to come
+# off a board, and it should come with one unknown moving, not four.
+#
+# So this rig does NOT answer, and a green run here must never be read as answering:
+#
+#   design §9.1  does WiFi (prio ~23) preempt linbus's `lin_uart_evt` (18)?  -> ring-wifi-orange.yaml
+#   design §9.2  does WiFi TX at ~300 mA sag the rail past vcc_monitor?      -> needs a real transfer
+#                                                                              under load, and 12 V
+#   design §6    is `dropped_records` still 0 during a pull at rate?         -> soak-wifi-orange.yaml
+#
+# THE HAZARD THIS FILE IS WRITTEN AROUND — read before changing `retention_percent`
+#
+# `retention_pass_()` runs on a TIMER in the writer loop (sd_logger.cpp:1609, RETENTION_POLL_MS),
+# not on rotation. It discards oldest-un-collected chunks whenever card fill exceeds the
+# threshold, whether or not this rig writes a single record. The card was last written by
+# `stress-orange-sdrotate.yaml` at `retention_at: 2` — the schema floor — so it is being held near
+# 2 % fill, and any rig with a low threshold would begin deleting the very files this readback
+# exists to read, within one retention poll of boot.
+#
+# `retention_percent: 98` (the validator wants strictly below 99) parks it: the card sits far
+# below, `next_victim()` returns nullptr on every pass, nothing is unlinked. **That line is the
+# most important one in this file.** Lower it and you destroy the artifact.
+#
+# Same family, second trap: there is deliberately NO `max_file_seconds:`. On a rig producing no
+# records the time bound would seal a zero-byte chunk every 60 s, and a zero-byte chunk is listed
+# and counted but 404s on GET (M6 Phase B §6.4 (2026-07-28, git history)) — each one a spurious "failed" in the
+# pull report, manufactured by the rig rather than found by it. `max_file_size: 32MB` with no time
+# bound means nothing rotates for the length of the run.
+#
+# NO TOPOLOGY PACKAGES, and that is not the oversight CLAUDE.md warns about: this config declares
+# no can_gateway port at all, so there is no wire to beacon on and nothing for topology.py to
+# cross-reference. Same reasoning stress-orange-sdrotate.yaml documents at its own head. Any rig
+# that *does* declare a CAN port gets both packages, once per port.
+#
+# NO linbus, and this is now safe where it once was not. linbus used to be the only thing driving
+# GPIO7 high — the shared rail gating LIN SLP_N, the +5 V enable (via JP14) and the Q1/Q2 domain
+# switch feeding the GPIO6 VCC self-sense. hil_common.yaml asserts it directly at on_boot priority
+# 900 as a raw gpio_set_level, added after a CAN-only config cost a full bench session on
+# 2026-07-27. That is what makes a linbus-free config legal here.
+#
+# NO vcc_monitor. Its one-way emergency trip can only take *logging* down, and this rig has no
+# logging worth protecting — serving is the point, and a board that latched the trip at boot would
+# fail the run for a reason unrelated to the question. Reinstate it (with `divider: 10.8673`) for
+# any rig that is measuring §9.2.
+#
+# THE CARD IS IN THE INDEX BEFORE IT IS ON THE WIRE. scan_next_seq_() (sd_logger.cpp:408) rebuilds
+# the chunk index on its single boot walk: every `L#######.LOG` already on the card becomes a
+# SEALED chunk and every `.UPL` a CONFIRMED one. So what this rig serves is the *previous* run's
+# history — it is a reader, not a producer. Watch `index_refused=` in the statistics line: an
+# index that overflowed serves an empty list, which looks exactly like a card with nothing to
+# give (wire contract §11.5).
+substitutions:
+  node_name: mr-orange       # unchanged, so ports.py / topology.py / verify.py resolve as usual
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  # Not merely the credentials: the 10 s `[heap] free / largest block / min since boot` line is
+  # the only thing that answers design §9.3. httpd_start() wants ~11 kB and the free *total* is
+  # not what an allocation has to fit into — a heap fragmented into 2 kB pieces cannot serve it
+  # however much of it is free. If the server fails to start, that line is the evidence.
+  wifi: !include wifi_probe.yaml
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21            # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22           # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20           # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15             # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin. GPIO17 reaches header J5.6 (100R, R32) and stops there: the H5
+  # high-side switch on the card's supply was specified but never built, so driving that
+  # pin cycles nothing. Declaring it turns power_cycle on by default (V19) and makes every
+  # recovery line claim a power cycle that cannot happen — which is exactly what the seven
+  # ESP_ERR_TIMEOUT attempts of 2026-07-28 were. Recovery here is the in-band reset
+  # (components/sd_logger/card_reset.h), which needs no switch.
+  clock: 10MHz               # 100R series + flying leads make 20MHz marginal (bench-hmi-wiring.md)
+  buffer_depth: 4096
+  sync_interval: 1s
+  max_file_size: 32MB        # and NO max_file_seconds — see the header
+  collection:
+    enabled: true            # the card half: the chunk index the boot scan fills, and retention
+    serve: true              # the network half — the whole point of this rig
+    port: 8080               # not 80, so a later web_server cannot collide (V25)
+    retention_percent: 98    # DO NOT LOWER — see the hazard note in the header
+    # 512, not the 256 default: the card is held near 2 % fill by the previous soak, and how many
+    # chunks that is depends on a card size nobody has written down. 512 entries cost ~6 kB of the
+    # heap this rig is also measuring, which is the cheaper side of the trade — a chunk the index
+    # never held is never listed, never served and never reclaimed.
+    max_chunks: 512
+  statistics:
+    log_interval: 5s         # records/dropped/bytes/mounted, plus retention and index_refused
+
+interval:
+  # Identity is hue, state is brightness (hil_common.yaml's rule), and red is reserved for a real
+  # error. This rig has exactly one: a card that did not mount, which leaves nothing to serve and
+  # makes every later step meaningless. Everything else is Orange's own hue at a brightness that
+  # says whether the radio is up. All levels stay at or below 40 %.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const bool mounted = id(sd_log)->is_mounted();
+          const bool associated = wifi::global_wifi_component->is_connected();
+          auto call = id(status_led).turn_on();
+          if (!mounted) {
+            call.set_rgb(1.0f, 0.0f, 0.0f);
+            call.set_brightness(0.30f);
+          } else {
+            call.set_rgb(1.0f, 0.35f, 0.0f);
+            call.set_brightness(associated ? 0.35f : 0.10f);
+          }
+          call.perform();

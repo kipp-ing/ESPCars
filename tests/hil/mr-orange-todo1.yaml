@@ -1,0 +1,116 @@
+# Mr. Orange + the enable-gate differential — the runnable half of Todo 1.
+#
+# Why this exists: the Issue #1 repro (mr-green-issue1.yaml) needs the
+# destination port to sit in TWAI_ERROR_BUS_OFF, and on the current bench it
+# will not go there (see docs/HANDOVER.md, Phase 1a). But the
+# bus-off gate is only one of three shed points with the same structure, and
+# the *first* one — the enable gate — is reachable from software:
+#
+#   can_gateway.cpp (pre-fix @70f1c24)
+#     :507  gateway disabled     -> count(disabled), return    <-- this one
+#     :512  dest port bus-off    -> count(bus_off),  return    <-- needs wiring
+#     :516  no TX slot           -> count(tx_full),  return
+#
+# All three return before twai_node_receive_from_isr, so all three skip every
+# tap. HANDOVER calls the enable-gate version "same root cause, second
+# symptom" and can_gateway.h:444 promises the switch "gates forwarding only;
+# diagnostics, recovery and inject keep working". That promise is the
+# differential, and it needs no jumper:
+#
+#   pre-fix   while forwarding is disabled, blue_side stops being read at all:
+#             tap_rx/s -> 0 and blue_side rx bus load -> 0.0%
+#   post-fix  tap_rx/s and rx bus load hold their normal values while
+#             `disabled_shed` climbs at full bus rate
+#
+# The ring stalls in the disabled window either way — forwarding really is
+# gated — so the ring is NOT the signal here. The signal is whether the
+# observation plane survives the shed.
+#
+# Flash:  .venv/bin/esphome run --no-logs tests/hil/mr-orange-todo1.yaml \
+#           --device "$(.venv/bin/python script/hil/ports.py orange)"
+
+packages:
+  orange: !include mr-orange.yaml
+
+globals:
+  - id: tap_rx
+    type: uint32_t
+    initial_value: "0"
+  - id: last_tap_rx
+    type: uint32_t
+    initial_value: "0"
+  - id: last_observed
+    type: uint32_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  statistics:
+    # 5 s, not the ring's 15 s: the disabled window is only 10 s long and needs
+    # at least one bus-load line inside it.
+    log_interval: 5s
+
+switch:
+  - platform: can_gateway
+    id: gw_enable
+    name: "Gateway forwarding"
+
+sensor:
+  # THE instrument. `observed` is incremented by observe_frame_() on every frame
+  # pushed into this port's observation ring, so it is value-independent and
+  # counts the tap itself.
+  #
+  # A decode sensor cannot do this job, which cost a whole run to learn: it
+  # publishes on change only (can_gateway.cpp:1018), and while forwarding is
+  # disabled the ring stalls and the token value freezes — so its on_value goes
+  # quiet in a *healthy* build too and proves nothing. Same trap as the existing
+  # 'GW token' sensor's "every 25th value" log. 1 s updates so the per-second
+  # delta below is real rather than a 5 s staircase.
+  - platform: can_gateway
+    port_id: blue_side
+    update_interval: 1s
+    observed:
+      id: c_observed
+      name: "blue_side observed"
+    observe_overflow:
+      id: c_ovf
+      name: "blue_side observe overflow"
+  # Kept as a secondary, honestly-labelled signal: it can only move when the
+  # token is *advancing*, i.e. when forwarding is live.
+  - platform: can_gateway
+    port_id: blue_side
+    can_id: 0x3B0
+    offset: 0
+    length: 2
+    byte_order: big
+    id: tap_probe
+    name: "Todo1 token-change probe"
+    on_value:
+      - lambda: "id(tap_rx)++;"
+  - platform: can_gateway
+    route_id: to_green
+    update_interval: 5s
+    disabled:
+      id: c_disabled
+      name: "shed disabled blue->green"
+
+interval:
+  # One line per second carrying the whole verdict.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t d = id(tap_rx) - id(last_tap_rx);
+          id(last_tap_rx) = id(tap_rx);
+          const uint32_t obs = std::isnan(id(c_observed).state) ? 0 : (uint32_t) id(c_observed).state;
+          const uint32_t dobs = obs - id(last_observed);
+          id(last_observed) = obs;
+          ESP_LOGI("todo1", "fwd=%d observed=+%u/s (%u) ovf=%.0f disabled_shed=%.0f tokchg=%u/s",
+                   (int) id(gw_enable).state, (unsigned) dobs, (unsigned) obs, id(c_ovf).state,
+                   id(c_disabled).state, (unsigned) d);
+  # 20 s forwarding on, 10 s off, forever — several windows per capture so a
+  # one-off cannot be mistaken for the pattern.
+  - interval: 30s
+    then:
+      - switch.turn_off: gw_enable
+      - delay: 10s
+      - switch.turn_on: gw_enable

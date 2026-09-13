@@ -1,0 +1,119 @@
+# Standalone sd_logger: SD-card datalogger fed by the generic sd_logger.log
+# action (source S1). No CAN/LIN here — this config exercises every sd_logger
+# config key and action so CI compiles them. On real hardware a card must be
+# wired to the SPI pins below (see docs/sd_logger-spec.md, M0).
+substitutions:
+  # Prefixed, because this file is pulled in as a package and substitutions merge
+  # into one namespace with whatever else the including config brings.
+  sdlog_chunk_seconds: "60"
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO10
+  cs_pin: GPIO11
+  clock: 20MHz
+  mount_point: /sdcard
+  card_power_pin: GPIO2
+  buffer_depth: 2048
+  sync_interval: 2s
+  max_file_size: 16MB
+  # M6: rotation is bounded by time as well as size, whichever fires first. An
+  # OPEN file is never servable, so without this a quiet bus traps the newest
+  # records indefinitely (docs/sdlog-collection-design.md §4). 1-4 MB chunks are
+  # the target, which at production rate is well under this bound.
+  #
+  # Written through a substitution on purpose: substitution is textual, so the
+  # validator is handed the *string* `'60'`, never the int — which is the spelling
+  # V23 rejected as out of range until it learned to parse it. Keeping it here is
+  # what makes CI notice if that regresses; `60s` and `60` are covered in
+  # tests/sd_logger/test_schema.py.
+  max_file_seconds: ${sdlog_chunk_seconds}
+  format_if_mount_failed: false
+  # Card recovery (spec §7 Layer C). Every key spelled out so CI compiles them;
+  # the defaults are these values, bar power_cycle, which defaults from
+  # card_power_pin being present above (V19).
+  recovery:
+    enabled: true
+    initial_delay: 1s
+    max_delay: 30s
+    max_attempts: 0       # 0 = keep trying for as long as the board runs
+    power_cycle: true     # needs card_power_pin (V19)
+    in_band_reset: true   # stop token + CMD0 before the remount, from attempt 2 on
+    busy_timeout: 2s      # how long one attempt waits for the card to release the bus
+    max_busy_timeout: 10s # the budget doubles up to here on each further attempt (V28)
+  vcc_monitor:
+    adc_pin: 0            # ADC1 channel (GPIO0) on the 12 V rail divider
+    threshold: 10.5V      # trip above the 3V3 regulator dropout
+    divider: 4.0          # V_rail = V_adc * divider
+  # M6 chunk collection: a private esp_http_server that serves SEALED chunks and
+  # takes the confirm that renames them to .UPL. Deliberately not esphome's
+  # web_server (design §5a), so it carries its own port — 8080 rather than 80,
+  # which also keeps V25 quiet if a config later adds web_server.
+  collection:
+    enabled: true           # the card half: chunk index, retention, the `#gap` line
+    serve: true             # the network half: the Phase B server, and what V22/V25
+                            # are about. `serve: false` is the shape the bench runs
+                            # (tests/hil/stress-orange-sdrotate.yaml) — it keeps
+                            # retention without asking for WiFi. Spelled out here so
+                            # CI compiles the key; the false branch is pinned in
+                            # tests/sd_logger/test_schema.py, where it decides
+                            # validation rather than code.
+    port: 8080
+    retention_percent: 80   # arm "drop oldest un-collected" at 80 % card fill
+    # V26: how many chunks the in-RAM index tracks, 12 B an entry. A chunk the
+    # index never held is never listed, never served and never reclaimed — which
+    # is not theory: a 12-minute soak on the bench (2026-07-28) rotated 29 times
+    # and found the then-fixed 64-entry index already full at the *first* of
+    # them, so retention had nothing to choose from while the card filled.
+    #
+    # 512 rather than the default 256 on purpose. This is the only config that
+    # compiles the key, and the value reaches the firmware as a `cg.add_define`
+    # over collection_policy.h's own `#ifndef SD_LOG_MAX_CHUNKS 256` fallback —
+    # so a build that writes the default would produce byte-identical firmware
+    # whether the define is emitted or silently dropped. common_cantap.yaml has
+    # no `collection:` block at all and keeps compiling the fallback branch;
+    # don't add one there.
+    max_chunks: 512
+  # Format v1: name the tags the action stamps, so every line carries a label
+  # and each file re-emits the table as `#src` lines (spec §6 F1d). Tag 0 is the
+  # action's own default; declaring it is how its records stop reading `U,0`.
+  sources:
+    - tag: 0
+      kind: user
+      label: act
+    - tag: 5
+      kind: lin
+      label: lin
+  # S4: ESPHome's own log, inline with the traffic it explains.
+  esphome_logs:
+    level: INFO
+    buffer_depth: 32
+  statistics:
+    log_interval: 10s
+
+# V22: a `collection:` block is a server reached over WiFi, so the config must
+# actually bring WiFi up. Placeholder credentials — this target is compiled, never
+# flashed; the bench configs under tests/hil/ carry the real ones.
+wifi:
+  ssid: "espcars-bench"
+  password: "espcars-bench-pw"
+
+# Exercise the generic producer action from a periodic automation.
+interval:
+  - interval: 100ms
+    then:
+      - sd_logger.log:
+          source: 0
+          can_id: 0x123
+          data: [0x01, 0x02, 0x03, 0x04]
+      # `source:` also takes a declared label — same tag, spelled the way the
+      # file reads. Both spellings compile here so codegen covers each.
+      - sd_logger.log:
+          source: lin
+          can_id: 0x3C
+          data: [0x55, 0xAA]
+      - sd_logger.log:
+          can_id: 0x3B0
+          data: !lambda "return {(uint8_t)(millis() & 0xFF)};"

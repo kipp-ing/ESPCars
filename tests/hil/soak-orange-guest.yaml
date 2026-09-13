@@ -1,0 +1,130 @@
+# Mr. Orange — SD soak with a guest on seg2, and the compact record format.
+#
+# What this rig is for: prove the log record path under real traffic while a
+# stranger's BMS is on the other segment. Two sources at once, with genuinely
+# different shapes:
+#
+#   C1  seg1  our own load from Green — burst, whatever the generator makes
+#   C2  seg2  the guest BMS — a steady multi-rate cadence, several hundred
+#             frames/s in total
+#
+# The guest half is the interesting one for a *delta-timestamp* format: a
+# rock-steady cadence is the best case for delta encoding and the worst case
+# for noticing a bug in it, because every delta looks alike. The bench's own
+# bursty seg1 traffic next to it is what makes an anchor/resync mistake visible.
+#
+# ## This config cannot transmit on the guest's wire
+#
+# **No `routes:` block.** Orange is a gateway and seg1/seg2 are separate
+# segments joined only by its routing table, so a route with seg2 as its
+# destination would relay Green's load onto the guest's bus at line rate. That
+# is the one mistake this file must never grow. Receiving and tapping need no
+# route at all; forwarding is what routes are for, and we do not forward.
+#
+# Orange still ACKs on seg2, which it must: with Blue and Green silenced it is
+# the only ACK source on that segment, and an unacknowledged transmitter walks
+# to error-passive.
+#
+# ## Why Blue stays silent, and what that costs
+#
+# The guest transmits one of its ids **at 50 Hz**, which collides with exactly
+# Blue's bus0 beacon under the bench scheme `0x0F0 + node*2 + bus`
+# (tests/hil/HIL.md). Blue's only
+# cabled port is on the guest's segment, so Blue cannot join the token ring
+# without putting a second sender on that id. Consequently `script/hil/verify.py`
+# — which requires all three boards — **cannot run while the guest is
+# attached**. That is a structural blocker, not an oversight. Unplug the guest
+# and the gate runs unchanged.
+#
+#   .venv/bin/esphome run tests/hil/soak-orange-guest.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# Afterwards, over the sealed files:
+#   .venv/bin/python script/sdlog.py check --strict <files>
+substitutions:
+  node_name: soak-orange-guest
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  # The radio is here only so the sealed chunks can be pulled back and actually
+  # parsed — a soak that only counts records on-device proves the writer ran,
+  # not that what it wrote is readable, which is the whole question when the
+  # record format has just changed. Same combination as
+  # tests/hil/stress-orange-collect.yaml, which has bench history.
+  wifi: !include wifi_probe.yaml
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+can_gateway:
+  id: gw
+  ports:
+    # log_tap arms the per-port tap ring the sd_logger drains — and since the
+    # fix below, the receive path with it. These ports carry no route, no
+    # decode entity and no trigger on purpose: `log_tap: true` is their only
+    # consumer, which is the whole shape of this rig.
+    #
+    # History (private/notes/HANDOVER-guest-bms.md §8): as found on 2026-07-29 this
+    # shape never received a frame — the RX ISR's no-route branch armed the
+    # receive only for an observation ring — and both ports carried an empty
+    # `on_frame` workaround, measured against a live, several-hundred-frames/s
+    # sender:
+    #
+    #   log_tap only               port stats 0.0 %, records=0
+    #   log_tap + empty on_frame   port stats 5.3 %, records climbing, dropped=0
+    #
+    # The fix (2026-07-30) makes the no-route branch consult the tap ring, so
+    # the workaround triggers are deleted again — their removal is exactly what
+    # the fix has to make safe, and this rig has NOT yet been re-run without
+    # them. That bench re-run is owed before this config counts as proven.
+    - id: seg1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      log_tap: true
+    - id: seg2
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 500kbps
+      log_tap: true
+  statistics:
+    log_interval: 10s
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin: the H5 high-side switch was specified but never built, so
+  # declaring it turns power_cycle on by default and makes every recovery line
+  # claim a cycle that cannot happen. Recovery here is the in-band reset.
+  clock: 10MHz
+  buffer_depth: 4096           # ~80 KB ring: absorbs a 500 ms SD stall under load
+  sync_interval: 1s
+  max_file_size: 4MB
+  max_file_seconds: 60s        # seal often, so there are many chunks to check
+  # No `label:` keys: write format v2 defaults them to the interface number, so
+  # these two ports are `C1` and `C2` on the card without being told. Spelling
+  # them out again would hide the fact that the default does the right thing —
+  # and a run that only passes because the YAML overrode the default is not
+  # evidence about the default.
+  can_ports:
+    - port: seg1
+      source: 1
+    - port: seg2
+      source: 2
+  collection:
+    enabled: true
+    serve: true                # so sdlog_collect.py can pull the sealed chunks
+    retention_percent: 90
+  vcc_monitor:
+    adc_pin: 6
+    threshold: 10.5V
+    divider: 10.8673
+  statistics:
+    log_interval: 5s           # "records=.. dropped=.. bytes=.. mounted=.."

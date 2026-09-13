@@ -1,0 +1,54 @@
+# Mr. Green + Issue #1 repro, ARMED without re-wiring — Phase 1a/3 retry.
+#
+# The problem this solves: the repro needs the dead port to reach
+# TWAI_ERROR_BUS_OFF, and on this bench it never does. Measured twice: TEC 0,
+# REC 135, err_events ~31k/s, `on_bus_off` never fires, `shed bus_off` stays 0.
+# The port's RX line sits *dominant*, so the controller never sees an idle bus,
+# never starts transmitting, and so never accumulates the transmit errors that
+# would carry it to bus-off.
+#
+# Why a pull-up is the right lever, and why it is safe:
+# PCB-ESP32C6-Adapter-CAN-Modbus-LIN/docs/can-board-usage-for-gateway.md — CAN2's
+# logic side is jumper-gated, JP22 = GPIO10->CAN2_TX and JP20 = GPIO11->CAN2_RX.
+# Per tests/hil/HIL.md those jumpers are closed on **Orange only**, so on Green
+# GPIO10/11 are not connected to U3 at all: "TWAI1 transmits into a dead pin".
+# They are floating inputs, which is exactly why RX reads dominant. Nothing is
+# driving them, so an internal pull-up cannot fight a driver — no contention, no
+# current path, nothing to damage.
+#
+# With RX held recessive the chain the repro needs finally runs:
+#   bus looks idle -> controller starts transmitting -> its own dominant bits are
+#   never echoed back (TX is unconnected too) -> bit error every frame ->
+#   TEC += 8 -> bus-off at TEC 256 -> auto-recovery -> repeat, ~1/s.
+# That is precisely the "floats dominant -> bus-off -> recovery cycles ~1/s
+# forever" state HANDOVER describes, reached deliberately instead of by luck of
+# how a particular board happened to be jumpered.
+#
+# RESULT 2026-07-26: **it did not work, and that is itself informative.** The
+# pull-up is applied (the warning logs) but nothing changes — TEC still 0, REC
+# still 135, err_events still climbing, `on_bus_off` still never fires,
+# `shed bus_off` still 0, ring still green. A 45k internal pull-up cannot be
+# beaten by a floating pin, so **GPIO11 is being actively driven low**.
+#
+# The docs name the likely reason: "GPIO10/11/12 also route RS485_2 (JP17/18/19)
+# — keep those open for CAN2" (can-board-usage-for-gateway.md). If Green's
+# RS485_2 jumpers are closed, that transceiver's receiver output owns GPIO11 and
+# no amount of firmware will free it. That is the difference between this
+# replacement board and the original Green the symptom was characterised on.
+#
+# So this file stays as the record of a hypothesis that was cheap to test and
+# came back negative. Arming the repro needs hardware after all — see
+# docs/HANDOVER.md for the two jumper options.
+
+packages:
+  issue1: !include mr-green-issue1.yaml
+
+esphome:
+  on_boot:
+    # After can_gateway's setup has configured the TWAI pins, so the pull-up is
+    # applied on top of the driver's own pin config rather than being overwritten.
+    priority: -200
+    then:
+      - lambda: |-
+          gpio_set_pull_mode(GPIO_NUM_11, GPIO_PULLUP_ONLY);
+          ESP_LOGW("issue1", "CAN2 RX (GPIO11) pulled up: dead port should now reach bus-off");

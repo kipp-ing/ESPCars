@@ -1,0 +1,93 @@
+# Mr. Green + the Issue #1 repro — the bench regression test for Todo 1.
+#
+# Layers the HANDOVER repro on top of the proven mr-green.yaml via a package
+# include, so the ring baseline itself stays untouched: a second TWAI port on
+# CAN2 (GPIO10/11), whose jumpers are open on Green so the pins float dominant
+# — the port goes bus-off and cycles recovery ~1/s forever — plus forward-all
+# routes in both directions and a 250 ms periodic send onto that dead port.
+#
+# What it decides:
+#   pre-fix  (@70f1c24) every frame arriving on can1 is shed at the
+#            destination-bus-off gate BEFORE it is retrieved, so the decode
+#            sensors never fire: `Token return` goes silent -> TOKEN LOST.
+#   post-fix (@6577d00 and later) the shed frame is still received and tapped,
+#            so the ring stays green while `shed bus_off can1->dead` counts at
+#            full bus rate and `CAN observed` / `CAN bus load` keep moving.
+#
+# BOTH halves have to be run. A green ring on the fixed tree alone proves only
+# that nothing regressed — it does not prove the repro still reproduces, and an
+# unreproduced repro is not evidence of a fix.
+#
+# Flash:  .venv/bin/esphome run --no-logs tests/hil/mr-green-issue1.yaml \
+#           --device "$(.venv/bin/python script/hil/ports.py green)"
+
+packages:
+  green: !include mr-green.yaml
+
+can_gateway:
+  id: gw
+  ports:
+    # CAN2 — jumpers open on Green, so RX floats dominant: bus-off, forever.
+    - id: dead
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 125kbps
+      # Proof that the repro actually armed: this must log ~1/s forever. If it
+      # is silent the port is not bus-off, the shed path is never taken, and
+      # whatever the ring does afterwards says nothing about Todo 1.
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("issue1", "dead port bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGW("issue1", "dead port recovered");'
+  routes:
+    - id: to_dead
+      from: can1
+      to: dead
+    - id: from_dead
+      from: dead
+      to: can1
+
+interval:
+  # The periodic send onto the flapping port. This is also Todo 3's soak load:
+  # every one of these races a state-change ISR against inject()'s bus-off read.
+  - interval: 250ms
+    then:
+      - can_gateway.send:
+          port: dead
+          can_id: 0x123
+          data: [0x01]
+  # The counters have to reach the console, and sensor publishes log at VERBOSE
+  # in esphome 2026.7 — raising the global level would add UART work to the very
+  # loop this component is timing-sensitive about, so log them explicitly at a
+  # fixed, cheap rate instead. One line per 5 s.
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("issue1", "shed bus_off=%.0f tx_full=%.0f | fwd to_dead=%.0f from_dead=%.0f",
+                   id(c_bus_off).state, id(c_tx_full).state, id(c_fwd_dead).state,
+                   id(c_fwd_back).state);
+
+sensor:
+  # The shed counters. `bus_off` climbing at bus rate while the ring stays green
+  # IS the proof: it says every can1 frame took the shed path and was tapped
+  # anyway. If it stays put, the repro did not arm and the run is void.
+  - platform: can_gateway
+    route_id: to_dead
+    update_interval: 5s
+    forwarded:
+      id: c_fwd_dead
+      name: "fwd can1->dead"
+    tx_full:
+      id: c_tx_full
+      name: "shed tx_full can1->dead"
+    bus_off:
+      id: c_bus_off
+      name: "shed bus_off can1->dead"
+  - platform: can_gateway
+    route_id: from_dead
+    update_interval: 5s
+    forwarded:
+      id: c_fwd_back
+      name: "fwd dead->can1"

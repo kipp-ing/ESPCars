@@ -1,0 +1,48 @@
+# Plain v0.5-shaped bridge: two ports, two routes, filtering — and deliberately
+# NONE of the diagnostic surface. No statistics:, no decode entity, no
+# last_frame, no switch, no cyclic_sends.
+#
+# This shape is load-bearing, not decorative. It is the only config in the repo
+# that leaves CAN_GATEWAY_HAS_RX_TAPS false, so it compiles the branch where the
+# RX tap helpers and the shed path collapse to empty stubs, and the only one
+# that compiles try_hw_filter_offload_ (whose body is behind
+# #ifndef USE_CAN_GATEWAY_STATS). Both were uncompiled by CI until 2026-07-25,
+# and the no-taps branch broke once during the Todo 1 shed-order rework.
+#
+# It also carries the two rule flags no other config emits
+# (remote_transmission_request -> RULE_FLAG_CHECK_RTR / RULE_FLAG_RTR_VALUE),
+# so a rename or typo in those constants fails here rather than at a user build.
+
+can_gateway:
+  id: bridge
+  ports:
+    - id: port_a
+      rx_pin: ${bridge_a_rx_pin}
+      tx_pin: ${bridge_a_tx_pin}
+      bit_rate: 125kbps
+    - id: port_b
+      rx_pin: ${bridge_b_rx_pin}
+      tx_pin: ${bridge_b_tx_pin}
+      bit_rate: 125kbps
+  routes:
+    # default_action: drop with a single accept rule is the shape
+    # try_hw_filter_offload_ looks for.
+    - from: port_a
+      to: port_b
+      default_action: drop
+      filters:
+        - can_id: 0x123
+          action: accept
+    - from: port_b
+      to: port_a
+      default_action: accept
+      filters:
+        # RTR matching: emits RULE_FLAG_CHECK_RTR + RULE_FLAG_RTR_VALUE.
+        - can_id: 0x7DF
+          remote_transmission_request: true
+          action: drop
+        # RTR explicitly false: emits CHECK_RTR without RTR_VALUE.
+        - can_id: 0x200
+          can_id_mask: 0x7F0
+          remote_transmission_request: false
+          action: accept

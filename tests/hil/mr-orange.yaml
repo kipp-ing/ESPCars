@@ -1,0 +1,177 @@
+# Mr. Orange — /dev/cu.usbmodem211201 (MAC …0a:d1:e0)
+# The gateway: CAN1 (GPIO2/3, Blue's segment) <-> CAN2 (GPIO10/11, Green's
+# segment), forwarding everything both ways under load. LIN listener,
+# sniffing the token exchange passively. Every ring lap crosses this board
+# twice (token 0x3B0 blue->green, ack 0x3A0 green->blue).
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  # Topology beacon, one pair per port. `blue_side` is GPIO2/3 (bus0) and
+  # `green_side` GPIO10/11 (bus1) — the port names date from the old ring, the
+  # slots follow the pins. A `SAME-WIRE` line here means the two ports are on one
+  # wire, which with the routes below is a forwarding loop. Slot map:
+  # tests/hil/topology_rx.yaml.
+  topo_rx_blue_side: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: blue_side
+      beacon_id: "0x0C4"
+  topo_tx_blue_side: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: blue_side
+      beacon_id: "0x0C4"
+  topo_rx_green_side: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: green_side
+      beacon_id: "0x0C5"
+  topo_tx_green_side: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: green_side
+      beacon_id: "0x0C5"
+
+globals:
+  - id: last_token_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: last_lin_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: lin_sniffs
+    type: int
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    # PINS SWAPPED 2026-07-28 to match the bench as it is actually cabled. Measured off Orange's
+    # own beacons, not inferred: `[topo] seg1 <- green.bus0` / `[topo] seg2 <- blue.bus0`, i.e.
+    # Green is on GPIO2/3 and Blue on GPIO10/11 — the opposite of the ring's historical wiring
+    # (HIL.md "The cast"). The stress rig depends on the current cabling, so the ring config is
+    # the one that moves.
+    #
+    # Forwarding did not care: both routes are unfiltered, so the token crossed either way and
+    # Green closed laps at the full 19.4/s baseline. What cared was the `GW token` sensor below,
+    # which is bound to `blue_side` by name — with the old mapping it watched the wire Green was
+    # on, never saw 0x3B0, and left `last_token_ms` at 0. That is a permanent "ORANGE degraded:
+    # token=0" and a missing "RING gw", which fails verify.py while the ring itself is healthy.
+    - id: blue_side
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 125kbps
+      observe_queue_depth: 48
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("hil", "CAN(blue_side) bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN(blue_side) recovered");'
+    - id: green_side
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 125kbps
+      observe_queue_depth: 48
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("hil", "CAN(green_side) bus-off");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("hil", "CAN(green_side) recovered");'
+  routes:
+    - id: to_green
+      from: blue_side
+      to: green_side
+    - id: to_blue
+      from: green_side
+      to: blue_side
+  statistics:
+    log_interval: 15s
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: listener
+  rx_ids:
+    - lin_id: 48
+      length: 4
+      checksum: enhanced
+    - lin_id: 49
+      length: 4
+      checksum: enhanced
+  on_frame:
+    - lin_id: 48
+      then:
+        - lambda: |-
+            id(last_lin_ms) = millis();
+            id(lin_sniffs) += 1;
+            if (id(lin_sniffs) % 50 == 0)
+              ESP_LOGI("ring", "LIN sniff 48 #%d", id(lin_sniffs));
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sensor:
+  - platform: can_gateway
+    port_id: blue_side
+    can_id: 0x3B0
+    offset: 0
+    length: 2
+    byte_order: big
+    name: "GW token"
+    on_value:
+      - lambda: |-
+          id(last_token_ms) = millis();
+          if (((int) x) % 25 == 0)
+            ESP_LOGI("ring", "RING gw %d", (int) x);
+      - script.execute: led_token
+  - platform: can_gateway
+    route_id: to_green
+    update_interval: 15s
+    forwarded:
+      name: "fwd blue->green"
+  - platform: can_gateway
+    route_id: to_blue
+    update_interval: 15s
+    forwarded:
+      name: "fwd green->blue"
+  - platform: can_gateway
+    port_id: blue_side
+    bus_load:
+      name: "Blue-side bus load"
+    bus_err:
+      name: "Blue-side bus errors"
+  - platform: can_gateway
+    port_id: green_side
+    bus_load:
+      name: "Green-side bus load"
+    bus_err:
+      name: "Green-side bus errors"
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool tok_ok = id(last_token_ms) != 0 && (now - id(last_token_ms)) < 3000;
+          const bool lin_ok = id(last_lin_ms) != 0 && (now - id(last_lin_ms)) < 3000;
+          id(healthy) = tok_ok && lin_ok;
+          if (id(healthy)) {
+            id(led_health).execute();
+          } else {
+            if (now > 10000)
+              ESP_LOGW("ring", "ORANGE degraded: token=%d lin=%d", tok_ok, lin_ok);
+            id(led_fault).execute();
+          }

@@ -1,0 +1,142 @@
+# Mr. Orange — CAN front-end continuity test, at the pin, with no TWAI involved.
+#
+# `probe-orange-links.yaml -s self_test true` established that both ports fail
+# bit monitoring: what the controller drives on TX does not come back on RX, at
+# 500 kbps and at 125 kbps alike. That puts the fault on this board rather than
+# out on the segment, but it cannot say WHICH half is open — a dead TX and a
+# dead RX both look like "the bit did not come back".
+#
+# This config answers that, and it deliberately does not instantiate
+# `can_gateway` at all: the four pins are plain GPIOs, so the result depends on
+# nothing but copper and silicon.
+#
+# TEST A — loopback. Drive TX dominant (low) and read RX. A CAN transceiver
+# always echoes its own transmission back out of RXD, with no other node
+# needed and no termination partner required, so:
+#     TX low  -> RX low   and   TX high -> RX high   = the loop is CLOSED
+#     RX stuck high regardless of TX                 = the loop is OPEN
+# The transceiver's loop delay is tens of nanoseconds; the 200 us settle here is
+# four orders of magnitude of margin.
+#
+# ⚠ Test A is only valid on an IDLE wire, and the code enforces that: if Test B
+# sees any traffic, the loopback verdict is reported as INDETERMINATE rather
+# than as a result. With another node transmitting, RX toggles at the bit rate
+# continuously and the two samples just catch whichever bus bit was present —
+# the verdict then flips between passes and means nothing. (Learned the hard
+# way: it read "OPEN" on a channel that was in fact receiving fine.) To test
+# loopback on a connected channel, stop the other node first.
+#
+# TEST B — does this pin hear the segment? Sample RX for 20 ms with TX left
+# recessive and count edges. Run it with Green's load generator live (~91 % at
+# 500 kbps): a pin wired to that segment sees thousands of edges, a pin wired to
+# nothing sees zero. This is what separates the two open-loop causes:
+#
+#   loopback OPEN + edges seen     -> RX path is fine and the segment IS
+#                                     connected; the TX half is open (TX jumper,
+#                                     or the transceiver's driver).
+#   loopback OPEN + no edges       -> the whole front-end is isolated:
+#                                     transceiver unpowered/absent, or both
+#                                     logic-side jumpers open.
+#   loopback CLOSED + no edges     -> board is healthy, it is simply the only
+#                                     node on its wire — a segment cabling job.
+#
+# Driving TX low pulls the segment dominant for ~200 us. If the board IS on a
+# live segment that corrupts a couple of Green's frames, which is harmless and
+# self-healing (they retransmit) — and a corrupted frame is itself evidence of
+# connection.
+#
+#   .venv/bin/esphome run tests/hil/probe-orange-pins.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+packages:
+  base: !include hil_common.yaml
+  # Rail first: an unpowered transceiver fakes every symptom below.
+  rail: !include rail_check.yaml
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          struct Chan { const char *name; gpio_num_t tx; gpio_num_t rx; };
+          static const Chan chans[] = {
+            {"seg1", GPIO_NUM_2, GPIO_NUM_3},
+            {"seg2", GPIO_NUM_10, GPIO_NUM_11},
+          };
+          for (auto &ch : chans) {
+            gpio_config_t rx_cfg = {};
+            rx_cfg.pin_bit_mask = 1ULL << ch.rx;
+            rx_cfg.mode = GPIO_MODE_INPUT;
+            rx_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+            rx_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            rx_cfg.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&rx_cfg);
+
+            gpio_config_t tx_cfg = {};
+            tx_cfg.pin_bit_mask = 1ULL << ch.tx;
+            tx_cfg.mode = GPIO_MODE_OUTPUT;
+            tx_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+            tx_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            tx_cfg.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&tx_cfg);
+
+            // TEST A — recessive first, then dominant.
+            gpio_set_level(ch.tx, 1);
+            esp_rom_delay_us(200);
+            const int rx_recessive = gpio_get_level(ch.rx);
+            gpio_set_level(ch.tx, 0);
+            esp_rom_delay_us(200);
+            const int rx_dominant = gpio_get_level(ch.rx);
+            gpio_set_level(ch.tx, 1);       // leave the bus alone again
+            esp_rom_delay_us(200);
+
+            const bool loop_closed = rx_recessive == 1 && rx_dominant == 0;
+
+            // TEST B — 20 ms of edge counting with TX held recessive.
+            uint32_t edges = 0;
+            int prev = gpio_get_level(ch.rx);
+            const int64_t until = esp_timer_get_time() + 20000;
+            while (esp_timer_get_time() < until) {
+              const int now = gpio_get_level(ch.rx);
+              if (now != prev) { edges++; prev = now; }
+            }
+
+            // TEST A is only meaningful on an IDLE wire. Once another node is
+            // transmitting, RX is toggling at the bit rate the whole time, so
+            // the two samples catch whatever bus bit happened to be on the wire
+            // and the verdict is noise -- it flips between runs. Test B tells us
+            // which case we are in, so let it veto Test A rather than report a
+            // reading that looks authoritative and is not.
+            const bool busy = edges > 0;
+
+            ESP_LOGI("pins", "%s TX=GPIO%d RX=GPIO%d | loopback: TX_hi->RX=%d TX_lo->RX=%d -> %s"
+                             " | segment: %" PRIu32 " edges/20ms -> %s",
+                     ch.name, (int) ch.tx, (int) ch.rx, rx_recessive, rx_dominant,
+                     busy ? "INDETERMINATE (segment busy - rerun with the wire idle)"
+                          : (loop_closed ? "CLOSED (transceiver echoes)" : "OPEN (no echo)"),
+                     edges, busy ? "TRAFFIC PRESENT" : "silent");
+          }
+          // Hand the pins back so nothing is left driving the bus.
+          for (auto &ch : chans) {
+            gpio_config_t idle = {};
+            idle.pin_bit_mask = 1ULL << ch.tx;
+            idle.mode = GPIO_MODE_INPUT;
+            idle.pull_up_en = GPIO_PULLUP_DISABLE;
+            idle.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            idle.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&idle);
+          }
+      - light.turn_on:
+          id: status_led
+          red: ${id_r}
+          green: ${id_g}
+          blue: ${id_b}
+          brightness: 20%

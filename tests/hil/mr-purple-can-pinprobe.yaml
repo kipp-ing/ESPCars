@@ -1,0 +1,133 @@
+# Mr. Purple — DC-level probe of the native CAN front end (U4, SN65HVD230).
+# See docs/commissioning-mr-purple.md §4 (P4).
+#
+#   .venv/bin/esphome run tests/hil/mr-purple-can-pinprobe.yaml --device /dev/cu.usbserial-0001
+#
+# WHY: on 2026-07-23 CAN0 went bus-off on the FIRST frame even in TWAI no-ACK
+# (self_test) mode, with GPIO26/25 and with the pair swapped. No-ACK mode
+# removes the acknowledgment requirement, so the only remaining way to burn TEC
+# to 256 is a bit error — the transmitter not reading back the dominant bits it
+# drives. That is a local fault: U4, its supply, or the GPIO routing. It is not
+# the cable to the C6 and not the partner.
+#
+# This config takes the TWAI peripheral out of the picture entirely and tests
+# the transceiver at DC, which is legitimate because SN65HVD230 is combinational
+# (the 10k on Rs only slopes the edges — see H10).
+#
+# Two questions, both answered without a scope:
+#
+#   1. Is GPIO25 (U4 pin 4 `R`) driven by anything at all?
+#      Read it with the internal pull-up, then the pull-down. A pin that simply
+#      follows whichever pull is applied is FLOATING — nothing is driving it,
+#      so U4's receiver output is dead, unpowered, or not routed here.
+#      A pin that holds one level against the opposing pull IS driven.
+#
+#   2. Does `R` follow `D`?
+#      Drive GPIO26 (U4 pin 1 `D`) low = dominant, high = recessive, and read
+#      GPIO25 each time. On a healthy powered transceiver R mirrors D.
+#      D low -> R low, D high -> R high.
+#
+# Reading the result:
+#   floats both ways, R never follows   -> U4 has no VCC, is not populated, or
+#                                          GPIO25 does not reach its pin 4.
+#                                          Note standby (Rs high) does NOT
+#                                          explain this: the SN65HVD230 keeps a
+#                                          low-power receiver alive in standby,
+#                                          so R would still be driven. A
+#                                          floating R means no part, no power,
+#                                          or no connection — not a mode.
+#   driven, but R does not follow D     -> receiver alive, driver half dead or
+#                                          D (GPIO26) not routed. Standby fits
+#                                          THIS signature — check Rs (pin 8).
+#   R follows D cleanly                 -> U4 is fine; suspect the TWAI timing
+#                                          or the bus wiring beyond the part
+#
+# RESULT 2026-07-23: Q1 floating (pull-up reads 1, pull-down reads 0), Q2 never
+# follows. So it is the first case — U4 has no VCC, is unpopulated, or GPIO25
+# is not connected to it. DMM checks, in order: 3V3 on U4 pin 3; continuity
+# GPIO25<->U4 pin 4 and GPIO26<->U4 pin 1; then whether U4 is populated at all.
+
+esphome:
+  name: mr-purple-pinprobe
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - lambda: |-
+          const gpio_num_t D = GPIO_NUM_26;   // U4 pin 1, transceiver input
+          const gpio_num_t R = GPIO_NUM_25;   // U4 pin 4, transceiver output
+
+          // --- Q1: is R driven, or does it follow whatever pull we apply? ---
+          gpio_reset_pin(R);
+          gpio_set_direction(R, GPIO_MODE_INPUT);
+
+          gpio_set_pull_mode(R, GPIO_PULLUP_ONLY);
+          delay(20);
+          int r_pu = gpio_get_level(R);
+          gpio_set_pull_mode(R, GPIO_PULLDOWN_ONLY);
+          delay(20);
+          int r_pd = gpio_get_level(R);
+          gpio_set_pull_mode(R, GPIO_FLOATING);
+
+          ESP_LOGI("probe", "Q1 GPIO25 (U4 R): pull-up reads %d, pull-down reads %d", r_pu, r_pd);
+          if (r_pu == 1 && r_pd == 0) {
+            ESP_LOGE("probe", "Q1 VERDICT: FLOATING - nothing drives GPIO25. "
+                              "U4 is unpowered, dead, in standby (Rs high), or not routed here.");
+          } else if (r_pu == r_pd) {
+            ESP_LOGI("probe", "Q1 VERDICT: DRIVEN to %d - U4's receiver output is alive.", r_pu);
+          } else {
+            ESP_LOGW("probe", "Q1 VERDICT: inconsistent (pu=%d pd=%d)", r_pu, r_pd);
+          }
+
+          // --- Q2: does R follow D? ---
+          gpio_reset_pin(D);
+          gpio_set_direction(D, GPIO_MODE_OUTPUT);
+          gpio_set_direction(R, GPIO_MODE_INPUT);
+          gpio_set_pull_mode(R, GPIO_FLOATING);
+
+          int follows = 0;
+          for (int i = 0; i < 4; i++) {
+            gpio_set_level(D, 1);            // recessive
+            delay(20);
+            int r_hi = gpio_get_level(R);
+            gpio_set_level(D, 0);            // dominant
+            delay(20);
+            int r_lo = gpio_get_level(R);
+            ESP_LOGI("probe", "Q2 pass %d: D=1 -> R=%d   D=0 -> R=%d", i, r_hi, r_lo);
+            if (r_hi == 1 && r_lo == 0)
+              follows++;
+          }
+          gpio_set_level(D, 1);              // leave the bus recessive
+
+          if (follows == 4) {
+            ESP_LOGI("probe", "Q2 VERDICT: R follows D on every pass - U4 is FUNCTIONAL.");
+          } else {
+            ESP_LOGE("probe", "Q2 VERDICT: R did not follow D (%d/4 passes). "
+                              "Transceiver driver or routing is the fault.", follows);
+          }
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+sensor:
+  # H14: shared 12 V rail — confirm the board is actually powered while probing.
+  - platform: adc
+    pin: GPIO36
+    id: rail_12v
+    name: "Rail 12V"
+    attenuation: 12db
+    update_interval: 2s
+    accuracy_decimals: 2
+    filters:
+      - multiply: 11.0
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: 'ESP_LOGI("probe", "rail=%.2fV", id(rail_12v).state);'

@@ -1,0 +1,613 @@
+# ONE bench self-test — every gate a C6 adapter board has, in dependency order,
+# on one firmware, emitting one machine-readable line per gate.
+#
+# Driven by `script/hil/selftest.py`, which flashes this onto every attached
+# board at once, reads all the consoles, cross-references the topology and
+# writes `tests/hil/BENCH-STATE.md`. You can also run it by hand on one board.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE EXISTS: THE CONFUSION IT IS BUILT TO END
+#
+# Three separate sessions have now burned themselves on the same mistake —
+# reading "no CAN traffic" as a wiring or component fault when the actual cause
+# was that the +5 V transceiver domain was never switched on. The symptoms are
+# *identical*, and the PCB's own docs say so outright
+# (PCB-ESP32C6-Adapter-CAN-Modbus-LIN/docs/MANDATORY-PREREQUISITES.md):
+#
+#   "An unpowered CAN transceiver reproduces EVERY symptom of broken wiring."
+#
+# No amount of staring at a bus trace separates those two. The only thing that
+# does is asking the questions IN ORDER and refusing to answer a later one when
+# an earlier one failed. That ordering is the entire design of this file:
+#
+#   G1  rail          12 V on J8 (P1) AND GPIO7 high (P2)
+#                      -> the GPIO6 sense, which is itself gated by GPIO7
+#   G2  xcvr          the +5 V domain (P3/JP14), U2/U3, and the logic-side
+#                      jumpers (P4) — one TXD->RXD echo per CAN port
+#   G3  wire          who is on the segment — the topology beacons
+#   G3b bus           does traffic actually SURVIVE on that wire — the
+#                      controller's own bus_err / tx_fail / TEC / REC, judged on
+#                      movement between windows
+#   G4  lin           the LIN transceiver, which runs off 12 V and so survives a
+#                      dead +5 V domain (this is the trap: LIN fine, CAN dead)
+#   G4b lin.selftest  master only — the schedule is answered ON TIME, not merely
+#                      answered. Emitted only when `lin_selftest` is on.
+#   G5  sd            the card, bit-banged, no component in the way
+#
+# G2 and G3b are a deliberate pair and neither replaces the other. The echo
+# proves the transceiver can drive and hear its own wire; it says nothing about
+# whether frames survive on it. A segment missing a terminator, or carrying a
+# long stub, echoes perfectly and still shreds traffic — and at the 1 Hz beacon
+# rate this config runs, such a wire looks idle rather than broken. G3b is what
+# notices.
+#
+# **G3 is never reported as a verdict when G2 failed on that port.** A port whose
+# transceiver has no VCC hears nothing and is heard by nobody, which is exactly
+# what a cut wire looks like, so calling it a wiring fault would be a guess
+# dressed up as a measurement. It reports INDETERMINATE and names the gate that
+# actually failed. Same for G2 when G1 failed. If you only remember one thing
+# about this file, remember that the gates are a chain and it reports the FIRST
+# broken link, never the symptoms downstream of it.
+#
+# ---------------------------------------------------------------------------
+# WHAT G2 PROVES, AND WHY IT NEEDS NO FIXTURE
+#
+# A powered CAN transceiver always echoes its own dominant bit back out of RXD —
+# with no other node on the wire, no partner, and no termination. So driving TXD
+# low and reading RXD low is a complete end-to-end proof of:
+#
+#   the +5 V rail (U18) · JP14 · the TJA1044 itself · the GPIO routing and the
+#   logic-side jumpers (JP20/JP22 for the GPIO10/11 channel)
+#
+# The PCB repo's own self-test gets the same coverage but needs CAN1 wired back
+# to CAN2 with a loop cable. The bench cannot have that — its boards are wired to
+# each other — so this uses the echo instead, which needs no fixture at all.
+#
+# TIMING. The echo runs at on_boot priority 850: after hil_common raises GPIO7
+# (priority 900) and before `can_gateway` claims the pins (setup_priority
+# HARDWARE = 800). The +5 V rail needs ~1.9 ms to come up after GPIO7 rises
+# (PCB docs/lab-notes/2026-07-12-gpio7-sleep-domain.html), so the lambda waits
+# 5 ms first. The pins are handed back as inputs before can_gateway starts.
+#
+# ⚠ THE ECHO IS ONLY VALID ON AN IDLE WIRE, and it pulls the segment dominant
+# for ~200 us to do its job. On a segment under load that is ~100 bit times of
+# corruption; on 2026-07-29 running this test's ancestor against Green's 91 %
+# flood walked Green to bus-off, which then read as "seg1 is dead" on the next
+# run. Three things protect against that here: the test runs ONCE at boot rather
+# than on an interval; it hunts for an idle 20 ms window and only measures in
+# one; and it reports INDETERMINATE rather than a verdict if the wire never goes
+# quiet. **Do not run this against a live stress rig** — a saturated segment
+# never goes idle, so the honest answer is the only one you will get.
+#
+# Note that flashing is SEQUENTIAL, so "everyone is on the quiet firmware" is
+# not true while the run is in progress: the first board boots while the others
+# are still running whatever they had before. The first version of this file
+# assumed otherwise and duly returned INDETERMINATE on all six ports, because
+# Green and Orange were still flooding at 92 %. `selftest.py` therefore resets
+# every board after the LAST upload, so the echo pass happens with nothing on
+# the wire but 1 Hz beacons.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT CONTRACT — parsed by script/hil/selftest.py. Keep it greppable.
+#
+#   [bench] v1 node=mr-orange gates=6
+#   [bench] gate=rail      state=PASS detail=11.89V
+#   [bench] gate=xcvr.seg1 state=PASS detail=echo_closed,edges=0
+#   [bench] gate=xcvr.seg2 state=FAIL detail=no_echo,edges=0
+#   [bench] gate=bus       state=INDETERMINATE detail=seg1:err=0,txf=0,TEC=0,REC=0/...
+#   [bench] gate=lin       state=PASS detail=frames=198,csum=0
+#   [bench] gate=lin.selftest state=PASS detail=schedule_on_time    (master only)
+#   [bench] gate=sd        state=FAIL detail=card_silent
+#   [bench] verdict=FAIL first_broken=xcvr.seg2
+#
+# The topology answer itself keeps the existing `[topo]` format from
+# topology_rx.yaml, unchanged, so `script/hil/topology.py` still reads this
+# firmware. One beacon system, two readers — not a third dialect.
+#
+#   .venv/bin/python script/hil/selftest.py                  # the whole bench
+#   .venv/bin/python script/hil/selftest.py --board orange    # just one
+#
+# BENCH ONLY: the topology beacons transmit unconditionally on high-priority
+# ids. Never in tests/build/, an example, or a car config.
+substitutions:
+  node_name: mr-orange
+  # Identity hue. Brightness is state (hil_common), never the hue — three red
+  # boards at a fault are three boards you cannot tell apart.
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+
+  bit_rate: 500kbps
+  # CAN port A — GPIO2/3, present on every C6 adapter.
+  port_a_id: seg1
+  pin_a_tx: GPIO2
+  pin_a_rx: GPIO3
+  beacon_a: "0x0C4"
+  # CAN port B — GPIO10/11, armed by JP20/JP22.
+  port_b_id: seg2
+  pin_b_tx: GPIO10
+  pin_b_rx: GPIO11
+  beacon_b: "0x0C5"
+
+  # The same four pins again, as bare numbers.
+  #
+  # This duplication is annoying and it is not avoidable: `GPIO2` is an ESPHome
+  # pin *name* and means nothing to the C++ compiler, while the echo gate below
+  # runs before can_gateway exists and has to talk to the IDF directly, where
+  # the pin is a `gpio_num_t`. Substituting `${pin_a_tx}` into a lambda gets you
+  # "'GPIO2' was not declared in this scope" at the ninja stage, long after
+  # `esphome config` has said the file is fine. Keep the two in sync; the
+  # flashing script (script/hil/selftest.py) derives these from the pin names so
+  # they cannot drift when driven from there.
+  pin_a_tx_num: "2"
+  pin_a_rx_num: "3"
+  pin_b_tx_num: "10"
+  pin_b_rx_num: "11"
+
+  # LIN. `listener` is the safe default: it never transmits, so running the
+  # self-test cannot disturb a master already on the wire. Exactly one board on
+  # the bench should be `master`, or there is no schedule for the others to hear
+  # and every LIN gate reports INDETERMINATE — see script/hil/selftest.py.
+  lin_mode: listener
+
+  # Is a card expected on this board? Only Orange has one wired. "No card" is
+  # the correct answer on the others, not a failure, so their gate reports SKIP
+  # and is left out of the verdict. Reporting it as FAIL would train everyone to
+  # ignore a red SD gate, which is how a real card fault gets missed.
+  sd_expected: "true"
+
+  # Does this board arm linbus's built-in schedule exerciser? Only the LIN
+  # master can (`selfTestTick()` bails on any other mode), so only
+  # selftest-master.yaml turns it on. When false the gate is not emitted at all
+  # rather than emitted as a pass — a gate nobody ran must never look like one
+  # that succeeded.
+  lin_selftest: "false"
+
+packages:
+  base: !include hil_common.yaml
+  rail: !include rail_check.yaml
+  topo_rx_a: !include {file: topology_rx.yaml, vars: {port_id: "${port_a_id}", beacon_id: "${beacon_a}"}}
+  topo_tx_a: !include {file: topology_tx.yaml, vars: {port_id: "${port_a_id}", beacon_id: "${beacon_a}"}}
+  topo_rx_b: !include {file: topology_rx.yaml, vars: {port_id: "${port_b_id}", beacon_id: "${beacon_b}"}}
+  topo_tx_b: !include {file: topology_tx.yaml, vars: {port_id: "${port_b_id}", beacon_id: "${beacon_b}"}}
+
+# hil_common sets DEBUG, which buries the verdict under linbus and light
+# chatter — probe-orange-links.yaml records the same complaint. The whole point
+# of this config is that its output is readable, so INFO wins here.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+# THE LIN SELF-TEST IS INVISIBLE WITHOUT THIS, and its absence cost a whole
+# diagnosis. `LINCommunication.cpp` includes IDF's `esp_log.h`, not
+# `esphome/core/log.h`, so its ESP_LOGI calls go through the IDF logger — and
+# ESPHome ships `CONFIG_LOG_MAXIMUM_LEVEL=1` (ERROR), which is a COMPILE-TIME
+# ceiling: every ESP_LOGI in that translation unit is removed by the
+# preprocessor, not filtered at runtime. On 2026-07-29 that was read as "the
+# exerciser never emits its status block, so self_test_passed_ stays false",
+# which is a conclusion about the build, not about the code. Raising the ceiling
+# here makes the `---- LIN Self-Test Status ----` block appear so the gate can be
+# diagnosed from the console instead of guessed at.
+#
+# Scoped to this file on purpose: it costs flash and it un-silences every IDF
+# component at INFO, which is exactly the chatter the `level: INFO` above exists
+# to avoid in the rig configs.
+esp32:
+  framework:
+    sdkconfig_options:
+      CONFIG_LOG_MAXIMUM_LEVEL_INFO: y
+      CONFIG_LOG_DEFAULT_LEVEL_INFO: y
+
+globals:
+  # Gate results. 0 = not run, 1 = PASS, 2 = FAIL, 3 = INDETERMINATE.
+  - id: g_xcvr_a
+    type: uint8_t
+    initial_value: "0"
+  - id: g_xcvr_b
+    type: uint8_t
+    initial_value: "0"
+  # Edge counts from the echo window — the "was the wire busy" veto, and also
+  # the answer to "does this pin hear anything at all".
+  - id: edges_a
+    type: uint32_t
+    initial_value: "0"
+  - id: edges_b
+    type: uint32_t
+    initial_value: "0"
+  - id: sd_r1
+    type: uint8_t
+    initial_value: "255"
+  - id: sd_run
+    type: bool
+    initial_value: "false"
+  - id: lin_frames
+    type: uint32_t
+    initial_value: "0"
+  - id: lin_csum
+    type: uint32_t
+    initial_value: "0"
+  # Previous window's port counters, so the `bus` gate can judge MOVEMENT.
+  # `have_prev` is false for the first report, which is why that one reports
+  # the gate as unproven rather than clean: one sample is not a delta.
+  - id: prev_bus_err_a
+    type: uint32_t
+    initial_value: "0"
+  - id: prev_tx_fail_a
+    type: uint32_t
+    initial_value: "0"
+  - id: prev_bus_err_b
+    type: uint32_t
+    initial_value: "0"
+  - id: prev_tx_fail_b
+    type: uint32_t
+    initial_value: "0"
+  - id: have_prev
+    type: bool
+    initial_value: "false"
+  # Latched by selftest-master.yaml's binary_sensor when linbus reports
+  # "BASIC PASS (all IDs active)". Stays false everywhere else, which is why the
+  # gate below is only consulted when lin_selftest is on.
+  - id: lin_st_ok
+    type: bool
+    initial_value: "false"
+
+esphome:
+  on_boot:
+    # G2 — the transceiver echo, once, before can_gateway takes the pins.
+    - priority: 850
+      then:
+        - lambda: |-
+            // The +5 V rail comes up ~1.9 ms after GPIO7 rises. hil_common
+            // raised it at priority 900; give it margin before believing RX.
+            esp_rom_delay_us(5000);
+
+            struct Chan { const char *name; gpio_num_t tx; gpio_num_t rx; uint8_t *verdict; uint32_t *edges; };
+            Chan chans[] = {
+              {"${port_a_id}", (gpio_num_t) ${pin_a_tx_num}, (gpio_num_t) ${pin_a_rx_num}, &id(g_xcvr_a), &id(edges_a)},
+              {"${port_b_id}", (gpio_num_t) ${pin_b_tx_num}, (gpio_num_t) ${pin_b_rx_num}, &id(g_xcvr_b), &id(edges_b)},
+            };
+
+            for (auto &ch : chans) {
+              gpio_config_t rx_cfg = {};
+              rx_cfg.pin_bit_mask = 1ULL << ch.rx;
+              rx_cfg.mode = GPIO_MODE_INPUT;
+              rx_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+              rx_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+              rx_cfg.intr_type = GPIO_INTR_DISABLE;
+              gpio_config(&rx_cfg);
+
+              gpio_config_t tx_cfg = rx_cfg;
+              tx_cfg.pin_bit_mask = 1ULL << ch.tx;
+              tx_cfg.mode = GPIO_MODE_OUTPUT;
+              gpio_config(&tx_cfg);
+
+              // Busy check FIRST, and RETRY until the wire goes quiet. If
+              // anything else is driving this segment the echo reading is
+              // noise -- RX toggles at the bit rate and the two samples below
+              // just catch whichever bus bit happened to be present.
+              //
+              // Retrying matters because the bench is flashed one board at a
+              // time: while the first board boots, the others are still running
+              // whatever they had before. Once they are all on this firmware
+              // the only traffic is the 1 Hz topology beacons -- six frames a
+              // second, ~250 us each, so the wire is idle ~99.8% of the time and
+              // an idle 20 ms window turns up almost immediately. A board still
+              // running a load generator never goes idle, and then this loop
+              // correctly gives up and says INDETERMINATE instead of inventing a
+              // verdict. `selftest.py` resets every board after the last flash
+              // so this pass happens with the bench genuinely quiet.
+              uint32_t edges = 0;
+              bool wire_idle = false;
+              for (int attempt = 0; attempt < 60 && !wire_idle; attempt++) {
+                App.feed_wdt();
+                edges = 0;
+                int prev = gpio_get_level(ch.rx);
+                const int64_t until = esp_timer_get_time() + 20000;
+                while (esp_timer_get_time() < until) {
+                  const int now = gpio_get_level(ch.rx);
+                  if (now != prev) { edges++; prev = now; }
+                }
+                wire_idle = (edges == 0);
+                if (!wire_idle) esp_rom_delay_us(3000);
+              }
+              *ch.edges = edges;
+
+              if (!wire_idle) {
+                *ch.verdict = 3;   // INDETERMINATE - segment never went quiet
+              } else {
+                gpio_set_level(ch.tx, 1);
+                esp_rom_delay_us(200);
+                const int rx_recessive = gpio_get_level(ch.rx);
+                gpio_set_level(ch.tx, 0);
+                esp_rom_delay_us(200);
+                const int rx_dominant = gpio_get_level(ch.rx);
+                gpio_set_level(ch.tx, 1);
+                esp_rom_delay_us(200);
+                *ch.verdict = (rx_recessive == 1 && rx_dominant == 0) ? 1 : 2;
+              }
+
+              // Hand the pin back before can_gateway configures the peripheral.
+              gpio_config_t idle = rx_cfg;
+              idle.pin_bit_mask = 1ULL << ch.tx;
+              gpio_config(&idle);
+            }
+
+    # G5 — the SD card, bit-banged CMD0. Deliberately NOT via `sd_logger`: a
+    # wedged card makes the component retry-and-log forever, which drowns the
+    # report, and this has to work on boards with no card fitted at all (they
+    # answer "silent", which is the correct answer, not a failure).
+    - priority: 840
+      then:
+        - lambda: |-
+            // Only touch these pins on a board that actually has a card wired.
+            // GPIO21/22 are the I2C header pair on this PCB, and bit-banging
+            // them on a board with no SD front end reads noise off whatever is
+            // sitting on that header — the first run of this file returned
+            // r1=0xDB and r1=0xB4 from two cardless boards, both of which have
+            // bit 7 clear and would have been scored as a valid CMD0 response.
+            if (!${sd_expected}) return;
+
+            const gpio_num_t CLK = GPIO_NUM_21, MOSI = GPIO_NUM_22;
+            const gpio_num_t MISO = GPIO_NUM_20, CS = GPIO_NUM_15;
+
+            gpio_config_t out = {};
+            out.pin_bit_mask = (1ULL << CLK) | (1ULL << MOSI) | (1ULL << CS);
+            out.mode = GPIO_MODE_OUTPUT;
+            out.pull_up_en = GPIO_PULLUP_DISABLE;
+            out.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            out.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&out);
+
+            gpio_config_t in = out;
+            in.pin_bit_mask = 1ULL << MISO;
+            in.mode = GPIO_MODE_INPUT;
+            in.pull_up_en = GPIO_PULLUP_ENABLE;
+            gpio_config(&in);
+
+            // ~160 kHz. Identification always runs slow; "try a faster clock"
+            // is not a knob that helps here.
+            auto xfer = [&](uint8_t v) -> uint8_t {
+              uint8_t r = 0;
+              for (int i = 7; i >= 0; i--) {
+                gpio_set_level(MOSI, (v >> i) & 1);
+                gpio_set_level(CLK, 0);
+                esp_rom_delay_us(3);
+                gpio_set_level(CLK, 1);
+                r = (uint8_t) ((r << 1) | gpio_get_level(MISO));
+                esp_rom_delay_us(3);
+              }
+              return r;
+            };
+
+            // >= 74 clocks with CS high puts the card into SPI mode.
+            gpio_set_level(CS, 1);
+            for (int i = 0; i < 12; i++) xfer(0xFF);
+
+            gpio_set_level(CS, 0);
+            // CMD0 GO_IDLE_STATE. The 0x95 CRC7 is checked even in SPI mode.
+            const uint8_t cmd0[6] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+            for (uint8_t b : cmd0) xfer(b);
+
+            uint8_t r1 = 0xFF;
+            for (int i = 0; i < 16; i++) {
+              r1 = xfer(0xFF);
+              if (r1 != 0xFF) break;
+            }
+            gpio_set_level(CS, 1);
+            xfer(0xFF);
+
+            id(sd_r1) = r1;
+            id(sd_run) = true;
+
+can_gateway:
+  id: gw
+  # The human-readable "Port N stats: bus load ... bus_err ... TEC ... REC ..."
+  # line, on the same 10 s cadence as everything else here. The `bus` gate below
+  # is the machine-readable half; this is what you read when the gate says FAIL
+  # and you want the numbers.
+  statistics:
+    log_interval: 10s
+  ports:
+    - id: ${port_a_id}
+      tx_pin: ${pin_a_tx}
+      rx_pin: ${pin_a_rx}
+      bit_rate: ${bit_rate}
+    - id: ${port_b_id}
+      tx_pin: ${pin_b_tx}
+      rx_pin: ${pin_b_rx}
+      bit_rate: ${bit_rate}
+
+# No routes. This config measures; forwarding would push one segment's traffic
+# onto the other and a bus-off there would mask the result.
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: ${lin_mode}
+
+sensor:
+  # Port health. `bus_err` and `tx_fail` are lifetime counters, so the gate
+  # below judges them on MOVEMENT between report windows, never on being zero —
+  # a reflash transient or a partner rebooting leaves a permanent scar in them
+  # and a "must be 0" rule would call a healthy bus broken forever after.
+  - platform: can_gateway
+    port_id: ${port_a_id}
+    bus_err:
+      id: bus_err_a
+      internal: true
+    tx_fail:
+      id: tx_fail_a
+      internal: true
+  - platform: can_gateway
+    port_id: ${port_b_id}
+    bus_err:
+      id: bus_err_b
+      internal: true
+    tx_fail:
+      id: tx_fail_b
+      internal: true
+
+  - platform: linbus
+    linbus_id: lin
+    frames_received:
+      id: lin_frames_rx
+      internal: true
+      on_value:
+        - lambda: "id(lin_frames) = (uint32_t) x;"
+    checksum_errors:
+      id: lin_csum_err
+      internal: true
+      on_value:
+        - lambda: "id(lin_csum) = (uint32_t) x;"
+
+interval:
+  # The report. 10 s matches the `[topo]` cadence, so one console capture window
+  # catches both halves of the picture.
+  - interval: 10s
+    then:
+      - lambda: |-
+          auto name = [](uint8_t v) {
+            switch (v) {
+              case 1: return "PASS";
+              case 2: return "FAIL";
+              case 3: return "INDETERMINATE";
+              default: return "SKIP";
+            }
+          };
+
+          // G1 first, because everything else is conditional on it. rail_ok
+          // comes from rail_check.yaml; a 0 V reading there is genuinely
+          // three-way ambiguous (GPIO7 low / no 12 V on J8 / JP14 open) and the
+          // package's own error line spells that out.
+          const uint8_t g_rail = id(rail_ok) ? 1 : 2;
+
+          // G2 is only meaningful if G1 passed: with the rail down the
+          // transceivers have no VCC and "no echo" says nothing about them.
+          uint8_t xa = id(g_xcvr_a), xb = id(g_xcvr_b);
+          if (g_rail != 1) { xa = 3; xb = 3; }
+
+          // LIN runs off 12 V and does NOT need the +5 V domain, so it is
+          // reported independently -- a board with perfect LIN and both CAN
+          // ports dead is the signature failure of JP14 being open.
+          const bool lin_seen = id(lin_frames) > 0;
+          const uint8_t g_lin = !lin_seen ? 3 : (id(lin_csum) == 0 ? 1 : 2);
+
+          // r1 bit7 clear is the only valid CMD0 response; "not 0xFF" is not
+          // good enough. 0x01 = alive and idle.
+          const bool sd_want = ${sd_expected};
+          const uint8_t g_sd = !sd_want ? 0
+                             : (!id(sd_run) ? 0
+                             : (((id(sd_r1) & 0x80) == 0) ? 1 : 2));
+
+          ESP_LOGI("bench", "v1 node=${node_name} gates=%d", ${lin_selftest} ? 7 : 6);
+          ESP_LOGI("bench", "gate=rail      state=%s detail=%.2fV", name(g_rail), id(rail_v));
+          ESP_LOGI("bench", "gate=xcvr.${port_a_id} state=%s detail=%s,edges=%" PRIu32,
+                   name(xa), xa == 1 ? "echo_closed" : (xa == 2 ? "no_echo" : "unproven"), id(edges_a));
+          ESP_LOGI("bench", "gate=xcvr.${port_b_id} state=%s detail=%s,edges=%" PRIu32,
+                   name(xb), xb == 1 ? "echo_closed" : (xb == 2 ? "no_echo" : "unproven"), id(edges_b));
+          // G3b -- BUS HEALTH. The echo gate proves the transceiver can drive
+          // and hear its own wire; it says nothing about whether traffic
+          // actually survives on that wire. A segment with a missing
+          // terminator, a long stub or a duplicate bit rate echoes perfectly
+          // and still shreds frames, and at the 1 Hz beacon rate this config
+          // runs, a bad wire can look idle rather than broken. So: read the
+          // controller's own error counters and judge them on MOVEMENT.
+          //
+          // Chained behind xcvr on purpose. A port with no transceiver VCC
+          // reports flat counters simply because nothing is ever attempted, and
+          // reporting that as "bus clean" would be the same false green this
+          // whole file exists to prevent.
+          auto err_of = [](sensor::Sensor *s) -> uint32_t {
+            const float v = s->state;
+            return std::isnan(v) ? 0u : (uint32_t) v;
+          };
+          const uint32_t be_a = err_of(id(bus_err_a)), tf_a = err_of(id(tx_fail_a));
+          const uint32_t be_b = err_of(id(bus_err_b)), tf_b = err_of(id(tx_fail_b));
+
+          uint16_t tec_a = 0, rec_a = 0, tec_b = 0, rec_b = 0;
+          id(${port_a_id})->read_error_counters(tec_a, rec_a);
+          id(${port_b_id})->read_error_counters(tec_b, rec_b);
+
+          uint8_t g_bus;
+          if (xa != 1 || xb != 1) {
+            g_bus = 3;                       // transceiver unproven -> so is this
+          } else if (!id(have_prev)) {
+            g_bus = 3;                       // first window: no delta yet
+          } else {
+            const bool moved = be_a > id(prev_bus_err_a) || tf_a > id(prev_tx_fail_a) ||
+                               be_b > id(prev_bus_err_b) || tf_b > id(prev_tx_fail_b);
+            g_bus = moved ? 2 : 1;
+          }
+          id(prev_bus_err_a) = be_a;  id(prev_tx_fail_a) = tf_a;
+          id(prev_bus_err_b) = be_b;  id(prev_tx_fail_b) = tf_b;
+          id(have_prev) = true;
+
+          ESP_LOGI("bench", "gate=bus       state=%s detail=%s:err=%" PRIu32 ",txf=%" PRIu32
+                            ",TEC=%u,REC=%u/%s:err=%" PRIu32 ",txf=%" PRIu32 ",TEC=%u,REC=%u",
+                   name(g_bus), "${port_a_id}", be_a, tf_a, tec_a, rec_a,
+                   "${port_b_id}", be_b, tf_b, tec_b, rec_b);
+
+          ESP_LOGI("bench", "gate=lin       state=%s detail=frames=%" PRIu32 ",csum=%" PRIu32,
+                   name(g_lin), id(lin_frames), id(lin_csum));
+
+          // Optional, master-only: linbus's schedule exerciser. It latches only
+          // after 5 s of every scheduled id arriving on time, so "not yet" and
+          // "never" both read as unproven here rather than as a pass.
+          const bool st_want = ${lin_selftest};
+          const uint8_t g_lin_st = !st_want ? 0 : (id(lin_st_ok) ? 1 : 3);
+          if (st_want) {
+            ESP_LOGI("bench", "gate=lin.selftest state=%s detail=schedule_on_time", name(g_lin_st));
+          }
+          ESP_LOGI("bench", "gate=sd        state=%s detail=r1=0x%02X", name(g_sd), id(sd_r1));
+
+          // The chain: report the FIRST broken link, never the wreckage after
+          // it. This is the line that stops "the wire is dead" being written
+          // down when the truth is "the pin was never raised".
+          const char *first = nullptr;
+          if (g_rail != 1) first = "rail";
+          else if (xa == 2) first = "xcvr.${port_a_id}";
+          else if (xb == 2) first = "xcvr.${port_b_id}";
+          else if (g_bus == 2) first = "bus";
+          else if (g_sd == 2) first = "sd";
+          else if (g_lin == 2) first = "lin";
+          else if (g_lin_st == 2) first = "lin.selftest";
+
+          // A gate that could not be measured is NOT a gate that passed.
+          //
+          // The first version of this file aggregated INDETERMINATE to PASS,
+          // and on 2026-07-29 the bench duly reported a board as PASS with all
+          // five gates unproven. A tool built to stop false confidence must not
+          // manufacture it: an unmeasured gate makes the verdict INCONCLUSIVE,
+          // which is neither a pass nor a failure and says which gate to go and
+          // measure properly.
+          const char *unproven = nullptr;
+          if (g_rail == 3) unproven = "rail";
+          else if (xa == 3) unproven = "xcvr.${port_a_id}";
+          else if (xb == 3) unproven = "xcvr.${port_b_id}";
+          else if (g_bus == 3) unproven = "bus";
+          else if (g_sd == 3) unproven = "sd";
+          else if (g_lin == 3) unproven = "lin";
+          else if (g_lin_st == 3) unproven = "lin.selftest";
+
+          if (first != nullptr) {
+            ESP_LOGW("bench", "verdict=FAIL first_broken=%s", first);
+          } else if (unproven != nullptr) {
+            ESP_LOGW("bench", "verdict=INCONCLUSIVE first_unproven=%s", unproven);
+          } else {
+            ESP_LOGI("bench", "verdict=PASS first_broken=none");
+          }
+          id(healthy) = (first == nullptr && unproven == nullptr);
+
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: "return id(healthy);"
+          then:
+            - script.execute: led_health
+          else:
+            - script.execute: led_fault

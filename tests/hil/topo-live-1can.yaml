@@ -1,0 +1,125 @@
+# LIVE topology catcher — flash it on every board, then move cables and watch.
+#
+# Each node beacons its own MAC at 1.5 Hz on every CAN port it owns, and decodes
+# every beacon it hears. Plugging a tap in prints a line within ~1 s; pulling one
+# prints a line within ~3 s. No slot map, no board table, nothing to keep in
+# sync — see tests/hil/topology_live.h for why MAC and not a slot number.
+#
+#   [topo] seg1 + 20:6E:F1:0A:D1:E0.bus1 id=0x3E1 (NEW)
+#   [topo] seg1 - F0:F5:BD:0E:DD:50.bus0 id=0x140 (LOST, silent 3004 ms)
+#   [topo] seg1 = F0:F5:BD:0E:DD:50.bus0(0x140) 94:B9:7E:E4:80:C0.bus0(0x2C0)
+#
+# Flash all three, then attach to any console — every board reports the same
+# wiring from its own side, so the pictures cross-check.
+#
+#   .venv/bin/esphome run tests/hil/topo-live.yaml \
+#     -s node_name mr-orange -s port_a seg1 -s port_b seg2 \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# Green and Purple have one CAN port each, so they take the defaults below and
+# only need -s node_name plus their pins. Purple is a classic ESP32 — pass
+# -s board esp32dev -s variant esp32 -s pin_a_tx GPIO26 -s pin_a_rx GPIO25.
+#
+# BENCH ONLY: it transmits unconditionally, on ids chosen for identity rather
+# than for politeness. Never in tests/build/, an example, or a car config.
+substitutions:
+  node_name: topo-live
+  board: esp32-c6-devkitc-1
+  # Port A — every board has one.
+  port_a: can1
+  pin_a_tx: GPIO2
+  pin_a_rx: GPIO3
+  bus_a: "0"
+  bit_rate: 500kbps
+
+esphome:
+  name: ${node_name}
+  name_add_mac_suffix: false
+  includes:
+    - topology_live.h
+  # The GPIO7 rail raise is COMPILED PER TARGET here, and it must stay that way.
+  #
+  # On the classic ESP32 (Mr. Purple) **GPIO6-11 are the SPI flash pins**. Driving
+  # GPIO7 high there wedges the chip the moment the flash is next read: it reboots
+  # on the watchdog, forever, printing "PRO CPU has been reset by WDT" and running
+  # no firmware — which on the bench reads as a dead board, and takes its CAN
+  # partners down with it, because a port whose only partner is missing fills its
+  # TX queue and walks to bus-off.
+  #
+  # On the ESP32-C6 adapter PCB the opposite is true: GPIO7 is the shared sleep
+  # rail (LIN SLP_N + 5V_ENA via JP14 + the Q1/Q2 switch), it is off by default,
+  # and without it the CAN transceivers have no VCC and every port reproduces
+  # every symptom of broken wiring.
+  #
+  # This file used to omit the raise entirely, justified by "its only user is
+  # Purple" — but `board:` above defaults to esp32-c6-devkitc-1, so flashing it
+  # with defaults put a no-rail config on a C6 and manufactured exactly the fault
+  # it exists to diagnose. `CONFIG_IDF_TARGET_ESP32C6` is an IDF sdkconfig
+  # symbol, always defined, so this needs nothing from esphome/core/defines.h.
+  on_boot:
+    - priority: 900
+      then:
+        - lambda: |-
+            #ifdef CONFIG_IDF_TARGET_ESP32C6
+              gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
+              gpio_set_level(GPIO_NUM_7, 1);
+              ESP_LOGI("rail", "GPIO7 high - +5V domain enabled (needs JP14 bridged)");
+            #else
+              ESP_LOGI("rail", "no +5V sleep rail on this target - nothing to enable "
+                               "(and GPIO7 is SPI flash here, so it is never touched)");
+            #endif
+
+esp32:
+  board: ${board}
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+can_gateway:
+  id: gw
+  ports:
+    - id: ${port_a}
+      tx_pin: ${pin_a_tx}
+      rx_pin: ${pin_a_rx}
+      bit_rate: ${bit_rate}
+      on_frame:
+        - lambda: 'topo::observe("${port_a}", ${bus_a}, can_id, data, dlc, extended, rtr);'
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("topo", "${port_a} BUS-OFF - nothing is ACKing this port");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("topo", "${port_a} recovered");'
+
+globals:
+  - id: seq_a
+    type: uint8_t
+
+interval:
+  # TX port A. 1.5 Hz: fast enough that a re-plug shows while your hand is still
+  # on the connector. A refused inject is ignored on purpose — this is
+  # diagnostics, the next beacon is 666 ms away, and a port that cannot transmit
+  # is exactly what the far end's LOST line is about to report.
+  - interval: 666ms
+    then:
+      - lambda: |-
+          uint8_t data[8];
+          const uint32_t id_a = topo::fill_beacon("${port_a}", data, ${bus_a}, &id(seq_a));
+          id(${port_a})->inject(id_a, false, false, data, 8);
+
+  - interval: 500ms
+    then:
+      - lambda: "topo::sweep();"
+
+  # Full picture every 5 s, so a console attached midway still learns the state
+  # without waiting for something to change.
+  - interval: 5s
+    then:
+      - lambda: "topo::report();"

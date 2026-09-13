@@ -1,0 +1,161 @@
+# Mr. Green — 500 kbit/s burst load generator for the M2 logger stress test.
+#
+# Purpose: drive one CAN segment to ~90 % bus load so the DUT's RX ISR, its
+# datalogger tap and the SD writer all see the design load. `cyclic_sends`
+# cannot do this — each is floored by the ~16 ms main-loop period (issue #2), so
+# 32 of them top out near 2000 f/s ≈ 50 % of 500 kbit/s.
+#
+# What works instead: fill the whole TX queue in one main-loop pass. At
+# 500 kbit/s an 8-byte standard frame is ~125 bits ≈ 250 us on the wire, so a
+# 64-deep queue is ~16 ms of transmission — one loop period. The queue therefore
+# stays busy from one pass to the next and the duty cycle is set by how many
+# frames each pass enqueues (`burst`).
+#
+#   NOTE this needs the inject slot pool to follow tx_queue_depth. Before that
+#   fix the pool was 4 slots whatever the queue said, so a burst delivered four
+#   frames and the shortfall looked like a bus fault.
+#
+# Sweep the load without recompiling logic:
+#
+#   .venv/bin/esphome -s burst 64 run tests/hil/stress-green-load.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py green)"
+#
+# Read the ACHIEVED load off the port statistics line ("bus load x % (rx/tx)"),
+# never the configured burst — that is the trap docs/hil-rig-spec.md §9 names.
+#
+# The LIN master keeps running: the target is all buses busy at once, and Orange
+# sniffs this LIN traffic in the same run.
+substitutions:
+  node_name: mr-green
+  id_r: "0%"
+  id_g: "100%"
+  id_b: "0%"
+  # Frames enqueued per main-loop pass. 64 == the TX queue depth, i.e. as hard
+  # as this port can be driven; lower it to land on a target load.
+  burst: "58"
+  # Cadence of the burst. `1ms` means "every main-loop pass" — measured at
+  # ~1000 passes/s on this board, NOT the ~16 ms issue #2 assumes, which is why
+  # even burst=4 saturates a 500 kbit/s segment. Raise it to dial the load down.
+  burst_interval: 1ms
+  # Distinct CAN ids the burst rotates through, so the DUT's rule engine and
+  # per-id statistics see realistic spread rather than one hot id.
+  id_span: "16"
+
+packages:
+  base: !include hil_common.yaml
+  cpu: !include cpu_stats.yaml
+  # Assert the 12 V rail before any bus number is believed. An unpowered
+  # transceiver reproduces every symptom of broken wiring.
+  rail: !include rail_check.yaml
+  # Names, in the log, whoever else is on this wire — the flood makes a segment
+  # look busy whether or not anything is listening. See topology_rx.yaml.
+  topo_rx_can1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C0"
+  topo_tx_can1: !include
+    file: topology_tx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C0"
+
+globals:
+  - id: burst_seq
+    type: uint32_t
+    initial_value: "0"
+  - id: burst_sent
+    type: uint32_t
+    initial_value: "0"
+  - id: burst_refused
+    type: uint32_t
+    initial_value: "0"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      # The whole point: a deep queue the burst can actually fill.
+      tx_queue_depth: 64
+      observe_queue_depth: 32
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("load", "CAN1 bus-off — is the partner ACKing?");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("load", "CAN1 recovered");'
+  statistics:
+    log_interval: 10s
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: master
+  schedule:
+    - lin_id: 48
+      interval: 50ms
+  responses:
+    - lin_id: 48
+      data: [0x01, 0x02, 0x03, 0x04]
+      checksum: enhanced
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+# The burst itself. `interval: 1ms` fires once per main-loop pass (the loop
+# period is the floor), which is exactly the cadence we want: top the TX queue
+# back up every pass and let the wire be the limit.
+interval:
+  - interval: ${burst_interval}
+    then:
+      - lambda: |-
+          uint8_t data[8];
+          const uint32_t seq = id(burst_seq)++;
+          data[0] = (uint8_t) (seq >> 24);
+          data[1] = (uint8_t) (seq >> 16);
+          data[2] = (uint8_t) (seq >> 8);
+          data[3] = (uint8_t) seq;
+          for (int i = 0; i < ${burst}; i++) {
+            data[4] = (uint8_t) i;
+            data[5] = 0xA5;
+            data[6] = 0x5A;
+            data[7] = (uint8_t) (i ^ seq);
+            // Stop at the first refusal: the queue is full, so every further
+            // call this pass would only spin and log.
+            if (!id(can1)->inject(0x200 + (i % ${id_span}), false, false, data, 8)) {
+              id(burst_refused)++;
+              break;
+            }
+            id(burst_sent)++;
+          }
+
+  - interval: 10s
+    then:
+      - lambda: |-
+          // /10.0f, not /1.0f: the window is 10 s. The old divisor printed the
+          // window TOTAL under an "f/s" label, so a generator offering 2000 f/s
+          // reported 19992 — read as ten times the wire's whole capacity.
+          ESP_LOGI("load", "burst: passes=%" PRIu32 " sent=%" PRIu32 " refused=%" PRIu32
+                   " (%.0f f/s offered over the last 10s window)",
+                   id(burst_seq), id(burst_sent), id(burst_refused), id(burst_sent) / 10.0f);
+          id(burst_sent) = 0;
+          id(burst_refused) = 0;
+          id(healthy) = true;
+      - script.execute: led_health
+
+sensor:
+  - platform: can_gateway
+    port_id: can1
+    bus_load:
+      name: "CAN1 bus load"
+    bus_err:
+      name: "CAN1 bus errors"

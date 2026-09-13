@@ -1,0 +1,159 @@
+# `uds` with a MEMORY-MAPPED catalog partition — the normal case, and the only
+# config that compiles it.
+#
+# WHY A SECOND BUILD. `common.yaml` embeds the same 1.8 KB `mini` fixture, which
+# never touches `esp_partition_find_first()` / `esp_partition_mmap()` or
+# `esp32.add_partition()`. This one requests a real 256 KiB `diag` partition for
+# it instead, and therefore exercises the path that runs on a bench: a custom
+# partition in the generated partitions.csv, and a catalog the firmware never
+# carries a copy of.
+#
+# It also compiles two hubs SHARING one partition, which is the shape a real
+# bench uses (an ECU and a responder rig answering the same catalog's DIDs).
+# `add_partition()` refuses a duplicate name, so codegen must request it exactly
+# once; the validator enforces that both hubs then agree on its size (U13).
+#
+# Flash the catalog after the firmware:
+#   script/uds_catalog.py flash tests/uds/fixtures/mini.dcat \
+#       --build-dir .esphome/build/uds-partition-c6 --partition diag --port <dev>
+#
+# Every field name comes from tests/uds/fixtures/mini.manifest.json.
+esphome:
+  on_boot:
+    then:
+      - uds.read:
+          id: mini
+          service: DT_Mini_VIN
+
+can_gateway:
+  id: diag
+  ports:
+    - id: diag_bus
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 500kbps
+      observe_queue_depth: 32
+
+isotp:
+  - id: tp_mini
+    port_id: diag_bus
+    tx_id: 0x7E7
+    rx_id: 0x7EF
+    padding: 0xFF
+    max_message_size: 512
+    block_size: 8
+    st_min: 20ms
+    n_cr_timeout: 2500ms
+  - id: tp_sim
+    port_id: diag_bus
+    tx_id: 0x7E3
+    rx_id: 0x7EB
+    padding: 0xFF
+    max_message_size: 512
+    block_size: 8
+    st_min: 20ms
+    n_cr_timeout: 2500ms
+
+uds:
+  - id: mini
+    isotp_id: tp_mini
+    catalog:
+      file: ../../uds/fixtures/mini.dcat
+      partition: diag
+      size: 256KB
+    ecu: MINI
+    max_consecutive_failures: 3
+    on_error:
+      - logger.log:
+          format: "mini: %s"
+          args: [x.what]
+
+  # The same flashed catalog, a different address pair. One partition, one size.
+  - id: sim
+    isotp_id: tp_sim
+    catalog:
+      file: ../../uds/fixtures/mini.dcat
+      partition: diag
+      size: 256KB
+    ecu: MINI
+
+sensor:
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Voltage_Maximum_Cell
+    update_interval: 10s
+    name: "Cell voltage max"
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Voltage_Minimum_Cell
+    update_interval: 10s
+    name: "Cell voltage min"
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Temperature_Averaged
+    update_interval: 20s
+    name: "Temperature mean"
+  - platform: uds
+    uds_id: mini
+    field: DT_Mini_Temperature_Maximum
+    update_interval: 20s
+    name: "Temperature max"
+
+  # A collapsed array (format §5.1b): one field record, one name, an element
+  # index. `element: 1` is the factory's cell 2.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_Cell_2Byte
+    element: 1
+    update_interval: 60s
+    name: "Cell 2 voltage"
+
+  # `service:` disambiguating by group, and a unit the YAML overrides — a
+  # corrected unit must not need a catalog rebuild.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_Voltage_2Byte
+    service: DT_Mini_Guarded_Block
+    update_interval: 60s
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    name: "Guarded block voltage"
+
+  # Same fields, the other address pair — the responder rig's hub.
+  - platform: uds
+    uds_id: sim
+    field: DT_Mini_Voltage_Maximum_Cell
+    update_interval: 10s
+    name: "Sim cell voltage max"
+
+  - platform: uds
+    uds_id: mini
+    update_interval: 30s
+    requests_sent:
+      name: "Mini requests sent"
+    responses_accepted:
+      name: "Mini responses accepted"
+    timeouts:
+      name: "Mini timeouts"
+    negative_responses:
+      name: "Mini negative responses"
+    partial_responses:
+      name: "Mini partial responses"
+    fields_uncovered:
+      name: "Mini fields uncovered"
+    last_nrc:
+      name: "Mini last NRC"
+
+text_sensor:
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_State
+    update_interval: 10s
+    name: "Contactor state"
+
+  # ASCII. Read once on demand — a VIN does not change, which is why `never` is
+  # this platform's default.
+  - platform: uds
+    uds_id: mini
+    field: PRES_Mini_VIN_4Byte
+    name: "VIN"

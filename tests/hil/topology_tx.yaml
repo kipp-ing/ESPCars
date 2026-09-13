@@ -1,0 +1,34 @@
+# Topology beacon, transmit half — "I am <node>, this is my bus <n>", 1 Hz.
+#
+# Pair it with `topology_rx.yaml` on the same port and with the same vars; that
+# file carries the slot map, the design notes and the reason the two halves are
+# separate packages. Include this one only on ports that may transmit — on a
+# listen-only port every inject is refused and logged.
+#
+#   packages:
+#     topo_rx_can1: !include { file: topology_rx.yaml, vars: { port_id: can1, beacon_id: "0x0C0" } }
+#     topo_tx_can1: !include { file: topology_tx.yaml, vars: { port_id: can1, beacon_id: "0x0C0" } }
+#
+# WHY BYTE 5 ROLLS, and why this is an interval lambda instead of the obvious
+# declarative `cyclic_sends` entry: the receiving decode entity **publishes on
+# change** (can_gateway.cpp, `if (have_last_ && raw == last_raw_) return;`). A
+# fixed payload — which is all a cyclic_send can carry — therefore fires the
+# receiver's trigger exactly once, at the first beacon, and never again. The
+# topology line would show every partner for five seconds after boot and then
+# claim the wire was empty forever after. A payload byte that changes every
+# beacon is what makes the receiver keep republishing, so the freshness stamp
+# stays a freshness stamp.
+globals:
+  - id: topo_seq_${port_id}
+    type: uint8_t
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          // Payload spells TOPO in a raw hex dump, then a format version and the
+          // rolling sequence the receiver decodes. Refused injects (bus-off, a
+          // full queue) are ignored: the beacon is diagnostics, and the next one
+          // is a second away.
+          uint8_t data[8] = {0x54, 0x4F, 0x50, 0x4F, 0x01, id(topo_seq_${port_id})++, 0x00, 0x00};
+          id(${port_id})->inject(${beacon_id}, false, false, data, 8);

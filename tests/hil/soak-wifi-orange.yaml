@@ -1,0 +1,40 @@
+# The §9.1 soak: the same question as ring-wifi-orange.yaml, under production load.
+#
+# The M2 stress config included whole, at PERF, plus per-task CPU attribution and the radio. Both
+# segments near 90 % at 500 kbit/s, both routes forwarding, LIN listening, the writer at the
+# record ceiling — and WiFi associated for the whole run.
+#
+#   script/hil/flash-soak-perf.sh green blue     # partners first, radio-free, unchanged
+#   .venv/bin/esphome run tests/hil/soak-wifi-orange.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# Needs tests/hil/secrets.yaml — copy secrets.yaml.example.
+#
+# PASS CRITERIA — the stress config's, unchanged, plus what the radio adds:
+#   * dropped == 0 AND tap_dropped == 0  (two different bottlenecks, never summed)
+#   * LIN error-free, "Frames RX (window)" at 20/s — §9.1's actual risk
+#   * no bus-off, tx_fail 0, TEC 0
+#   * `[heap] largest block` never falls below ~20 kB — the collection httpd wants ~10 kB plus a
+#     task stack and it does not exist yet, so the headroom has to be there BEFORE it is written.
+#     This is the number that decides §9.3 (plain HTTP vs TLS), and it is the reason to run this
+#     soak before the server rather than after.
+#   * `[wifi] ASSOCIATED` for the whole capture
+#
+# COMPARE AGAINST: the radio-free PERF soak of 2026-07-28 (tests/hil/opt_perf.yaml holds the
+# figures) — 2 897 605 records / 121.3 MB, 4044 rec/s, dropped 0, CPU mean 36.8 %, sdlog_wr mean
+# 28.5 %, 29 rotations. Same rig, same bounds, radio off. Any CPU delta here is the radio's.
+#
+# The seg2 caveat from the radio-free soak still applies: seg2 has accumulated bus_err/err_events
+# at load before, on the same DUT and firmware, while seg1 stayed at exactly 0/0. That is a
+# property of the seg2 WIRE — check termination first. Errors on seg2 alone are not a WiFi
+# finding; errors on seg1 are.
+#
+# §9.2 (WiFi TX bursts vs the hold-up cap and vcc_monitor) is NOT answered here. That needs the
+# rail watched while the radio transmits, and this run has nothing pulling data off the board —
+# association alone barely transmits. It becomes answerable once the server exists and a transfer
+# can be run against it.
+packages:
+  dut: !include stress-orange-gateway.yaml
+  tasks: !include task_stats.yaml
+  perf: !include opt_perf.yaml
+  wifi: !include wifi_probe.yaml

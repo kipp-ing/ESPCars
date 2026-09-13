@@ -1,0 +1,141 @@
+# Shared HIL bench base — board, logging, and the WS2812 identity LED.
+#
+# One rule: **hue is identity, brightness and motion are state.** A board shows
+# its own color (mr-green / mr-blue / mr-orange) in every condition, and you can
+# always answer "which board is this?" at a glance:
+#
+#   healthy + traffic   identity color, brightness flipping 20% <-> 35% per
+#                       token event (~10 Hz at the 19 laps/s baseline)
+#   healthy, idle       identity color, steady 20%
+#   fault               identity color, one 35% blip per second against dark
+#
+# BRIGHTNESS CEILING: nothing here may reach 40%. That is a standing project
+# rule (CLAUDE.md "Testing"), and these boards sit on a desk at eye level — the
+# WS2812 at full scale is genuinely painful to work next to. The fault blip was
+# 100% and the activity peak was exactly 40% until 2026-07-29; both are now 35%,
+# which is still an unmistakable step above the 20% idle level. Contrast, not
+# absolute output, is what makes the state readable.
+#
+# Both earlier schemes broke that rule in the failure case, which is the one
+# case where it matters. The white token flash fired every ~51 ms but decayed
+# over 60 ms, so under load all three boards sat solid white; and a fault
+# repainted the LED red, so a stopped bench was three identical red boards —
+# unidentifiable exactly when someone is standing there trying to work out
+# which one to re-cable.
+#
+# The WS2812 sits on the plug-in ESP32-C6-DevKitC-1 (GPIO8, 10k pull-up R29)
+# and runs off DevKit 3V3 from USB, so it works with no 12 V on J8 — see
+# PCB-ESP32C6-Adapter-CAN-Modbus-LIN/docs/rgb-status-beacon.md.
+esphome:
+  name: ${node_name}
+  name_add_mac_suffix: false
+  # Paint the identity/fault color before anything can pulse brightness —
+  # led_token deliberately does not set a color, so one must already be set.
+  on_boot:
+    # Before anything else: raise the board's power rail. GPIO7 is one shared
+    # "sleep rail" gating LIN SLP_N, the +5 V enable (5V_ENA, via JP14) and the
+    # Q1/Q2 domain switch that feeds the GPIO6 VCC self-sense — high = awake.
+    # The CAN transceivers take VCC from +5 V, so with GPIO7 low they are
+    # unpowered and every CAN symptom of broken wiring appears on perfectly
+    # good hardware. See PCB-ESP32C6-Adapter-CAN-Modbus-LIN
+    # docs/MANDATORY-PREREQUISITES.md (P2/P3).
+    #
+    # This used to happen only as a SIDE EFFECT of `linbus` driving its
+    # `cs_pin: GPIO7` high in init(), so a CAN-only config with no linbus block
+    # silently left the rail down. That cost a full bench session on
+    # 2026-07-27. Asserting it here makes it true for every bench config.
+    # Configs that also run linbus drive the same pin to the same level.
+    #
+    # Driven as a raw IDF call rather than an `output:` platform on purpose:
+    # registering the pin would collide with `linbus`, which claims the same
+    # GPIO7 as its `cs_pin` ("Pin 7 is used in multiple places" — ESPHome does
+    # validate this). A bare gpio_set_level composes instead: configs with
+    # linbus simply drive the same pin to the same level twice.
+    - priority: 900
+      then:
+        - lambda: |-
+            gpio_config_t rail = {};
+            rail.pin_bit_mask = 1ULL << GPIO_NUM_7;
+            rail.mode = GPIO_MODE_OUTPUT;
+            rail.pull_up_en = GPIO_PULLUP_DISABLE;
+            rail.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            rail.intr_type = GPIO_INTR_DISABLE;
+            gpio_config(&rail);
+            gpio_set_level(GPIO_NUM_7, 1);
+            ESP_LOGI("rail", "GPIO7 high - board awake, +5V domain enabled (needs JP14 bridged)");
+    - priority: -100
+      then:
+        - script.execute: led_fault
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+globals:
+  - id: healthy
+    type: bool
+    initial_value: "false"
+  # Which half of the activity pulse we are showing. Flipped by led_token.
+  - id: led_bright
+    type: bool
+    initial_value: "false"
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO8
+    chipset: ws2812
+    num_leds: 1
+    rgb_order: GRB
+    default_transition_length: 0s
+
+script:
+  - id: led_health
+    then:
+      - light.turn_on:
+          id: status_led
+          brightness: 20%
+          red: ${id_r}
+          green: ${id_g}
+          blue: ${id_b}
+  # Fault: still the board's own color, but one short bright blip per second
+  # against a dark background — impossible to confuse with the calm dim glow of
+  # a healthy idle board, and it still says which board it is. Driven by each
+  # board's existing 1 s health interval, so the script is a single blip.
+  - id: led_fault
+    mode: restart
+    then:
+      - light.turn_on:
+          id: status_led
+          brightness: 35%
+          red: ${id_r}
+          green: ${id_g}
+          blue: ${id_b}
+      - delay: 150ms
+      - light.turn_off:
+          id: status_led
+  # Activity indicator: brightness only. A LightCall that sets brightness and
+  # nothing else leaves the current color alone, so this pulses whatever
+  # led_health / led_fault last painted. Every token event flips dim<->bright,
+  # which at the 19 laps/s baseline is a ~10 Hz pulse in the board's own
+  # color; a slowing ring visibly slows the pulse and a stalled one freezes it
+  # until the 1 s health interval repaints. No delay, no restore, no restart
+  # mode — the toggle is the whole indicator.
+  - id: led_token
+    then:
+      - lambda: "id(led_bright) = !id(led_bright);"
+      - light.turn_on:
+          id: status_led
+          # Dim value is led_health's brightness — keep the two in sync.
+          # 0.35 not 0.40: the ceiling is "lower than 40%", not "at most 40%".
+          brightness: !lambda "return id(led_bright) ? 0.35f : 0.20f;"

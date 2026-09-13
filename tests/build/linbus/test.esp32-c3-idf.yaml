@@ -1,0 +1,21 @@
+substitutions:
+  tx_pin: GPIO10
+  rx_pin: GPIO6
+  cs_pin: GPIO7
+
+esphome:
+  name: linbus-c3
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+<<: !include common.yaml

@@ -1,0 +1,60 @@
+# Mr. Green — CAN2 bus characterisation probe.
+#
+# Decides *why* Green's CAN2 never reaches bus-off, before anyone goes to the
+# bench with a multimeter. Observed on the repro at 125 kbit/s: RX reads
+# dominant, TEC 0 (the controller never starts transmitting, so it never sees an
+# idle bus to start into), REC pinned at 135, err_events ~10 400/s.
+#
+# 10 400/s at 125 kbit/s is one error event per ~12 bit times — the signature of
+# a receiver on a **permanently dominant line**: stuff error after 6 identical
+# bits, error frame + delimiter, re-sync, repeat, forever.
+#
+# RESULTS 2026-07-26 — the stuck-dominant model is REFUTED.
+#
+#   500 kbit/s, quiet:  err_events 0/s, REC 0, TEC 0, bus load 0.0%
+#   125 kbit/s, quiet:  err_events 0/s, REC 0, TEC 0, bus load 0.0%
+#
+# Note the first of those runs changed *two* variables at once — bit rate AND
+# removing the routes/inject — so on its own it proved nothing. The 125 kbit/s
+# re-run isolates it: at the SAME bit rate as the repro, with the only
+# difference being that the port no longer transmits, every error indication
+# disappears.
+#
+# So the line is not stuck dominant and is not carrying garbage. When nothing
+# transmits, CAN2 sees a clean idle recessive bus at both bit rates. The errors
+# in the repro (err_events ~10 400/s, REC -> 135) appear only when the port
+# TRANSMITS, which puts the fault in the transmit path, not on the wire.
+#
+# What that leaves, and why it is the next thing to check: a transmitter alone
+# on a properly terminated bus must fail to get an ACK and walk TEC to bus-off.
+# This one never does — TEC stays 0. The documented cause of exactly that shape
+# is the CAN2 *logic-side* jumpers: "JP22 = GPIO10->CAN2_TX and JP20 =
+# GPIO11->CAN2_RX ... TWAI1 transmits into a dead pin; U3 never drives/ACKs.
+# **This was the final blocker.**" (can-board-usage-for-gateway.md). Bus-side
+# wiring and termination being right does not help if the logic side is open.
+#
+# No routes and no inject here on purpose: this characterises the *line*, so the
+# port must do nothing but listen. Read the rate from two consecutive
+# "Port 1 stats:" lines, which are 15 s apart.
+#
+# NOTE: this is a standalone port definition rather than a package overlay on
+# mr-green-issue1.yaml, because ESPHome package merging **appends** list entries
+# instead of merging them by id — overlaying `- id: dead` produced a third port
+# with a duplicate id rather than overriding bit_rate.
+
+packages:
+  green: !include mr-green.yaml
+
+can_gateway:
+  id: gw
+  ports:
+    - id: dead
+      tx_pin: GPIO10
+      rx_pin: GPIO11
+      bit_rate: 125kbps
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("probe", "CAN2 bus-off at 500k");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGW("probe", "CAN2 recovered at 500k");'

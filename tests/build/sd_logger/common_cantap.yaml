@@ -1,0 +1,79 @@
+# sd_logger fed by the native can_gateway tap (source S2), which is the
+# configuration Mr. Orange runs in the car: gateway + logging on one C6.
+#
+# This is the *other* branch of the tap code — the standalone common.yaml has no
+# `can_ports:` and so compiles with USE_SD_LOGGER_CAN_TAP undefined. Keep both,
+# for the same reason can_gateway keeps common_bridge.yaml.
+#
+# Both gateway ports carry `log_tap: true`; without it sd_logger's V12 final
+# validation rejects the config rather than logging a silent nothing.
+can_gateway:
+  id: gw
+  log_tap_queue_depth: 1024
+  ports:
+    - id: seg1
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 500kbps
+      tx_queue_depth: 64
+      log_tap: true
+    - id: seg2
+      rx_pin: GPIO19
+      tx_pin: GPIO18
+      bit_rate: 500kbps
+      tx_queue_depth: 64
+      log_tap: true
+  routes:
+    - id: route_12
+      from: seg1
+      to: seg2
+    - id: route_21
+      from: seg2
+      to: seg1
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO10
+  cs_pin: GPIO11
+  clock: 10MHz
+  buffer_depth: 4096
+  sync_interval: 2s
+  max_file_size: 64MB
+  # The other half of recovery: this board has no card_power_pin, so V19 leaves
+  # power_cycle off and a retry is a plain remount. Bounded attempts and a
+  # non-default ladder, so both branches appear in a config CI compiles.
+  # in_band_reset off here for the same reason — it is the branch where the
+  # recovery path never touches the bus by hand, and nothing else compiles it.
+  recovery:
+    initial_delay: 500ms
+    max_delay: 10s
+    max_attempts: 20
+    in_band_reset: false
+  # Bare ids take sequential source tags (1, 2) and label themselves after the
+  # port id; the mapping form pins both explicitly. All three spellings are
+  # exercised here so codegen covers each.
+  can_ports:
+    - seg1
+    - port: seg2
+      source: 9
+      label: diag
+  sources:
+    - tag: 0
+      kind: user
+      label: act
+  esphome_logs:
+    level: DEBUG
+    buffer_depth: 64
+  statistics:
+    log_interval: 10s
+
+# The action source (S1) stays live alongside the taps: tag 0 keeps its meaning
+# and both producers write into the same file.
+interval:
+  - interval: 1s
+    then:
+      - sd_logger.log:
+          can_id: 0x7FF
+          data: !lambda "return {(uint8_t)(millis() & 0xFF)};"

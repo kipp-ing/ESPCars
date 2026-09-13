@@ -1,0 +1,126 @@
+# Per-task CPU attribution for the bench, from the same FreeRTOS run-time counters
+# `cpu_stats.yaml` uses for the total.
+#
+# `cpu_stats.yaml` answers "how loaded is this board?" (100 - idle share). This answers the next
+# question — "loaded by *what*?" — and it is the only one of the three measurement packages that
+# can see the work that does not happen in the ESPHome main loop:
+#
+#   sdlog_wr       sd_logger's writer task (sd_logger.cpp, prio 6)
+#   sdlog_vcc      the VCC monitor task (prio 17)
+#   lin_uart_evt   linbus's UART event task (LINCommunication.cpp)
+#   loopTask       everything ESPHome — every component loop(), the scheduler, the logger
+#   IDLE           the headroom
+#
+# Include it *alongside* cpu_stats, not instead of it:
+#
+#   packages:
+#     base:  !include hil_common.yaml
+#     cpu:   !include cpu_stats.yaml
+#     tasks: !include task_stats.yaml
+#
+# **ISR time is not a task and is not broken out here.** FreeRTOS bills an interrupt to whichever
+# task happened to be running when it fired, so can_gateway's forwarding — which lives in the TWAI
+# RX ISR, not in loop() — appears smeared across `loopTask` and `IDLE` in proportion to how often
+# each was current. A gateway under load therefore shows up as *reduced idle*, not as a busy task.
+# Read a rise in `IDLE`-adjacent totals with that in mind, and do not conclude "the gateway is
+# free" from a quiet loopTask.
+#
+# Cost of the measurement itself: one uxTaskGetSystemState() plus a print every 10 s. Unlike
+# runtime_stats.yaml this adds nothing to the per-frame or per-loop path, so it is safe to leave
+# in a config that is also being timed.
+#
+# Same sdkconfig caveat as cpu_stats.yaml, and it is worth repeating because the failure is
+# silent: a raw option that collides with a Kconfig *choice* set by esphome's own esp32 codegen is
+# dropped without a word, and the lambda then compiles fine and reports 0.0 % forever. Verify:
+#
+#   grep -E "RUN_TIME_STATS|TRACE_FACILITY" \
+#     tests/hil/.esphome/build/<name>/sdkconfig.<name>
+esp32:
+  framework:
+    sdkconfig_options:
+      CONFIG_FREERTOS_USE_TRACE_FACILITY: y
+      CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS: y
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          // 24 slots is generous: this firmware runs well under 20 tasks, and uxTaskGetSystemState
+          // silently returns 0 if the array is too small rather than truncating.
+          constexpr size_t MAXT = 24;
+          TaskStatus_t tasks[MAXT];
+          uint32_t total = 0;
+          UBaseType_t count = uxTaskGetSystemState(tasks, MAXT, &total);
+          if (count == 0) {
+            ESP_LOGW("task", "run-time stats unavailable — check sdkconfig "
+                             "CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS/USE_TRACE_FACILITY");
+            return;
+          }
+
+          // Previous window's counters, matched by task handle. A task that was created since the
+          // last pass has no entry and is charged its whole since-boot counter once — correct for
+          // a task that has just started, and it self-corrects on the next window.
+          static TaskHandle_t prev_handle[MAXT];
+          static uint32_t prev_rt[MAXT];
+          static UBaseType_t prev_count = 0;
+          static uint32_t prev_total = 0;
+          static bool primed = false;
+
+          uint32_t delta[MAXT];
+          for (UBaseType_t i = 0; i < count; i++) {
+            uint32_t before = 0;
+            for (UBaseType_t j = 0; j < prev_count; j++) {
+              if (prev_handle[j] == tasks[i].xHandle) {
+                before = prev_rt[j];
+                break;
+              }
+            }
+            // Unsigned subtraction is wrap-safe: the counter is esp_timer microseconds truncated
+            // to 32 bits and wraps every ~71 min, far longer than the 10 s window.
+            delta[i] = tasks[i].ulRunTimeCounter - before;
+          }
+          const uint32_t d_total = total - prev_total;
+
+          for (UBaseType_t i = 0; i < count; i++) {
+            prev_handle[i] = tasks[i].xHandle;
+            prev_rt[i] = tasks[i].ulRunTimeCounter;
+          }
+          prev_count = count;
+          prev_total = total;
+
+          if (!primed) {
+            // The first window would report since-boot averages, which are dominated by init
+            // (card mount, bus bring-up) and describe nothing that is still happening.
+            primed = true;
+            ESP_LOGD("task", "priming run-time counters, first report in 10 s");
+            return;
+          }
+          if (d_total == 0)
+            return;
+
+          // Insertion sort of an index array, descending by window time. count <= 24, so this is
+          // cheaper than pulling in <algorithm> and runs once per 10 s.
+          uint8_t order[MAXT];
+          for (UBaseType_t i = 0; i < count; i++)
+            order[i] = (uint8_t) i;
+          for (UBaseType_t i = 1; i < count; i++) {
+            const uint8_t key = order[i];
+            int j = (int) i - 1;
+            while (j >= 0 && delta[order[j]] < delta[key]) {
+              order[j + 1] = order[j];
+              j--;
+            }
+            order[j + 1] = key;
+          }
+
+          ESP_LOGI("task", "task CPU over the last window (%u tasks):", (unsigned) count);
+          for (UBaseType_t i = 0; i < count; i++) {
+            const uint8_t k = order[i];
+            const float pct = 100.0f * (float) delta[k] / (float) d_total;
+            if (pct < 0.05f)
+              continue;  // below the noise floor of a 10 s window; the tail is never the answer
+            // stack_hw is the minimum free stack ever seen, in bytes (ESP-IDF's unit; vanilla
+            // FreeRTOS reports words — do not compare this column across ports).
+            ESP_LOGI("task", "  %-14s %5.1f%%  prio %2u  stack_hw %5u B", tasks[k].pcTaskName, pct,
+                     (unsigned) tasks[k].uxCurrentPriority, (unsigned) tasks[k].usStackHighWaterMark);
+          }

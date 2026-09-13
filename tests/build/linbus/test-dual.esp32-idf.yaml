@@ -1,0 +1,27 @@
+substitutions:
+  # CAN_LIN_ESP32 ("Mr. Purple") pinout — docs/commissioning-mr-purple.md §1.
+  # GPIO12 is the MTDI strapping pin on this board; that is finding H1, a
+  # hardware hazard, not a config error, so it is exercised here on purpose.
+  lin0_tx_pin: GPIO12
+  lin0_rx_pin: GPIO13
+  lin0_cs_pin: GPIO27
+  lin1_tx_pin: GPIO33
+  lin1_rx_pin: GPIO32
+  lin1_cs_pin: GPIO21
+
+esphome:
+  name: linbus-esp32-dual
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+<<: !include common_dual.yaml

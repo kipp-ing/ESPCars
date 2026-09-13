@@ -1,0 +1,131 @@
+# Mr. Blue — CAN1 link probe. The control that rules Mr. Orange out (or in).
+#
+# Blue sits on the same CAN1 loop as Green, on the same pins Green uses
+# (GPIO2/GPIO3), with the same generator transmitting at ~91 %. So this config
+# answers the one question the Orange probes cannot:
+#
+#   Blue LINKED + rx ~91 %  -> the segment, the termination and Green's
+#                              generator are all fine, and a second C6 running
+#                              our driver receives and transmits on it happily.
+#                              Everything left is Mr. Orange.
+#   Blue ALONE / rx 0 %     -> the fault is NOT specific to Orange. Suspect the
+#                              segment, the termination, or the 500 kbps rate
+#                              itself before touching another board.
+#
+# Same verdict logic as `probe-orange-links.yaml`; read that file's header for
+# why transmission is the only probe that carries information and what
+# `self_test` / `listen_only` each isolate.
+#
+# Single port on purpose: only CAN1 is wired here, and a second port declared
+# onto a dead stub would spend the run in bus-off and clutter the log.
+#
+# This is a separate file rather than a package overlay on the Orange probe
+# because ESPHome package merging **appends** list entries instead of merging
+# them by id — overlaying a port produces a second port with a duplicate id
+# rather than overriding its pins. Same trap `mr-green-can2-probe.yaml`
+# documents.
+#
+#   .venv/bin/esphome run tests/hil/probe-blue-link.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py blue)"
+#
+#   # receive path alone, cannot be knocked into bus-off by a bad TX half:
+#   .venv/bin/esphome -s listen_only true run tests/hil/probe-blue-link.yaml ...
+substitutions:
+  node_name: mr-blue
+  id_r: "0%"
+  id_g: "20%"
+  id_b: "100%"
+  self_test: "false"
+  listen_only: "false"
+  # Green's load generator is at 500 kbps.
+  bit_rate: "500kbps"
+
+packages:
+  base: !include hil_common.yaml
+  # Rail first: an unpowered transceiver fakes every symptom below.
+  rail: !include rail_check.yaml
+  # RX half only — the beacon goes out from the probe interval below, since a
+  # cyclic_send cannot be declared on a port that might be listen-only.
+  topo_rx_can1: !include
+    file: topology_rx.yaml
+    vars:
+      port_id: can1
+      beacon_id: "0x0C2"
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+
+globals:
+  - id: linked
+    type: bool
+    initial_value: "false"
+
+can_gateway:
+  id: gw
+  ports:
+    - id: can1
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: ${bit_rate}
+      tx_queue_depth: 8
+      self_test: ${self_test}
+      listen_only: ${listen_only}
+      on_bus_off:
+        then:
+          - lambda: 'ESP_LOGW("probe", "can1 BUS-OFF - nothing ACKing on this wire");'
+      on_recovered:
+        then:
+          - lambda: 'ESP_LOGI("probe", "can1 recovered");'
+  statistics:
+    log_interval: 5s
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (${listen_only})
+            return;
+          // The probe frame IS Blue's topology beacon (slot 2, payload "TOPO"),
+          // sent by hand rather than as a cyclic_send because the schema rejects
+          // one on a port that might be listen-only. Its ACK decides the verdict
+          // below; its arrival names Blue in every other node's topology line.
+          // Byte 5 rolls because the receiving decode entity publishes on change
+          // — a fixed payload names Blue once and never again.
+          static uint8_t seq = 0;
+          uint8_t data[8] = {0x54, 0x4F, 0x50, 0x4F, 0x01, seq++, 0x00, 0x00};
+          id(can1)->inject(0x0C2, false, false, data, 8);
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          const auto &c = id(can1)->counters();
+          uint16_t tec = 0, rec = 0;
+          id(can1)->read_error_counters(tec, rec);
+          const uint32_t injected = c.injected.load(std::memory_order_relaxed);
+          const uint32_t tx_fail = c.tx_fail.load(std::memory_order_relaxed);
+          // Three states, not two. `tx_fail == 0` means frames are being
+          // ACKNOWLEDGED, which already proves a partner is on the wire -- even
+          // if the bus is then full of errors. Folding that into "ALONE" hides
+          // the single most important transition on this bench.
+          const bool acked = injected > 0 && tx_fail == 0;
+          const bool clean = acked && tec == 0 && rec == 0;
+          id(linked) = clean;
+          const char *verdict =
+              clean   ? "LINKED, clean"
+            : acked   ? "LINKED but ERRORED - frames are ACKed, so a partner is "
+                        "present; the bus itself is faulty (termination, bit rate, "
+                        "stub length)"
+                      : "ALONE - nothing ACKs this wire";
+          ESP_LOGI("probe",
+                   "can1 @ ${bit_rate}: injected=%" PRIu32 " tx_fail=%" PRIu32
+                   " bus_err=%" PRIu32 " err_events=%" PRIu32 " TEC=%u REC=%u -> %s",
+                   injected, tx_fail, c.bus_err.load(std::memory_order_relaxed),
+                   c.err_events.load(std::memory_order_relaxed), tec, rec, verdict);
+      # Hue is identity, brightness is state (CLAUDE.md): 35 % linked, 10 % not.
+      - light.turn_on:
+          id: status_led
+          red: ${id_r}
+          green: ${id_g}
+          blue: ${id_b}
+          brightness: !lambda "return id(linked) ? 0.35f : 0.10f;"

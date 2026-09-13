@@ -1,0 +1,173 @@
+# Mr. Orange — SD writer throughput ceiling, isolated from CAN.
+#
+# Answers the one question M2 stress run §5 (2026-07-26, git history) predicts will decide
+# the stress test: **can the F1 CSV text format sustain the design record rate?**
+# At the target load the tap produces ~3600 rec/s per loaded segment; the spec
+# (§6 F1) sized the writer for ~85 KB/s, and CSV at ~40 B/line is ~144 KB/s per
+# segment. If something gives, §5 expects it to be the format, not the ring.
+#
+# 2026-07-28 — now measuring **write format v1** (spec §6). The `sources:` block
+# below is not decoration: without it tag 1 is undeclared, records degrade to the
+# `U,<t>,1,…` fallback, and the line is several bytes narrower than anything
+# production will ever write. The point of this rig is the byte budget of F1g, so
+# it has to push through the same 4-character label a real tapped port uses.
+# Re-run at the same `records` sweep and compare against the M1-format ceiling of
+# 5300-5700 rec/s / 190-211 KB/s: v1's line is ~6 B wider and its formatter no
+# longer parses ~9 format strings per record, and only the bench says which wins.
+#
+# Deliberately no can_gateway: this isolates the writer. Records are pushed
+# straight into the logger's ring by the same `log_frame()` entry point the tap
+# drain uses, at a rate set by `records` per main-loop pass (~1000 passes/s on
+# this board), so the SD path sees the design load without needing a wired bus.
+#
+#   .venv/bin/esphome run tests/hil/stress-orange-sdrate.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# The rate ramps itself: `records` per pass to start, plus `ramp_step` every
+# `ramp_interval`, and it stops ramping the moment `dropped` moves. The last rate
+# with dropped == 0 is the writer's real ceiling. Read `records=`/`bytes=` from
+# the statistics line for the achieved rate — never the configured one.
+#
+# **No rotation here, and that is deliberate.** `max_file_size: 32MB` with no
+# `max_file_seconds:` and no `collection:` block is what the handover §2 ceiling
+# was measured against, and a rig whose bound moves cannot be compared with it.
+# Rotation and retention have their own soak — tests/hil/stress-orange-sdrotate.yaml
+# is this file minus the ramp plus 4 MB chunks — and the difference between the two
+# rigs' throughput is what rotation costs.
+#
+# **The ramp exists because re-flashing is the expensive part.** Sweeping by
+# re-flashing at `-s records N` costs one reset per point, and a reset while the
+# card is being written wedges it — which is exactly what happened on 2026-07-28
+# and cost the third point of that sweep. One flash, one console, the whole curve.
+# Set `-s ramp_step 0` for a fixed-rate soak.
+#
+# Since 2026-07-29 that wedge is no longer fatal to a session: the in-band reset
+# recovers it in ~3 s on the next boot (measured on this very rig — see
+# wedge run (2026-07-29, 12/12, git history)), so it costs a gap in the data rather than a
+# trip to J8. The ramp is still the right way to sweep; the reason is now "a
+# reset costs you a hole in the measurement", not "a reset costs you the card".
+#
+# linbus is here on purpose and must not be removed: it drives GPIO7 high in
+# setup() at BUS priority, which gates the top of the 12 V divider the
+# vcc_monitor reads. Without it the monitor sees 0 V and latches its one-way
+# trip within 10 ms, permanently disabling logging at boot.
+substitutions:
+  node_name: mr-orange
+  id_r: "100%"
+  id_g: "35%"
+  id_b: "0%"
+  # Records pushed per main-loop pass, to start. The loop runs ~858 passes/s on
+  # this board, so 4 is ~3400 rec/s (production load) and 8 is ~6200 rec/s.
+  records: "4"
+  # Added to the rate every ramp_interval, until dropped moves. 0 = fixed rate.
+  ramp_step: "4"
+  ramp_interval: "15s"
+
+packages:
+  base: !include hil_common.yaml
+  cpu: !include cpu_stats.yaml
+
+globals:
+  - id: pushed
+    type: uint32_t
+    initial_value: "0"
+  - id: rate
+    type: uint32_t
+    initial_value: "${records}"
+  - id: ramping
+    type: bool
+    initial_value: "true"
+
+linbus:
+  id: lin
+  tx_pin: GPIO19
+  rx_pin: GPIO18
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: listener
+  rx_ids:
+    - lin_id: 48
+      length: 4
+      checksum: enhanced
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN error: %s"
+            args: ["x.c_str()"]
+
+sd_logger:
+  id: sd_log
+  clk_pin: GPIO21              # J3.3, 100R (R7) + 2.2k pull-up (R6)
+  mosi_pin: GPIO22             # J3.4, 100R (R8) + 2.2k pull-up (R3)
+  miso_pin: GPIO20             # J4.6, 100R (R20) + 4.7k pull-up (R16), JP5 closed
+  cs_pin: GPIO15               # J4.5, 100R (R19) + 4.7k pull-up (R15)
+  # No card_power_pin. GPIO17 reaches header J5.6 (100R, R32) and stops there: the H5
+  # high-side switch on the card's supply was specified but never built, so driving that
+  # pin cycles nothing. Declaring it turns power_cycle on by default (V19) and makes every
+  # recovery line claim a power cycle that cannot happen — which is exactly what the seven
+  # ESP_ERR_TIMEOUT attempts of 2026-07-28 were. Recovery here is the in-band reset
+  # (components/sd_logger/card_reset.h), which needs no switch.
+  clock: 10MHz                 # 100R series + flying leads make 20MHz marginal
+  buffer_depth: 4096           # ~80 KB ring; only ~570 ms of stall at 7200 rec/s
+  sync_interval: 1s
+  max_file_size: 32MB
+  # Tag 1 is what the lambda below stamps. Declaring it as a 4-character label is
+  # what makes the measured line the production line (see the header note).
+  sources:
+    - tag: 1
+      kind: can
+      label: seg1
+  vcc_monitor:
+    adc_pin: 6
+    threshold: 10.5V
+    # The physical ratio. Was a per-chip 14.67 stopgap for the uncalibrated-ADC
+    # bug until 2026-07-28 — see the note in mr-orange-sdlog.yaml.
+    divider: 10.8673
+  statistics:
+    log_interval: 5s
+
+interval:
+  # The producer. log_frame() is the same entry point the can_gateway tap drain
+  # uses, so this exercises the real ring and writer path, just without a bus.
+  - interval: 1ms
+    then:
+      - lambda: |-
+          uint8_t data[8];
+          const uint32_t seq = id(pushed);
+          data[0] = (uint8_t) (seq >> 24);
+          data[1] = (uint8_t) (seq >> 16);
+          data[2] = (uint8_t) (seq >> 8);
+          data[3] = (uint8_t) seq;
+          data[4] = 0xA5;
+          data[5] = 0x5A;
+          data[6] = 0xC3;
+          data[7] = 0x3C;
+          for (uint32_t i = 0; i < id(rate); i++) {
+            id(sd_log)->log_frame(1, 0x200 + (i & 0x0F), 0, data, 8);
+            id(pushed)++;
+          }
+
+  # The ramp. Stops the moment the ring sheds, so the log ends on the answer
+  # rather than burying it under ever-worse numbers.
+  - interval: ${ramp_interval}
+    then:
+      - lambda: |-
+          if (${ramp_step} == 0 || !id(ramping))
+            return;
+          if (id(sd_log)->get_dropped_records() != 0) {
+            id(ramping) = false;
+            ESP_LOGW("sdrate", "CEILING: dropped moved at %" PRIu32 " records/pass; "
+                     "the last clean rate is the one below this line", id(rate));
+            return;
+          }
+          id(rate) += ${ramp_step};
+          ESP_LOGI("sdrate", "rate -> %" PRIu32 " records/pass", id(rate));
+
+  - interval: 5s
+    then:
+      - lambda: |-
+          ESP_LOGI("sdrate", "pushed=%" PRIu32 " (writer's own records=/dropped= line is "
+                   "the verdict; a gap between them is the ring shedding)", id(pushed));
+          id(healthy) = id(sd_log)->is_mounted() && id(sd_log)->get_dropped_records() == 0;
+      - script.execute: led_health

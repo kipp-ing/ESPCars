@@ -1,0 +1,65 @@
+# Switch the IDF optimiser from esphome's default SIZE (-Os) to PERF (-O2).
+#
+# One line, but it is the largest CPU lever measured on this bench, so it lives in its own package
+# rather than being pasted into each rig config:
+#
+#   packages:
+#     dut:  !include mr-orange.yaml
+#     perf: !include opt_perf.yaml
+#
+# MEASURED on Mr. Orange, production shape, 94.6 % load on both segments
+# (tests/hil/profile-orange-perf.yaml holds the full table):
+#
+#   CPU        49.5 % -> 38.9 %   (-10.6 points, -21 %)
+#   sdlog_wr   41.0 % -> 30.7 %   (-10.3 points, -25 %)
+#   flash     +61 462 B (+15.3 %),  RAM +6 776 B (+6.3 %)
+#
+# Nearly the whole win is in the SD writer — FATFS and the SPI driver, IDF code, not ours. -Os
+# does not unroll, and that path is byte loops; the same shape shows on the host bench, where -Os
+# costs 9.7x on the hex emitter and 3.6x on format_record while costing nothing at all on the
+# fixed-shape code (the rings, match_rule, the slot pool).
+#
+# **It changes ISR timing everywhere**, which is exactly what the forwarding slot tracker and the
+# seqlock rings are written against, so it had to be re-gated rather than assumed.
+#
+# GATE: PASSED, 2026-07-28. All three ring boards flashed from tests/hil/ring-perf-*.yaml
+# (script/hil/flash-perf.sh), then `verify.py --seconds 45 --min-laps 75`:
+#
+#   BENCH: ALL GREEN, exit 0 — 875 laps, ~19.4 laps/s, no TOKEN LOST, no bus-off, nothing degraded
+#
+# Identical to the -Os control run taken minutes earlier on the same cabling: 875 laps, 19.4/s.
+# So PERF costs the ring nothing and the documented baseline is unchanged.
+#
+# The gate is a 45 s ring run at 125 kbps, so it proves the timing contracts hold but is not a
+# soak. The soak followed (tests/hil/soak-perf-*.yaml, 2026-07-28, 11 min 57 s, PERF, both
+# segments loaded at 500 kbit/s, both routes forwarding, LIN listening, writer at rate):
+#
+#   2 897 605 records / 121.3 MB     4044 rec/s, 169 KB/s
+#   dropped 0, text_dropped 0, card_dropped 0, tap_dropped 15 (frozen, see below)
+#   both segments   88.8 % / 88.9 %  bus_err 0, err_events 0, tx_fail 0, TEC 0, REC 0
+#   CPU mean 36.8 % (max 38.2 %)     sdlog_wr mean 28.5 % (max 29.6 %), 72 windows
+#   29 rotations, zero bus-off, zero LIN errors, nothing degraded
+#
+# `tap_dropped 15` was already 15 in the first stats line one second into the capture and never
+# moved: it happened in the card-mount window at boot, before the console attached. It is not a
+# steady-state shed.
+#
+# Two honest gaps in this round, neither of them a PERF result:
+#
+#   * 88.9 % is marginally under the >= 90 % criterion. With two generators the burst knob is
+#     coarse (1 ≈ 25 %, 2 ≈ 50 % per node) and 2+2 is the practical maximum — 3+2 puts demand
+#     past 100 % and the gateway sheds, which is a misconfiguration, not a finding.
+#   * The CPU figures are NOT comparable with the 49.5 %/41.0 % -Os numbers, which were taken at
+#     94.6 % load. Compare them against the PERF profiling run at the same 94.6 % (38.9 %/30.7 %).
+#     The -Os soak at 88.9 % was never run, so this round is a PERF soak, not an A/B.
+#
+# It also surfaced something unrelated to PERF and worth knowing: **the chunk index was already
+# full at the first rotation**, so all 29 chunks are untracked and retention cannot reclaim them
+# (`chunk index full (64 entries)`). SD_LOG_MAX_CHUNKS is a documented, deliberate cap, but at
+# 4 MB / 60 s bounds and this record rate a chunk lands every ~25 s, so 64 is ~27 minutes of
+# cumulative logging — this card passed that in earlier sessions. In the car that means the card
+# fills without retention freeing anything. Raise the define or widen the rotation bounds.
+esp32:
+  framework:
+    advanced:
+      compiler_optimization: PERF
