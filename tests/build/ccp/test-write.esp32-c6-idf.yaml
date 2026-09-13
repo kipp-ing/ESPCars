@@ -1,0 +1,14 @@
+# ESP32-C6 CCP write-enabled config wrapper.
+esphome:
+  name: ccp-write-c6
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+logger:
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+packages:
+  ccp: !include common_write.yaml
