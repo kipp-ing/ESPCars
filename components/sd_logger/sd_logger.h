@@ -11,6 +11,7 @@
 #include "log_format.h"
 #include "log_record.h"
 #include "recovery_policy.h"
+#include "utc_anchor.h"
 
 #ifdef USE_SD_LOGGER_CAN_TAP
 #include "esphome/components/can_gateway/can_gateway.h"
@@ -25,6 +26,11 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+
+#include "esp_timer.h"
+
+// `spi_device_handle_t`, for the raw-SPI helpers the reset and readiness paths share.
+#include "driver/spi_master.h"
 
 extern "C" {
 #include "esp_adc/adc_cali.h"
@@ -198,6 +204,12 @@ class SdLogger : public Component {
   void set_recovery_reset(bool enabled, uint32_t busy_timeout_ms, uint32_t max_busy_timeout_ms) {
     recovery_.configure_reset(enabled, busy_timeout_ms, max_busy_timeout_ms);
   }
+  void set_origin(const std::string &origin) { origin_ = origin; }
+
+  // Called by a time component's on-time-sync callback. It only publishes the
+  // correspondence here; the writer task owns block_ and emits the #utc line on
+  // its next notified pass, so this callback never races the card write path.
+  void set_utc_anchor(uint64_t utc_us, uint64_t boot_us_at_sync);
 
   // Producer entry point. Non-blocking and safe to call from any task context
   // (guarded by a short critical section); returns false and counts a drop when
@@ -243,6 +255,7 @@ class SdLogger : public Component {
 
   // Getters (stats / template sensors)
   bool is_mounted() const { return mounted_; }
+  bool identification_degraded() const { return degraded_identification_; }
   uint32_t get_records_written() const { return records_written_; }
   uint32_t get_dropped_records() const { return dropped_records_; }
   uint32_t get_bytes_written() const { return bytes_written_; }
@@ -253,6 +266,15 @@ class SdLogger : public Component {
   // producer was too fast, there was simply nowhere to put the thing. One counter for both units
   // on purpose — the question it answers is "how much did the outage cost", not "of what".
   uint32_t get_card_dropped_records() const { return card_dropped_; }
+  /// Frame records formatted into the writer block but discarded when the file failed before their
+  /// complete lines reached write(). Kept separate from card_dropped_: these had entered logging.
+  uint32_t get_write_lost_records() const { return write_lost_.load(std::memory_order_relaxed); }
+  /// Tap entries intentionally left behind at emergency close; one counter per port is retained
+  /// internally so their `#drop` markers remain attributable, this is the status total.
+  uint32_t get_tap_shutdown_lost_records() const;
+  uint32_t get_tap_accepted_records() const;
+  uint32_t get_tap_drained_records() const;
+  uint32_t get_tap_record_ring_accepted_records() const;
   uint32_t get_recovery_attempts() const { return recovery_.attempts(); }
   // Retention's lifetime losses (design §7): chunks that were never collected and are now gone, and
   // what they held. Mirrored out of CollectionPolicy by the writer task rather than read from it,
@@ -362,6 +384,12 @@ class SdLogger : public Component {
   // bus. Returns what the card said; the mount is attempted regardless, because the reset's own
   // reading of "mute" is a diagnosis and not a verdict.
   CardResetResult run_card_reset_(uint32_t busy_timeout_ms);
+  // Ask the card to prove it works when identification has timed out: OCR bit 31 plus a real block
+  // read. True only on evidence, and only then may the caller mask the latched idle bit.
+  bool run_card_probe_ready_(CardReadyResult *out);
+  // Raw 400 kHz SPI on the logger's own pins with CS as a plain GPIO, shared by both of the above.
+  bool open_raw_spi_(spi_device_handle_t *dev, bool *owns_bus);
+  void close_raw_spi_(spi_device_handle_t dev, bool owns_bus);
   bool open_next_file_();
   void rotate_file_();
   // Both rotation bounds, tested against the writer pass's single clock read. Rotation is decided
@@ -418,6 +446,7 @@ class SdLogger : public Component {
   void sync_file_();
   // Header block: #sdlog, one #src per declared source, #types, #flags, #pad.
   void write_file_header_();
+  void write_utc_marker_();
   // `#drop` markers, emitted only when a counter actually moves (spec D4/F1d).
   void write_drop_markers_(uint64_t now64);
 
@@ -474,6 +503,7 @@ class SdLogger : public Component {
   // File / write policy
   int fd_{-1};
   BlockBuffer block_;
+  UnflushedRecordTracker unflushed_records_;
   char *block_storage_{nullptr};
   uint32_t seq_{0};
   uint32_t max_file_size_{16u * 1024 * 1024};
@@ -490,6 +520,16 @@ class SdLogger : public Component {
   // into every file so a card explains itself without the YAML (spec §6 F1d).
   SourceTable sources_;
 
+  // Configured identity, paid once in each header rather than on every record.
+  std::string origin_;
+
+  // A sync callback runs outside the writer task. This tiny critical section
+  // publishes its two 64-bit values as one pair; record formatting never takes it.
+  portMUX_TYPE utc_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  UtcAnchor utc_anchor_;
+  uint32_t utc_generation_{0};
+  uint32_t utc_emitted_generation_{0};
+
   // The stamp column's delta chain (spec §6 F1h). Writer-task only, like `block_`, and reset by
   // write_file_header_() so every sealed chunk decodes without the chunks before it.
   DeltaClock stamps_;
@@ -500,6 +540,7 @@ class SdLogger : public Component {
   std::atomic<uint32_t> dropped_records_{0};
   std::atomic<uint32_t> text_dropped_{0};
   std::atomic<uint32_t> card_dropped_{0};
+  std::atomic<uint32_t> write_lost_{0};
   // Chunks the index would not take: the boot scan past capacity, and every rotation once the index
   // is full. Written by the writer task (and setup's scan), read from loop() — atomic for the same
   // reason the drop counters are, not because it is hot. It moves once per rotation at worst.
@@ -509,6 +550,8 @@ class SdLogger : public Component {
   uint32_t marked_dropped_{0};
   uint32_t marked_text_dropped_{0};
   uint32_t marked_card_dropped_{0};
+  uint32_t marked_write_lost_{0};
+  uint32_t marked_tap_shutdown_lost_{0};
 
   // VCC monitor / emergency
   int8_t vcc_adc_gpio_{-1};
@@ -620,6 +663,10 @@ class SdLogger : public Component {
   int64_t last_pass_us_{0};
   volatile bool mounted_{false};
   bool spi_bus_ok_{false};
+  // True while the current mount only exists because the card's latched "in idle state" bit is
+  // being masked. Worth surfacing rather than hiding: the card is working but has not completed a
+  // real initialisation since it last had power, so the next power cycle is still owed to it.
+  bool degraded_identification_{false};
 
   // Stats logging
   uint32_t stats_log_interval_ms_{60000};
@@ -633,6 +680,12 @@ class SdLogger : public Component {
     // Last value written into this tap's `#drop` marker. Per tap, not summed:
     // one segment falling behind is a different diagnosis from both doing so.
     uint32_t marked_dropped{0};
+    uint32_t marked_shutdown_lost{0};
+    // The gateway owns per-ring accepted atomics. These are per-port aggregates maintained by the
+    // sole drain task: accepted -> drained -> record-ring accepted localises the first divergence.
+    std::atomic<uint32_t> drained{0};
+    std::atomic<uint32_t> record_ring_accepted{0};
+    std::atomic<uint32_t> shutdown_lost{0};
   };
   CanTap can_taps_[SD_LOGGER_CAN_TAP_MAX]{};
   uint8_t can_tap_count_{0};

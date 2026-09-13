@@ -15,6 +15,8 @@ void CcpHub::loop() {
              this->in_flight_command_);
     this->finish_(false, CCP_TIMEOUT, nullptr, 0);
   }
+  if (this->daq_collecting_ && static_cast<int32_t>(millis() - this->daq_collect_deadline_) >= 0)
+    this->complete_daq_read_("collect_timeout");
 }
 
 void CcpHub::dump_config() {
@@ -91,6 +93,7 @@ void CcpHub::on_frame(const can_gateway::FrameView &frame) {
   const Dto dto = decode_dto(frame.data, frame.dlc);
   if (dto.kind == DtoKind::DAQ) {
     this->daq_callback_.call(dto.pid, std::vector<uint8_t>(dto.data, dto.data + dto.data_len));
+    this->handle_daq_frame_(frame.data, frame.dlc);
     return;
   }
   if (dto.kind != DtoKind::RESPONSE || !this->in_flight_ || !matches_response(dto, this->in_flight_ctr_))
@@ -140,44 +143,19 @@ bool CcpHub::short_up(uint8_t size, uint8_t ext, uint32_t address) {
 bool CcpHub::select_cal_page() { return this->send_(command(SELECT_CAL_PAGE, 0)); }
 bool CcpHub::get_active_cal_page() { return this->send_(command(GET_ACTIVE_CAL_PAGE, 0)); }
 bool CcpHub::get_daq_size(uint8_t list, uint32_t dto_id) {
-  Cro c = command(GET_DAQ_SIZE, 0);
-  c.data[2] = list;
-  put_u32(c.data + 4, dto_id, this->byte_order_);
-  return this->send_(c);
+  return this->send_(ccp::get_daq_size(0, list, dto_id, this->byte_order_));
 }
 bool CcpHub::set_daq_ptr(uint8_t list, uint8_t odt, uint8_t element) {
-  Cro c = command(SET_DAQ_PTR, 0);
-  c.data[2] = list;
-  c.data[3] = odt;
-  c.data[4] = element;
-  return this->send_(c);
+  return this->send_(ccp::set_daq_ptr(0, list, odt, element));
 }
 bool CcpHub::write_daq(uint8_t size, uint8_t ext, uint32_t address) {
-  Cro c = command(WRITE_DAQ, 0);
-  c.data[2] = size;
-  c.data[3] = ext;
-  put_u32(c.data + 4, address, this->byte_order_);
-  return this->send_(c);
+  return this->send_(ccp::write_daq(0, size, ext, address, this->byte_order_));
 }
 bool CcpHub::start_stop(uint8_t mode, uint8_t list, uint8_t last_odt, uint8_t event, uint16_t rate) {
-  Cro c = command(START_STOP, 0);
-  c.data[2] = mode;
-  c.data[3] = list;
-  c.data[4] = last_odt;
-  c.data[5] = event;
-  put_u16(c.data + 6, rate, ByteOrder::BIG);
-  return this->send_(c);
+  return this->send_(ccp::start_stop(0, mode, list, last_odt, event, rate, this->byte_order_));
 }
-bool CcpHub::start_stop_all(uint8_t mode) {
-  Cro c = command(START_STOP_ALL, 0);
-  c.data[2] = mode;
-  return this->send_(c);
-}
-bool CcpHub::set_s_status(uint8_t status) {
-  Cro c = command(SET_S_STATUS, 0);
-  c.data[2] = status;
-  return this->send_(c);
-}
+bool CcpHub::start_stop_all(uint8_t mode) { return this->send_(ccp::start_stop_all(0, mode)); }
+bool CcpHub::set_s_status(uint8_t status) { return this->send_(ccp::set_s_status(0, status)); }
 bool CcpHub::get_s_status() { return this->send_(command(GET_S_STATUS, 0)); }
 bool CcpHub::build_checksum(uint32_t size) { return this->send_(sized_u32(BUILD_CHKSUM, 0, size, this->byte_order_)); }
 bool CcpHub::move(uint32_t size) { return this->send_(sized_u32(MOVE, 0, size, this->byte_order_)); }
@@ -305,6 +283,196 @@ void CcpHub::continue_write_(bool success) {
   this->write_offset_ += n;
   this->send_(c, [this](bool ok, uint8_t, const uint8_t *, uint8_t) { this->continue_write_(ok); });
 }
+
+bool CcpHub::daq_read(const DaqReadRequest &req, std::function<void(const DaqReadResult &)> callback) {
+  if (req.fields.empty()) {
+    ESP_LOGW(TAG, "CCP DAQ read refused: no fields configured");
+    return false;
+  }
+  for (const auto &field : req.fields) {
+    if (field.size == 0) {
+      ESP_LOGW(TAG, "CCP DAQ read refused: field size must be greater than zero");
+      return false;
+    }
+  }
+  if (req.require_anchor && !this->has_daq_anchor_()) {
+    ESP_LOGW(TAG, "CCP DAQ read refused: require_anchor is true but no daq_anchor is configured");
+    return false;
+  }
+  if (!this->write_allowed_(WRITE_DAQ))
+    return false;
+  if (this->in_flight_ || this->daq_read_active_) {
+    ESP_LOGW(TAG, "CCP DAQ read refused: a CCP read is already in flight");
+    return false;
+  }
+
+  std::vector<DaqField> layout;
+  uint8_t requested_offset = 0;
+  if (req.require_anchor && this->has_daq_anchor_()) {
+    layout.push_back(this->daq_anchor_);
+    requested_offset = 1;
+  }
+  layout.insert(layout.end(), req.fields.begin(), req.fields.end());
+  const uint16_t total = daq_total_size(layout.data(), layout.size());
+  if (total > CCP_ODT_PAYLOAD) {
+    ESP_LOGW(TAG, "CCP DAQ read refused: layout uses %u bytes but one ODT carries %u", total, CCP_ODT_PAYLOAD);
+    return false;
+  }
+
+  this->daq_read_active_ = true;
+  this->daq_collecting_ = false;
+  this->daq_anchor_required_ = req.require_anchor && this->has_daq_anchor_();
+  this->daq_requested_offset_ = requested_offset;
+  this->daq_target_samples_ = req.samples;
+  this->daq_read_req_ = req;
+  this->daq_layout_ = std::move(layout);
+  this->daq_values_valid_.assign(req.fields.size(), 0);
+  this->daq_read_result_ = DaqReadResult{};
+  this->daq_read_result_.values.resize(req.fields.size());
+  this->daq_read_done_ = std::move(callback);
+
+  if (!this->send_(ccp::get_daq_size(0, req.list, req.dto_id, this->byte_order_),
+                   [this](bool ok, uint8_t, const uint8_t *, uint8_t) {
+                     if (!ok) {
+                       this->complete_daq_read_("GET_DAQ_SIZE");
+                       return;
+                     }
+                     this->send_daq_step_(ccp::set_daq_ptr(0, this->daq_read_req_.list, 0, 0), "SET_DAQ_PTR",
+                                          [this](bool ptr_ok, uint8_t, const uint8_t *, uint8_t) {
+                                            if (!ptr_ok) {
+                                              this->complete_daq_read_("SET_DAQ_PTR");
+                                              return;
+                                            }
+                                            this->continue_daq_write_(0);
+                                          });
+                   })) {
+    this->daq_read_active_ = false;
+    this->daq_read_done_ = {};
+    this->daq_read_req_ = DaqReadRequest{};
+    this->daq_layout_.clear();
+    this->daq_values_valid_.clear();
+    return false;
+  }
+  return true;
+}
+
+bool CcpHub::send_daq_step_(Cro cro, const char *step, CommandCallback callback) {
+  if (this->send_(cro, std::move(callback)))
+    return true;
+  this->complete_daq_read_(step);
+  return false;
+}
+
+void CcpHub::continue_daq_write_(size_t index) {
+  if (index >= this->daq_layout_.size()) {
+    this->send_daq_step_(
+        ccp::set_s_status(0, 0x82), "SET_S_STATUS", [this](bool ok, uint8_t, const uint8_t *, uint8_t) {
+          if (!ok) {
+            this->complete_daq_read_("SET_S_STATUS");
+            return;
+          }
+          this->send_daq_step_(ccp::start_stop(0, 1, this->daq_read_req_.list, 0, this->daq_read_req_.event,
+                                               this->daq_read_req_.prescaler, this->byte_order_),
+                               "START_STOP", [this](bool start_ok, uint8_t, const uint8_t *, uint8_t) {
+                                 if (!start_ok) {
+                                   this->complete_daq_read_("START_STOP");
+                                   return;
+                                 }
+                                 this->begin_daq_collect_();
+                               });
+        });
+    return;
+  }
+  const DaqField &field = this->daq_layout_[index];
+  this->send_daq_step_(ccp::write_daq(0, field.size, field.ext, field.address, this->byte_order_), "WRITE_DAQ",
+                       [this, index](bool ok, uint8_t, const uint8_t *, uint8_t) {
+                         if (!ok) {
+                           this->complete_daq_read_("WRITE_DAQ");
+                           return;
+                         }
+                         this->continue_daq_write_(index + 1);
+                       });
+}
+
+void CcpHub::begin_daq_collect_() {
+  this->daq_collecting_ = true;
+  this->daq_collect_deadline_ = millis() + this->daq_read_req_.collect_timeout;
+}
+
+void CcpHub::handle_daq_frame_(const uint8_t *frame, uint8_t len) {
+  if (!this->daq_collecting_ || frame == nullptr || len == 0 || frame[0] != 0)
+    return;
+  this->daq_read_result_.frames_seen++;
+  bool valid = true;
+  if (this->daq_anchor_required_) {
+    valid = daq_anchor_matches(frame, len, daq_field_offset(this->daq_layout_.data(), this->daq_layout_.size(), 0),
+                               this->daq_anchor_expect_.data(), this->daq_anchor_expect_.size());
+    if (valid)
+      this->daq_read_result_.anchor_ok++;
+  }
+  if (valid) {
+    std::vector<std::vector<uint8_t>> values(this->daq_read_req_.fields.size());
+    for (size_t i = 0; i < this->daq_read_req_.fields.size(); i++) {
+      const size_t layout_index = this->daq_requested_offset_ + i;
+      const DaqField &field = this->daq_layout_[layout_index];
+      const uint8_t offset = daq_field_offset(this->daq_layout_.data(), this->daq_layout_.size(), layout_index);
+      if (offset + field.size > len) {
+        valid = false;
+        break;
+      }
+      values[i].assign(frame + offset, frame + offset + field.size);
+    }
+    if (valid) {
+      this->daq_read_result_.values = std::move(values);
+      std::fill(this->daq_values_valid_.begin(), this->daq_values_valid_.end(), 1);
+    }
+  }
+  if (this->daq_read_result_.frames_seen >= this->daq_target_samples_)
+    this->complete_daq_read_(nullptr);
+}
+
+void CcpHub::complete_daq_read_(const char *failed_step) {
+  if (!this->daq_read_active_)
+    return;
+  this->daq_collecting_ = false;
+  const bool values_ok = std::all_of(this->daq_values_valid_.begin(), this->daq_values_valid_.end(),
+                                     [](uint8_t valid) { return valid != 0; });
+  if (failed_step == nullptr && this->daq_anchor_required_ && this->daq_read_result_.anchor_ok == 0)
+    failed_step = "anchor";
+  if (failed_step == nullptr && !values_ok)
+    failed_step = "sample";
+  if (this->daq_read_result_.failed_step == nullptr)
+    this->daq_read_result_.failed_step = failed_step;
+  this->daq_read_result_.ok = this->daq_read_result_.failed_step == nullptr;
+  this->teardown_daq_read_();
+}
+
+void CcpHub::teardown_daq_read_() {
+  const auto status = [this]() {
+    if (!this->send_(ccp::set_s_status(0, 0),
+                     [this](bool, uint8_t, const uint8_t *, uint8_t) { this->fire_daq_read_(); }))
+      this->fire_daq_read_();
+  };
+  if (!this->send_(ccp::start_stop_all(0, 0), [status](bool, uint8_t, const uint8_t *, uint8_t) { status(); }))
+    status();
+}
+
+void CcpHub::fire_daq_read_() {
+  if (!this->daq_read_active_)
+    return;
+  DaqReadResult result = std::move(this->daq_read_result_);
+  auto callback = std::move(this->daq_read_done_);
+  this->daq_read_done_ = {};
+  this->daq_read_active_ = false;
+  this->daq_collecting_ = false;
+  this->daq_read_req_ = DaqReadRequest{};
+  this->daq_layout_.clear();
+  this->daq_values_valid_.clear();
+  if (callback)
+    callback(result);
+  this->daq_read_callback_.call(result.ok, result.anchor_ok, result.frames_seen, result.values);
+}
+
 void CcpHub::fail_sequence_() {
   if (this->read_remaining_ != 0) {
     this->read_remaining_ = 0;

@@ -80,8 +80,15 @@ static const uint32_t TAP_DRAIN_POLL_MS = 5;
 // heap's min-since-boot at 1668 B under load, and a task stack taken from the heap at setup would
 // move that floor down by its whole size.
 static const uint32_t TAP_DRAIN_STACK_BYTES = 3072;
-static StaticTask_t tap_drain_tcb;                                                // NOLINT
-static StackType_t tap_drain_stack[TAP_DRAIN_STACK_BYTES / sizeof(StackType_t)];  // NOLINT
+// xTaskCreateStatic() measures its depth in StackType_t entries, not bytes.  Keep the allocation
+// and the advertised depth derived from the same value: passing the byte count as the depth tells
+// FreeRTOS that this 3 KiB array is 12 KiB on the C6, so a busy drain task can overwrite adjacent
+// static state without tripping the stack limit.
+static const uint32_t TAP_DRAIN_STACK_WORDS = TAP_DRAIN_STACK_BYTES / sizeof(StackType_t);
+static_assert(TAP_DRAIN_STACK_WORDS * sizeof(StackType_t) == TAP_DRAIN_STACK_BYTES,
+              "tap-drain stack byte budget must contain whole StackType_t entries");
+static StaticTask_t tap_drain_tcb;                          // NOLINT
+static StackType_t tap_drain_stack[TAP_DRAIN_STACK_WORDS];  // NOLINT
 #endif
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
 // `confirm <seq>` intents waiting for the writer to do the rename (design §8). Four is generous:
@@ -196,7 +203,7 @@ void SdLogger::setup() {
   // — that coupling is what §4.3 measured as 4765 tap records lost in 6 stall-shaped bursts. Still
   // far below LIN (18), whose wire timing always wins. Static stack: see TAP_DRAIN_STACK_BYTES.
   if (this->can_tap_count_ > 0) {
-    this->tap_drain_task_ = xTaskCreateStatic(&SdLogger::tap_drain_trampoline, "sdlog_tap", TAP_DRAIN_STACK_BYTES, this,
+    this->tap_drain_task_ = xTaskCreateStatic(&SdLogger::tap_drain_trampoline, "sdlog_tap", TAP_DRAIN_STACK_WORDS, this,
                                               7, tap_drain_stack, &tap_drain_tcb);
   }
 #endif
@@ -306,6 +313,50 @@ float SdLogger::vcc_rail_volts_(int raw) const {
   return v_adc * this->vcc_divider_;
 }
 
+namespace {
+
+/// True while a card has PROVED it works but its ACMD41 handshake is latched. See
+/// `sd_forced_do_transaction()`. File-scope because `sdmmc_host_t.do_transaction` is a plain
+/// function pointer with no user context; one flag is enough because a board has one SPI card.
+std::atomic<bool> g_idle_bit_override{false};
+
+/// ACMD41 and CMD13. Spelled out rather than pulled from ESP-IDF's `sd_protocol_defs.h`, which is
+/// a private header of the sdmmc component.
+constexpr int SD_SPI_OPCODE_APP_OP_COND = 41;
+constexpr int SD_SPI_OPCODE_SEND_STATUS = 13;
+
+/// Suppress the one stale bit that stops ESP-IDF using a working card, and nothing else.
+///
+/// A card interrupted by a soft reset can latch R1's "in idle state" bit forever while remaining
+/// fully functional: on Mr. Orange it reported `OCR=0xC0FF8000` — its own power-up-complete flag
+/// SET — served CMD17 block reads with a valid 0x55AA signature, handed over CSD and CID, and
+/// accepted CMD24 writes, all through 5455 ACMD41 polls over 60 s that never cleared the bit. HCS
+/// set and clear, the full voltage window, a 1 s settle, twenty CMD0s and CMD1 all made no
+/// difference. Only removing the card's power did.
+///
+/// ESP-IDF treats that bit as fatal in exactly two places, and both had to be found by
+/// instrumenting the bus:
+///   * `sdmmc_send_cmd_send_op_cond()` polls ACMD41 300 times for it to clear, then gives up with
+///     ESP_ERR_TIMEOUT — the mount that never happens;
+///   * `sdmmc_write_sectors_dma()` sends CMD13 after every write and demands `status == 0`, and in
+///     SPI mode `SD_SPI_R2()` puts R1 in that status's LOW byte — so the bit alone fails every
+///     write with ESP_ERR_INVALID_RESPONSE. Miss this one and the card mounts read-only.
+/// Everywhere else the bit is explicitly a no-op; `r1_response_to_err()` says so in a comment.
+///
+/// Only bit 0 is cleared. R1's other seven bits and R2's whole high byte — locked, CC error, ECC
+/// failed, WP violation, erase param, out of range — pass through untouched, so a card that is
+/// genuinely failing still fails. And the override is armed only after `card_probe_ready()` has
+/// watched the card return real data, never on the strength of an assumption.
+esp_err_t sd_forced_do_transaction(int slot, sdmmc_command_t *cmdinfo) {
+  const esp_err_t err = sdspi_host_do_transaction(slot, cmdinfo);
+  if (err == ESP_OK && cmdinfo != nullptr && g_idle_bit_override.load(std::memory_order_acquire) &&
+      (cmdinfo->opcode == SD_SPI_OPCODE_APP_OP_COND || cmdinfo->opcode == SD_SPI_OPCODE_SEND_STATUS))
+    cmdinfo->response[0] &= ~1u;
+  return err;
+}
+
+}  // namespace
+
 void SdLogger::unmount_card_() {
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
   // The collection server made this teardown someone else's business. `esp_vfs_fat_sdcard_unmount()`
@@ -362,6 +413,11 @@ void SdLogger::unmount_card_() {
     spi_bus_free(static_cast<spi_host_device_t>(SDSPI_DEFAULT_HOST));
     this->spi_bus_ok_ = false;
   }
+  // The override belongs to a mounted card, not to the board. The next mount re-earns it by
+  // running the readiness probe again — which is what makes a genuine power cycle silently return
+  // the logger to the ordinary path.
+  g_idle_bit_override.store(false, std::memory_order_release);
+  this->degraded_identification_ = false;
 }
 
 bool SdLogger::mount_card_(bool allow_format) {
@@ -409,6 +465,43 @@ bool SdLogger::mount_card_(bool allow_format) {
   mount_cfg.allocation_unit_size = 16 * 1024;
 
   err = esp_vfs_fat_sdspi_mount(this->mount_point_.c_str(), &host, &dev_cfg, &mount_cfg, &this->card_);
+
+  // ESP_ERR_TIMEOUT here means one specific thing: identification never completed, i.e.
+  // `sdmmc_init_ocr`'s 300 ACMD41 polls all came back with R1's idle bit still set. That is the
+  // signature of a card whose handshake latched across a soft reset while the card itself kept
+  // working — see `sd_forced_do_transaction()`. It is also what an absent or dead card looks like,
+  // so the difference is settled by asking the card to DO something, not to say something.
+  //
+  // A failed mount has already run `call_host_deinit()` (vfs_fat_sdmmc.c's cleanup path), so the
+  // SDSPI device and its CS are released and the raw probe can take the bus without a fight.
+  if (err == ESP_ERR_TIMEOUT && !this->dying_.load(std::memory_order_acquire)) {
+    CardReadyResult ready;
+    const bool usable = this->run_card_probe_ready_(&ready);
+    ESP_LOGW(TAG,
+             "identification timed out; asked the card to prove itself: idle=%d cmd8=%d "
+             "ocr=0x%08" PRIX32 " power_up=%d ccs=%d block_read=%d sig=%d",
+             ready.idle, ready.cmd8_echoed, ready.ocr, ready.powered_up, ready.high_capacity, ready.block_read,
+             ready.signature);
+    if (usable) {
+      ESP_LOGW(TAG, "card works but its ACMD41 handshake is latched — mounting with the idle bit masked");
+      host.do_transaction = &sd_forced_do_transaction;
+      // Armed for the whole mount, not just for init: the CMD13 gate runs on every write, so
+      // disarming after the mount would hand back a card that reads and cannot write.
+      // `unmount_card_()` disarms it.
+      g_idle_bit_override.store(true, std::memory_order_release);
+      err = esp_vfs_fat_sdspi_mount(this->mount_point_.c_str(), &host, &dev_cfg, &mount_cfg, &this->card_);
+      if (err == ESP_OK) {
+        this->degraded_identification_ = true;
+        ESP_LOGW(TAG, "mounted a latched card without a power cycle — evidence is being written again");
+      } else {
+        g_idle_bit_override.store(false, std::memory_order_release);
+        ESP_LOGE(TAG, "idle-bit override did not help: %s", esp_err_to_name(err));
+      }
+    } else {
+      ESP_LOGE(TAG, "the card did not prove itself usable — leaving the driver's verdict alone");
+    }
+  }
+
   if (err != ESP_OK) {
     // Which layer failed decides whether retrying can possibly help, and the two are one esp_err
     // apart. The fatfs FRESULT that would say more is logged by IDF at W level, which esphome
@@ -644,6 +737,22 @@ void SdLogger::write_file_header_() {
   if (this->ensure_room_(SD_LOG_MAX_LINE))
     this->commit_line_(format_header(this->block_.cursor(), this->block_.room(), this->seq_, now, ESPHOME_VERSION));
 
+  if (!this->origin_.empty() && this->ensure_room_(SD_LOG_MAX_LINE))
+    this->commit_line_(format_origin(this->block_.cursor(), this->block_.room(), this->origin_.c_str()));
+
+  UtcAnchor anchor;
+  uint32_t generation;
+  portENTER_CRITICAL(&this->utc_mux_);
+  anchor = this->utc_anchor_;
+  generation = this->utc_generation_;
+  portEXIT_CRITICAL(&this->utc_mux_);
+  if (anchor.valid && this->ensure_room_(SD_LOG_MAX_LINE))
+    this->commit_line_(format_utc(this->block_.cursor(), this->block_.room(), anchor.boot_us, anchor.utc_us));
+  portENTER_CRITICAL(&this->utc_mux_);
+  if (this->utc_generation_ == generation)
+    this->utc_emitted_generation_ = generation;
+  portEXIT_CRITICAL(&this->utc_mux_);
+
 #ifdef USE_SD_LOGGER_CAN_TAP
   for (uint8_t i = 0; i < this->can_tap_count_; i++) {
     if (!this->ensure_room_(SD_LOG_MAX_LINE))
@@ -684,8 +793,9 @@ void SdLogger::write_file_header_() {
   if (this->ensure_room_(2 * SD_LOG_SECTOR))
     this->commit_line_(format_pad(this->block_.cursor(), this->block_.room(), this->file_bytes_));
 
-  // Reset the drop baselines: markers are relative to the file they appear in,
-  // so a counter that moved before this file opened is not re-reported into it.
+  // Reset only baselines whose producers cannot move while there is no file. A marker baseline
+  // that resets during an outage makes a live non-zero counter absent from the first recovered
+  // file, which turns the only evidence of the loss into a console-only fact.
   //
   // `marked_card_dropped_` is deliberately NOT reset, and that is the whole point of it. It only
   // ever moves while there is no file to write into, so whatever it has accumulated by the time a
@@ -697,12 +807,38 @@ void SdLogger::write_file_header_() {
   // lives in CollectionPolicy, nothing in this function touches it, and clear() does not reset it
   // either. A retention discard between the marker pass and a rotation therefore lands in the next
   // file rather than being erased by the header that opened it.
-  this->marked_dropped_ = this->dropped_records_.load(std::memory_order_relaxed);
+  // ring, write and tap baselines deliberately survive outages like card: any movement since the
+  // last writable file must be stated by the next one. On an ordinary rotation they have not
+  // moved, so retaining them emits nothing.
   this->marked_text_dropped_ = this->text_dropped_.load(std::memory_order_relaxed);
-#ifdef USE_SD_LOGGER_CAN_TAP
-  for (uint8_t i = 0; i < this->can_tap_count_; i++)
-    this->can_taps_[i].marked_dropped = this->can_taps_[i].port->log_tap_dropped();
-#endif
+}
+
+void SdLogger::set_utc_anchor(uint64_t utc_us, uint64_t boot_us_at_sync) {
+  portENTER_CRITICAL(&this->utc_mux_);
+  this->utc_anchor_.utc_us = utc_us;
+  this->utc_anchor_.boot_us = boot_us_at_sync;
+  this->utc_anchor_.valid = true;
+  this->utc_generation_++;
+  portEXIT_CRITICAL(&this->utc_mux_);
+  if (this->writer_task_ != nullptr)
+    xTaskNotifyGive(this->writer_task_);
+}
+
+void SdLogger::write_utc_marker_() {
+  UtcAnchor anchor;
+  uint32_t generation;
+  portENTER_CRITICAL(&this->utc_mux_);
+  anchor = this->utc_anchor_;
+  generation = this->utc_generation_;
+  const bool needed = anchor.valid && generation != this->utc_emitted_generation_;
+  portEXIT_CRITICAL(&this->utc_mux_);
+  if (!needed || !this->ensure_room_(SD_LOG_MAX_LINE))
+    return;
+  this->commit_line_(format_utc(this->block_.cursor(), this->block_.room(), anchor.boot_us, anchor.utc_us));
+  portENTER_CRITICAL(&this->utc_mux_);
+  if (this->utc_generation_ == generation)
+    this->utc_emitted_generation_ = generation;
+  portEXIT_CRITICAL(&this->utc_mux_);
 }
 
 bool SdLogger::close_file_(const char *reason) {
@@ -723,7 +859,11 @@ bool SdLogger::close_file_(const char *reason) {
   // line states is spent, and the writer stops owing it. This is also what guarantees the successor
   // file opens with no in-flight window and no stale end offset.
   this->retire_gap_if_durable_();
-  fsync(this->fd_);
+  if (fsync(this->fd_) != 0) {
+    ESP_LOGE(TAG, "fsync failed (errno %d)", errno);
+    this->enter_failed_("fsync");
+    return false;
+  }
   close(this->fd_);
   this->fd_ = -1;
   // OPEN -> SEALED: `#close` is written and fsynced, so the chunk is complete and the collector may
@@ -757,6 +897,10 @@ void SdLogger::enter_failed_(const char *why) {
   // tightest case there is — the marker pass commits `#gap` and the very next line's `ensure_room_()`
   // discovers the dead card.
   this->drop_unflushed_gap_();
+  // These records entered the logger and were formatted, but their complete lines never reached
+  // write(). They are not card_dropped_, which means a producer found no writable file.
+  this->write_lost_.fetch_add(this->unflushed_records_.count(), std::memory_order_relaxed);
+  this->unflushed_records_.reset();
   this->block_.reset();
   // The index describes a card that is no longer reachable, and its OPEN entry names a file whose
   // fd has just gone. Dropping it here is what keeps the *next* open file trackable — there is only
@@ -826,8 +970,12 @@ class SpiCardResetIo : public CardResetIo {
 
 }  // namespace
 
-CardResetResult SdLogger::run_card_reset_(uint32_t busy_timeout_ms) {
-  CardResetResult result;
+/// A raw 400 kHz SPI session on the logger's own four pins, with CS as a plain GPIO.
+///
+/// Shared by the in-band reset and the readiness probe because both need the same thing the SDSPI
+/// driver cannot give them: CS held across many separate one-byte transactions. Returns false only
+/// when the bus itself refused, having already said which call failed.
+bool SdLogger::open_raw_spi_(spi_device_handle_t *dev, bool *owns_bus) {
   const spi_host_device_t host_slot = static_cast<spi_host_device_t>(SDSPI_DEFAULT_HOST);
 
   spi_bus_config_t bus_cfg = {};
@@ -840,10 +988,10 @@ CardResetResult SdLogger::run_card_reset_(uint32_t busy_timeout_ms) {
 
   esp_err_t err = spi_bus_initialize(host_slot, &bus_cfg, SPI_DMA_CH_AUTO);
   // INVALID_STATE is another owner's bus, which we borrow and must not free.
-  const bool owns_bus = (err == ESP_OK);
+  *owns_bus = (err == ESP_OK);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-    ESP_LOGW(TAG, "card reset: spi_bus_initialize failed: %s", esp_err_to_name(err));
-    return result;
+    ESP_LOGW(TAG, "raw spi: spi_bus_initialize failed: %s", esp_err_to_name(err));
+    return false;
   }
 
   spi_device_interface_config_t dev_cfg = {};
@@ -851,35 +999,60 @@ CardResetResult SdLogger::run_card_reset_(uint32_t busy_timeout_ms) {
   dev_cfg.mode = 0;
   dev_cfg.spics_io_num = -1;
   dev_cfg.queue_size = 1;
-  spi_device_handle_t dev = nullptr;
-  err = spi_bus_add_device(host_slot, &dev_cfg, &dev);
+  err = spi_bus_add_device(host_slot, &dev_cfg, dev);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "card reset: spi_bus_add_device failed: %s", esp_err_to_name(err));
-    if (owns_bus)
+    ESP_LOGW(TAG, "raw spi: spi_bus_add_device failed: %s", esp_err_to_name(err));
+    if (*owns_bus)
       spi_bus_free(host_slot);
-    return result;
+    return false;
   }
 
   // Level before direction, not the other way round: writing the output latch while the pin is
   // still an input is harmless, whereas enabling the driver first would put whatever the latch
   // happened to hold onto CS — a stray assertion into a card that is mid-transaction, which is the
-  // one thing this function exists not to do.
+  // one thing this path exists not to do.
   const gpio_num_t cs = static_cast<gpio_num_t>(this->cs_pin_);
   gpio_set_level(cs, 1);
   gpio_set_direction(cs, GPIO_MODE_OUTPUT);
+  return true;
+}
+
+void SdLogger::close_raw_spi_(spi_device_handle_t dev, bool owns_bus) {
+  spi_bus_remove_device(dev);
+  if (owns_bus)
+    spi_bus_free(static_cast<spi_host_device_t>(SDSPI_DEFAULT_HOST));
+  // Hand CS back: sdspi_host_init_device() configures the pin itself on the mount that follows, and
+  // a pin left as a driven output would fight it.
+  gpio_reset_pin(static_cast<gpio_num_t>(this->cs_pin_));
+}
+
+CardResetResult SdLogger::run_card_reset_(uint32_t busy_timeout_ms) {
+  CardResetResult result;
+  spi_device_handle_t dev = nullptr;
+  bool owns_bus = false;
+  if (!this->open_raw_spi_(&dev, &owns_bus))
+    return result;
 
   CardResetConfig cfg;
   cfg.busy_timeout_ms = busy_timeout_ms;
-  SpiCardResetIo io(dev, cs, this->dying_);
+  SpiCardResetIo io(dev, static_cast<gpio_num_t>(this->cs_pin_), this->dying_);
   result = card_reset(io, cfg);
 
-  spi_bus_remove_device(dev);
-  if (owns_bus)
-    spi_bus_free(host_slot);
-  // Hand CS back: sdspi_host_init_device() configures the pin itself on the mount that follows, and
-  // a pin left as a driven output would fight it.
-  gpio_reset_pin(cs);
+  this->close_raw_spi_(dev, owns_bus);
   return result;
+}
+
+bool SdLogger::run_card_probe_ready_(CardReadyResult *out) {
+  spi_device_handle_t dev = nullptr;
+  bool owns_bus = false;
+  if (!this->open_raw_spi_(&dev, &owns_bus))
+    return false;
+
+  SpiCardResetIo io(dev, static_cast<gpio_num_t>(this->cs_pin_), this->dying_);
+  const bool ready = card_probe_ready(io, out);
+
+  this->close_raw_spi_(dev, owns_bus);
+  return ready;
 }
 
 bool SdLogger::try_recover_() {
@@ -1111,6 +1284,7 @@ bool SdLogger::flush_block_(bool all) {
       return false;
     }
     this->block_.consume(static_cast<size_t>(written));
+    this->unflushed_records_.consume(static_cast<size_t>(written));
     this->bytes_written_ += static_cast<uint32_t>(written);
     len -= static_cast<size_t>(written);
   }
@@ -1155,6 +1329,7 @@ void SdLogger::write_record_(const LogRecord &rec, uint64_t now64) {
   const size_t n = format_record(this->block_.cursor(), this->block_.room(), this->stamps_, rec,
                                  reconstruct_us(now64, rec.t_us), this->sources_);
   this->commit_line_(n);
+  this->unflushed_records_.commit_record(this->block_.pending());
   this->records_written_++;
   this->maybe_rotate_(now64);
 }
@@ -1202,6 +1377,14 @@ void SdLogger::write_drop_markers_(uint64_t now64) {
     this->commit_line_(format_drop(this->block_.cursor(), this->block_.room(), now64, "card", nullptr,
                                    card_dropped - this->marked_card_dropped_, card_dropped));
     this->marked_card_dropped_ = card_dropped;
+  }
+
+  const uint32_t write_lost = this->write_lost_.load(std::memory_order_relaxed);
+  uint32_t write_delta = 0;
+  if (drop_marker_due(write_lost, this->marked_write_lost_, &write_delta) && this->ensure_room_(SD_LOG_MAX_LINE)) {
+    this->commit_line_(
+        format_drop(this->block_.cursor(), this->block_.room(), now64, "write", nullptr, write_delta, write_lost));
+    this->marked_write_lost_ = write_lost;
   }
 
   // `#gap` sits next to `card` because it answers the same question — what happened to the data
@@ -1261,11 +1444,19 @@ void SdLogger::write_drop_markers_(uint64_t now64) {
 #ifdef USE_SD_LOGGER_CAN_TAP
   for (uint8_t i = 0; i < this->can_tap_count_; i++) {
     const uint32_t tap_dropped = this->can_taps_[i].port->log_tap_dropped();
-    if (tap_dropped == this->can_taps_[i].marked_dropped || !this->ensure_room_(SD_LOG_MAX_LINE))
-      continue;
-    this->commit_line_(format_drop(this->block_.cursor(), this->block_.room(), now64, "tap", this->can_taps_[i].label,
-                                   tap_dropped - this->can_taps_[i].marked_dropped, tap_dropped));
-    this->can_taps_[i].marked_dropped = tap_dropped;
+    if (tap_dropped != this->can_taps_[i].marked_dropped && this->ensure_room_(SD_LOG_MAX_LINE)) {
+      this->commit_line_(format_drop(this->block_.cursor(), this->block_.room(), now64, "tap", this->can_taps_[i].label,
+                                     tap_dropped - this->can_taps_[i].marked_dropped, tap_dropped));
+      this->can_taps_[i].marked_dropped = tap_dropped;
+    }
+
+    const uint32_t shutdown_lost = this->can_taps_[i].shutdown_lost.load(std::memory_order_relaxed);
+    if (shutdown_lost != this->can_taps_[i].marked_shutdown_lost && this->ensure_room_(SD_LOG_MAX_LINE)) {
+      this->commit_line_(format_drop(this->block_.cursor(), this->block_.room(), now64, "tap_shutdown",
+                                     this->can_taps_[i].label, shutdown_lost - this->can_taps_[i].marked_shutdown_lost,
+                                     shutdown_lost));
+      this->can_taps_[i].marked_shutdown_lost = shutdown_lost;
+    }
   }
 #endif
 }
@@ -1360,6 +1551,34 @@ uint32_t SdLogger::get_tap_dropped_records() const {
   return total;
 }
 
+uint32_t SdLogger::get_tap_shutdown_lost_records() const {
+  uint32_t total = 0;
+  for (uint8_t i = 0; i < this->can_tap_count_; i++)
+    total += this->can_taps_[i].shutdown_lost.load(std::memory_order_relaxed);
+  return total;
+}
+
+uint32_t SdLogger::get_tap_accepted_records() const {
+  uint32_t total = 0;
+  for (uint8_t i = 0; i < this->can_tap_count_; i++)
+    total += this->can_taps_[i].port->log_tap_rx_accepted() + this->can_taps_[i].port->log_tap_tx_accepted();
+  return total;
+}
+
+uint32_t SdLogger::get_tap_drained_records() const {
+  uint32_t total = 0;
+  for (uint8_t i = 0; i < this->can_tap_count_; i++)
+    total += this->can_taps_[i].drained.load(std::memory_order_relaxed);
+  return total;
+}
+
+uint32_t SdLogger::get_tap_record_ring_accepted_records() const {
+  uint32_t total = 0;
+  for (uint8_t i = 0; i < this->can_tap_count_; i++)
+    total += this->can_taps_[i].record_ring_accepted.load(std::memory_order_relaxed);
+  return total;
+}
+
 void SdLogger::tap_drain_loop_() {
   // The tap rings' single consumer, decoupled from the card on purpose: this loop never makes a
   // filesystem call, so a card that goes internally busy for hundreds of ms (and the writer
@@ -1382,30 +1601,51 @@ void SdLogger::tap_drain_loop_() {
     if (this->mounted_) {
       bool record_ring_full = false;
       for (uint8_t i = 0; i < this->can_tap_count_ && !record_ring_full; i++) {
-        auto *ring = this->can_taps_[i].port->log_tap_ring();
-        if (ring == nullptr)
+        auto *rx_ring = this->can_taps_[i].port->log_tap_ring();
+        auto *tx_ring = this->can_taps_[i].port->log_tap_tx_ring();
+        if (rx_ring == nullptr && tx_ring == nullptr)
           continue;  // port armed at codegen but never enabled
-        can_gateway::TapRecord tap;
-        LogRecord rec;
-        while (this->mounted_ && ring->pop(tap)) {
+        // One entry from each queue per turn preserves per-ring order without allowing a busy RX
+        // ring to starve TX. The file reader interleaves the two rings by each record's capture
+        // timestamp, which was already taken in the producing ISR.
+        auto drain_one = [&](auto *ring) {
+          can_gateway::TapRecord tap;
+          LogRecord rec;
+          if (ring == nullptr || !this->mounted_ || !ring->pop(tap))
+            return false;
+          this->can_taps_[i].drained.fetch_add(1, std::memory_order_relaxed);
           // Field by field, never a memcpy — see tap_translate.h for why, and
           // tests/host/test_tap_translate.cpp for the cases that hold it there.
           tap_to_log_record(tap, this->can_taps_[i].source, rec);
-          if (!this->push_record(rec)) {
-            // Record ring full (writer stalled long enough to fill ~585 ms of it). Stop the whole
-            // pass: records left *in the tap rings* are another ~146 ms of buffer, whereas popping
-            // them now would feed them straight into the full ring's drop counter. The one record
-            // already popped is lost and was counted by push_record(); at 5 ms per pass that caps
-            // the misattribution at ~200 records/s against the ~7000/s it replaces.
-            record_ring_full = true;
-            break;
+          if (this->push_record(rec)) {
+            this->can_taps_[i].record_ring_accepted.fetch_add(1, std::memory_order_relaxed);
+            return true;
           }
+          // Record ring full (writer stalled long enough to fill ~585 ms of it). Stop the whole
+          // pass: records left in the tap rings are another ~146 ms of buffer, whereas popping
+          // them now would feed them straight into the full ring's drop counter. The one record
+          // already popped is lost and was counted by push_record().
+          record_ring_full = true;
+          return true;
+        };
+        bool progressed = true;
+        while (this->mounted_ && progressed) {
+          progressed = drain_one(rx_ring);
+          if (!record_ring_full)
+            progressed = drain_one(tx_ring) || progressed;
+          if (record_ring_full)
+            break;
         }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(TAP_DRAIN_POLL_MS));
   }
 }
+#else
+uint32_t SdLogger::get_tap_shutdown_lost_records() const { return 0; }
+uint32_t SdLogger::get_tap_accepted_records() const { return 0; }
+uint32_t SdLogger::get_tap_drained_records() const { return 0; }
+uint32_t SdLogger::get_tap_record_ring_accepted_records() const { return 0; }
 #endif
 
 #ifdef USE_SD_LOGGER_COLLECTION
@@ -1792,12 +2032,17 @@ uint64_t SdLogger::collection_discarded_bytes() const {
 void SdLogger::sync_file_() {
   if (this->fd_ < 0)
     return;
-  this->flush_block_(/*all=*/false);
+  if (!this->flush_block_(/*all=*/false))
+    return;
   // Timed for the same reason as the write() in flush_block_: an fsync lands FAT and directory
   // sectors away from the data stream, which is precisely the access pattern that sends a card
   // into its garbage collector.
   const int64_t t0 = esp_timer_get_time();
-  fsync(this->fd_);
+  if (fsync(this->fd_) != 0) {
+    ESP_LOGE(TAG, "fsync failed (errno %d)", errno);
+    this->enter_failed_("fsync");
+    return;
+  }
   const int64_t held_us = esp_timer_get_time() - t0;
   if (held_us > STALL_WARN_US)
     ESP_LOGW(TAG, "fsync() held %" PRId64 " ms — card internally busy", held_us / 1000);
@@ -1826,6 +2071,11 @@ void SdLogger::writer_loop_() {
     this->last_pass_us_ = static_cast<int64_t>(now64);
 
     if (this->file_ok_()) {
+      // A time-sync callback publishes an anchor and wakes this task. Emit its
+      // correspondence before any further stream line, without touching the
+      // record/text delta chain.
+      this->write_utc_marker_();
+
       // Drain everything currently queued. All sources feed the same file; t_us
       // (stamped by the producer, in the RX ISR for a tap) is what puts the
       // interleaved records back in order on read-out. Skew is bounded by this
@@ -1897,7 +2147,10 @@ void SdLogger::writer_loop_() {
       vTaskDelete(nullptr);
       return;
     }
-    vTaskDelay(pdMS_TO_TICKS(WRITER_POLL_MS));
+    // A time sync uses the task notification to put its #utc line ahead of the
+    // normal 20 ms poll deadline. Nothing else relies on the notification, so
+    // consuming its count here is safe.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WRITER_POLL_MS));
   }
 }
 
@@ -1931,6 +2184,16 @@ void SdLogger::emergency_close_() {
   ESP_LOGW(TAG, "closing log (%s): %" PRIu32 " records, %" PRIu32 " dropped", reason, this->records_written_,
            this->dropped_records_.load());
   this->mounted_ = false;  // stop accepting new records
+#ifdef USE_SD_LOGGER_CAN_TAP
+  // The drain task may stop immediately after mounted_ goes false. Snapshot both SPSC queues
+  // before the marker pass: their entries cannot fit in the hold-up budget, so state the tail.
+  for (uint8_t i = 0; i < this->can_tap_count_; i++) {
+    auto *rx = this->can_taps_[i].port->log_tap_ring();
+    auto *tx = this->can_taps_[i].port->log_tap_tx_ring();
+    const uint32_t tail = (rx != nullptr ? rx->size() : 0) + (tx != nullptr ? tx->size() : 0);
+    this->can_taps_[i].shutdown_lost.fetch_add(tail, std::memory_order_relaxed);
+  }
+#endif
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
   // **Fence the server before anything else.** `on_shutdown()` stops it up front, but that is only
   // one of the three ways this function is reached: the VCC monitor's `dying_` store and the public
@@ -2061,6 +2324,12 @@ void SdLogger::loop() {
            this->card_dropped_.load(), this->bytes_written_, this->seq_,
            this->index_refused_.load(std::memory_order_relaxed), this->mounted_ ? 1 : 0);
 #endif
+  // Its own line, and only when it is true, so the counters above stay the shape every reader
+  // already parses. A latched card that is being written through the masked idle bit is working,
+  // but it has not completed a real initialisation since it last had power — the operator is
+  // entitled to know that without reading the boot log.
+  if (this->degraded_identification_)
+    ESP_LOGW(TAG, "  card mounted with a latched idle bit masked — working, but still owed a power cycle");
 #ifdef USE_SD_LOGGER_COLLECTION
   // Retention's lifetime loss, on its own line and only once it exists. `#gap` states deltas, so
   // unlike `#drop` it has no lifetime column a reader could fall back on — this is the running total

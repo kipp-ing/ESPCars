@@ -12,6 +12,25 @@
 
 namespace esphome::ccp {
 
+struct DaqReadRequest {
+  std::vector<DaqField> fields;
+  uint8_t list{0};
+  uint32_t dto_id{0x702};
+  uint8_t event{0};
+  uint16_t prescaler{10};
+  uint16_t samples{30};
+  uint32_t collect_timeout{5000};
+  bool require_anchor{true};
+};
+
+struct DaqReadResult {
+  bool ok{false};
+  const char *failed_step{nullptr};
+  uint16_t frames_seen{0};
+  uint16_t anchor_ok{0};
+  std::vector<std::vector<uint8_t>> values;
+};
+
 class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
  public:
   explicit CcpHub(can_gateway::GatewayPort *port) : port_(port) {}
@@ -26,6 +45,10 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   void set_response_timeout(uint32_t timeout) { response_timeout_ = timeout; }
   void set_allow_write(bool allow) { allow_write_ = allow; }
   void set_enabled(bool enabled) { enabled_ = enabled; }
+  void set_daq_anchor(uint8_t ext, uint32_t address, const std::vector<uint8_t> &expect) {
+    daq_anchor_ = DaqField{static_cast<uint8_t>(expect.size()), ext, address};
+    daq_anchor_expect_ = expect;
+  }
   bool is_connected() const { return connected_; }
   bool is_enabled() const { return enabled_; }
 
@@ -61,6 +84,7 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   bool read_memory(uint8_t ext, uint32_t address, uint16_t len, std::function<void(std::vector<uint8_t>)> callback);
   bool write_memory(uint8_t ext, uint32_t address, const std::vector<uint8_t> &data,
                     std::function<void(bool)> callback = {});
+  bool daq_read(const DaqReadRequest &req, std::function<void(const DaqReadResult &)> callback);
   bool connect_and(std::function<void(bool)> callback);
   void on_frame(const can_gateway::FrameView &frame) override;
 
@@ -72,15 +96,26 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   }
   template<typename F> void add_on_error_callback(F &&callback) { error_callback_.add(std::forward<F>(callback)); }
   template<typename F> void add_on_daq_callback(F &&callback) { daq_callback_.add(std::forward<F>(callback)); }
+  template<typename F> void add_on_daq_read_callback(F &&callback) {
+    daq_read_callback_.add(std::forward<F>(callback));
+  }
 
  protected:
   using CommandCallback = std::function<void(bool, uint8_t, const uint8_t *, uint8_t)>;
   bool send_(Cro cro, CommandCallback callback = {});
   bool write_allowed_(uint8_t command) const;
+  bool has_daq_anchor_() const { return !this->daq_anchor_expect_.empty(); }
   void finish_(bool success, uint8_t code, const uint8_t *data, uint8_t len);
   void fail_sequence_();
   void continue_read_(bool success, const uint8_t *data, uint8_t len);
   void continue_write_(bool success);
+  bool send_daq_step_(Cro cro, const char *step, CommandCallback callback = {});
+  void continue_daq_write_(size_t index);
+  void begin_daq_collect_();
+  void handle_daq_frame_(const uint8_t *frame, uint8_t len);
+  void complete_daq_read_(const char *failed_step);
+  void teardown_daq_read_();
+  void fire_daq_read_();
   can_gateway::GatewayPort *port_;
   uint32_t command_id_{0x700};
   uint32_t response_id_{0x701};
@@ -103,10 +138,24 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   size_t write_offset_{0};
   std::function<void(bool)> write_callback_{};
   std::function<void(bool)> connect_callback_{};
+  DaqField daq_anchor_{};
+  std::vector<uint8_t> daq_anchor_expect_{};
+  bool daq_read_active_{false};
+  bool daq_collecting_{false};
+  bool daq_anchor_required_{false};
+  uint8_t daq_requested_offset_{0};
+  uint16_t daq_target_samples_{0};
+  uint32_t daq_collect_deadline_{0};
+  DaqReadResult daq_read_result_{};
+  DaqReadRequest daq_read_req_{};
+  std::vector<DaqField> daq_layout_{};
+  std::vector<uint8_t> daq_values_valid_{};
+  std::function<void(const DaqReadResult &)> daq_read_done_{};
   LazyCallbackManager<void()> connected_callback_;
   LazyCallbackManager<void(uint8_t, uint8_t, std::vector<uint8_t>)> response_callback_;
   LazyCallbackManager<void(uint8_t, uint8_t)> error_callback_;
   LazyCallbackManager<void(uint8_t, std::vector<uint8_t>)> daq_callback_;
+  LazyCallbackManager<void(bool, uint16_t, uint16_t, std::vector<std::vector<uint8_t>>)> daq_read_callback_;
 };
 
 template<typename... Ts> class CcpConnectAction : public Action<Ts...>, public Parented<CcpHub> {
@@ -195,6 +244,32 @@ template<typename... Ts> class CcpDaqAction : public Action<Ts...>, public Paren
   TEMPLATABLE_VALUE(bool, start) void play(const Ts &...x) override {
     this->parent_->start_stop_all(this->start_.value(x...) ? 1 : 0);
   }
+};
+template<typename... Ts> class CcpDaqReadAction : public Action<Ts...>, public Parented<CcpHub> {
+ public:
+  TEMPLATABLE_VALUE(uint8_t, list)
+  TEMPLATABLE_VALUE(uint32_t, dto_id)
+  TEMPLATABLE_VALUE(uint8_t, event)
+  TEMPLATABLE_VALUE(uint16_t, prescaler)
+  TEMPLATABLE_VALUE(uint16_t, samples)
+  TEMPLATABLE_VALUE(uint32_t, collect_timeout)
+  TEMPLATABLE_VALUE(bool, require_anchor)
+  void add_field(uint8_t size, uint8_t ext, uint32_t address) { fields_.push_back(DaqField{size, ext, address}); }
+  void play(const Ts &...x) override {
+    DaqReadRequest req{};
+    req.fields = this->fields_;
+    req.list = this->list_.value(x...);
+    req.dto_id = this->dto_id_.value(x...);
+    req.event = this->event_.value(x...);
+    req.prescaler = this->prescaler_.value(x...);
+    req.samples = this->samples_.value(x...);
+    req.collect_timeout = this->collect_timeout_.value(x...);
+    req.require_anchor = this->require_anchor_.value(x...);
+    this->parent_->daq_read(req, {});
+  }
+
+ protected:
+  std::vector<DaqField> fields_{};
 };
 template<typename... Ts> class CcpRawAction : public Action<Ts...>, public Parented<CcpHub> {
  public:

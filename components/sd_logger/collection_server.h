@@ -61,6 +61,14 @@ class SdLogger;
 /// that also calls into FATFS is how this crashes on the first large chunk.
 static const size_t SD_LOG_SERVE_BLOCK = 4096;
 
+/// The IDF HTTP server task must retain enough headroom for FATFS to follow a cluster link while a
+/// chunk handler is live. A 5 KiB stack happened to cover reads within the first cluster, but the
+/// deeper read path at the 64 KiB cluster boundary overwrote the handler's live state and made the
+/// next socket writes expose unrelated memory. Keep the 4 KiB card/socket buffer on the heap. This
+/// 8 KiB recovery allocation is deliberately provisional: `serve_chunk_()` reports the task's
+/// measured minimum free stack after each completed response, which is the evidence used to size it.
+static const uint32_t SD_LOG_HTTPD_STACK_SIZE = 8192;
+
 /// `SO_SNDTIMEO` on the server's sockets, in whole seconds — `httpd_config_t` takes no finer unit.
 /// It is how long a blocked `httpd_send()` can stall the httpd task, and the httpd task is the one
 /// holding a read fd on the card, so it is also the *floor* for `unmount_card_()`'s drain bound in

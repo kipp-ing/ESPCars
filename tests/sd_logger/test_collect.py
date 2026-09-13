@@ -399,6 +399,18 @@ class FakeDevice:
             "card_percent": 41,
             "discarded_chunks": 0,
             "discarded_bytes": 0,
+            "oldest_uncollected": None,
+            "index_refused": 0,
+            "mounted": True,
+            "degraded": False,
+            "records": 0,
+            "dropped": 0,
+            "card_dropped": 0,
+            "write_lost": 0,
+            "tap_shutdown_lost": 0,
+            "tap_accepted": 0,
+            "tap_drained": 0,
+            "tap_record_ring_accepted": 0,
         }
 
     # -- the request log
@@ -510,6 +522,32 @@ def test_the_fake_device_serves_the_index_contract(device: FakeDevice) -> None:
     device.confirmed.append(name)
     payload = json.loads(http_get(f"{device.url}/sdlog/index").read())
     assert [c["name"] for c in payload["chunks"]] == ["L0000432.LOG"]
+
+
+def test_the_fake_device_serves_the_complete_status_contract(device: FakeDevice) -> None:
+    payload = json.loads(http_get(f"{device.url}/sdlog/status").read())
+    assert set(payload) == {
+        "device",
+        "sealed",
+        "confirmed",
+        "card_percent",
+        "discarded_chunks",
+        "discarded_bytes",
+        "oldest_uncollected",
+        "index_refused",
+        "mounted",
+        "degraded",
+        "records",
+        "dropped",
+        "card_dropped",
+        "write_lost",
+        "tap_shutdown_lost",
+        "tap_accepted",
+        "tap_drained",
+        "tap_record_ring_accepted",
+    }
+    assert payload["mounted"] is True
+    assert payload["degraded"] is False
 
 
 def test_the_fake_device_can_stumble_on_its_own_index(device: FakeDevice) -> None:
