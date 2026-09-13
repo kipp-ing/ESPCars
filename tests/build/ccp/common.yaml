@@ -1,0 +1,48 @@
+# CCP action and trigger compile fixture; actions live in a script so boot remains observe-first.
+can_gateway:
+  id: diag
+  ports:
+    - id: diag_bus
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 500kbps
+      observe_queue_depth: 32
+
+ccp:
+  id: bms_ccp
+  can_gateway_id: diag_bus
+  command_id: 0x700
+  response_id: 0x701
+  station_address: 0x0001
+  byte_order: little
+  response_timeout: 100ms
+  on_connected:
+    - logger.log: "CCP connected"
+  on_response:
+    - logger.log:
+        format: "CCP 0x%02X rc=0x%02X (%u bytes)"
+        args: [command, return_code, data.size()]
+  on_error:
+    - logger.log:
+        format: "CCP error 0x%02X rc=0x%02X"
+        args: [command, return_code]
+  on_daq:
+    - logger.log:
+        format: "CCP DAQ PID 0x%02X (%u bytes)"
+        args: [pid, data.size()]
+
+script:
+  - id: exercise_ccp
+    then:
+      - ccp.connect: {id: bms_ccp}
+      - ccp.get_version: {id: bms_ccp}
+      - ccp.exchange_id: {id: bms_ccp}
+      - ccp.set_mta: {id: bms_ccp, mta: 0, ext: 0, address: 0x10203040}
+      - ccp.upload: {id: bms_ccp, size: 5}
+      - ccp.short_upload: {id: bms_ccp, size: 2, ext: 0, address: 0x10203040}
+      - ccp.select_cal_page: {id: bms_ccp}
+      - ccp.read_memory: {id: bms_ccp, ext: 0, address: 0x10203040, length: 12}
+      - ccp.start_daq: {id: bms_ccp}
+      - ccp.stop_daq: {id: bms_ccp}
+      - ccp.raw: {id: bms_ccp, data: [0x1B]}
+      - ccp.set_enabled: {id: bms_ccp, enabled: true}
