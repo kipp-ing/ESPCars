@@ -5,6 +5,7 @@
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
 
 #include "sd_logger.h"
+#include "sd_diagnostics.h"
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -40,6 +41,12 @@ static const char *const TAG = "sd_logger.collect";
 
 static const char *const ROUTE_INDEX = "/sdlog/index";
 static const char *const ROUTE_STATUS = "/sdlog/status";
+static const char *const ROUTE_FSDEBUG = "/sdlog/fsdebug*";
+static const char *const ROUTE_RAW = "/sdlog/raw";
+static const char *const ROUTE_CHAIN = "/sdlog/chain";
+static const char *const ROUTE_SPI_TRACE = "/sdlog/spitrace";
+static const char *const STATUS_BAD_REQUEST = "400"
+                                              " Bad Request";
 static const char *const PREFIX_CHUNK = "/sdlog/f/";
 static const char *const PREFIX_DONE = "/sdlog/done/";
 
@@ -76,6 +83,17 @@ class FdGuard {
 
  private:
   int fd_;
+};
+
+class RawReadGuard {
+ public:
+  explicit RawReadGuard(SdLogger *parent) : parent_(parent) {}
+  ~RawReadGuard() { this->parent_->collection_end_raw_read(); }
+  RawReadGuard(const RawReadGuard &) = delete;
+  RawReadGuard &operator=(const RawReadGuard &) = delete;
+
+ private:
+  SdLogger *parent_;
 };
 
 int hex_value(char c) {
@@ -260,7 +278,7 @@ bool CollectionServer::start(uint16_t port) {
   // until its timeout expires.
   config.max_open_sockets = 3;
   config.lru_purge_enable = true;
-  config.max_uri_handlers = 4;
+  config.max_uri_handlers = 8;
   // How long a *single* blocked `send()` stalls the httpd task — a per-syscall `SO_SNDTIMEO`, not a
   // budget for the request. It matters here because that task is the one holding a read fd on the
   // card, so this is also the floor for `unmount_card_()`'s drain bound (SD_LOG_SEND_WAIT_S, read
@@ -280,12 +298,8 @@ bool CollectionServer::start(uint16_t port) {
   // that blocks is a peer that went away mid-header, and holding the single httpd task on it for
   // five seconds delays every other request behind it.
   config.recv_wait_timeout = static_cast<uint16_t>(SD_LOG_SEND_WAIT_S);
-  // The handler reads the card and formats JSON on this stack. In particular, the FATFS read path
-  // grows when it follows a cluster link: 5 KiB was enough inside the first 64 KiB cluster, then
-  // overflowed the httpd task at the first boundary and corrupted the handler's live buffer state.
-  // 8 KiB is a recovery allocation, not an assumed final margin: each completed response logs the
-  // task's lifetime minimum free stack, including the deepest FATFS call made by that response.
-  // The staging block stays on the heap; this budget is for the handler and the IDF call chains.
+  // The handler reads the card and formats JSON on this stack. The 8 KiB budget is independently
+  // measured by the completed-response high-water mark below; the staging block stays on the heap.
   config.stack_size = SD_LOG_HTTPD_STACK_SIZE;
   // Below the writer task (6), far below `lin_uart_evt` (18) and the WiFi tasks (~23). Serving must
   // never preempt logging or bus timing — §6's whole rule is that logging wins.
@@ -320,6 +334,10 @@ bool CollectionServer::start(uint16_t port) {
   const httpd_uri_t routes[] = {
       {.uri = ROUTE_INDEX, .method = HTTP_GET, .handler = &CollectionServer::index_route_, .user_ctx = this},
       {.uri = ROUTE_STATUS, .method = HTTP_GET, .handler = &CollectionServer::status_route_, .user_ctx = this},
+      {.uri = ROUTE_FSDEBUG, .method = HTTP_GET, .handler = &CollectionServer::fsdebug_route_, .user_ctx = this},
+      {.uri = ROUTE_RAW, .method = HTTP_GET, .handler = &CollectionServer::raw_route_, .user_ctx = this},
+      {.uri = ROUTE_CHAIN, .method = HTTP_GET, .handler = &CollectionServer::chain_route_, .user_ctx = this},
+      {.uri = ROUTE_SPI_TRACE, .method = HTTP_GET, .handler = &CollectionServer::spitrace_route_, .user_ctx = this},
       {.uri = "/sdlog/f/*", .method = HTTP_GET, .handler = &CollectionServer::chunk_route_, .user_ctx = this},
       {.uri = "/sdlog/done/*", .method = HTTP_POST, .handler = &CollectionServer::done_route_, .user_ctx = this},
   };
@@ -366,6 +384,18 @@ esp_err_t CollectionServer::done_route_(httpd_req_t *req) {
 }
 esp_err_t CollectionServer::status_route_(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_status_(req);
+}
+esp_err_t CollectionServer::fsdebug_route_(httpd_req_t *req) {
+  return static_cast<CollectionServer *>(req->user_ctx)->serve_fsdebug_(req);
+}
+esp_err_t CollectionServer::raw_route_(httpd_req_t *req) {
+  return static_cast<CollectionServer *>(req->user_ctx)->serve_raw_(req);
+}
+esp_err_t CollectionServer::chain_route_(httpd_req_t *req) {
+  return static_cast<CollectionServer *>(req->user_ctx)->serve_chain_(req);
+}
+esp_err_t CollectionServer::spitrace_route_(httpd_req_t *req) {
+  return static_cast<CollectionServer *>(req->user_ctx)->serve_spitrace_(req);
 }
 
 // -------------------------------------------------------------------------------- helpers
@@ -626,11 +656,13 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
   }
 
   uint32_t remaining = body;
+  bool logged_64k_read = false;
   while (remaining > 0) {
     // Between blocks, not inside them: the card read is the part that competes with the writer for
     // SPI2, so the sleep has to happen before it (§6). Bounded, so a busy ring throttles the
     // transfer instead of stalling it past the client's 10 s socket timeout.
     this->backpressure_();
+    const uint32_t read_offset = start + (body - remaining);
     const size_t want = remaining < SD_LOG_SERVE_BLOCK ? remaining : SD_LOG_SERVE_BLOCK;
     // Timed like the writer's write(): when the writer is spinning out a card stall it holds the
     // FATFS volume mutex, and this read is where the httpd task inherits that wait. A warning here
@@ -638,6 +670,19 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
     // signature that separates mutex convoy from a slow card read of its own.
     const int64_t t0 = esp_timer_get_time();
     const ssize_t got = ::read(fd, this->block_, want);
+    // Snapshot the one known failure boundary before anything can hand this buffer to the socket.
+    // A whole-file transfer reaches it exactly once with the 4 KiB serve block. This is deliberately
+    // a 16-byte sample rather than a hot-path checksum or per-read log, so it does not perturb the
+    // writer/reader timing that reproduces the issue.
+    if (!logged_64k_read && read_offset == 65536) {
+      char first_bytes[16 * 2 + 1] = {};
+      const size_t sample_len = got <= 0 ? 0 : (static_cast<size_t>(got) < 16 ? static_cast<size_t>(got) : 16);
+      for (size_t i = 0; i < sample_len; i++)
+        snprintf(first_bytes + i * 2, 3, "%02X", static_cast<unsigned>(static_cast<uint8_t>(this->block_[i])));
+      ESP_LOGI(TAG, "read boundary: offset %" PRIu32 ", requested %u B, returned %d B, first %u B %s", read_offset,
+               static_cast<unsigned>(want), static_cast<int>(got), static_cast<unsigned>(sample_len), first_bytes);
+      logged_64k_read = true;
+    }
     const int64_t held_us = esp_timer_get_time() - t0;
     if (held_us > SD_LOG_READ_WARN_US) {
       ESP_LOGW(TAG, "read %s held %" PRId64 " ms (%u B)", on_card, held_us / 1000, static_cast<unsigned>(want));
@@ -726,9 +771,9 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       confirmed++;
   }
   uint32_t oldest = 0;
-  // 487 rendered bytes worst case: the established fields plus five ten-digit loss-pipeline
+  // 517 rendered bytes worst case: the established fields plus the capacity verdict and five ten-digit loss-pipeline
   // counters. Keep headroom so an additive status field cannot silently turn this route into 500.
-  char body[512];
+  char body[560];
   const StatusFields fields{
       this->device_,
       sealed,
@@ -740,7 +785,8 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       oldest,
       this->parent_->get_index_refused(),
       this->parent_->is_mounted(),
-      this->parent_->identification_degraded(),
+      this->parent_->is_degraded(),
+      this->parent_->capacity_status(),
       this->parent_->get_records_written(),
       this->parent_->get_dropped_records(),
       this->parent_->get_card_dropped_records(),
@@ -754,6 +800,131 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(body))
     return reply_json(req, "500 Internal Server Error", "{\"error\":\"status\"}");
   return reply_json(req, "200 OK", body);
+}
+
+// ----------------------------------------------------------------------------- GET /sdlog/fsdebug
+
+esp_err_t CollectionServer::serve_fsdebug_(httpd_req_t *req) {
+  char query[SD_LOG_NAME_LEN + 6];  // "name=" plus an 8.3 chunk name and NUL
+  char name[SD_LOG_NAME_LEN];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+      httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK)
+    return reply_json(req, "404 Not Found", "{\"error\":\"name is required\"}");
+
+  uint32_t seq = 0;
+  ChunkState ignored_state = ChunkState::NONE;
+  if (!parse_chunk_name(name, &seq, &ignored_state))
+    return reply_json(req, "404 Not Found", "{\"error\":\"invalid chunk name\"}");
+
+  const SdLogger::FsDebugResult result = this->parent_->collection_fs_debug(name, this->block_, SD_LOG_SERVE_BLOCK);
+  if (result == SdLogger::FsDebugResult::NOT_INDEXED)
+    return reply_json(req, "404 Not Found", this->block_);
+  if (result != SdLogger::FsDebugResult::OK)
+    return reply_json(req, "503 Service Unavailable", this->block_);
+  return reply_json(req, "200 OK", this->block_);
+}
+
+// ----------------------------------------------------------------------------- GET /sdlog/raw
+
+esp_err_t CollectionServer::serve_raw_(httpd_req_t *req) {
+  char query[64];
+  RawSectorRequest request{};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK || !parse_raw_sector_query(query, &request))
+    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"lba uint32 and count 1..128 are required\"}");
+
+  char error[96] = {};
+  const SdLogger::RawReadResult begin =
+      this->parent_->collection_begin_raw_read(request.lba, request.count, error, sizeof(error));
+  if (begin == SdLogger::RawReadResult::INVALID)
+    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"raw LBA range is outside the card\"}");
+  if (begin != SdLogger::RawReadResult::OK) {
+    snprintf(this->block_, SD_LOG_SERVE_BLOCK, "{\"error\":\"%s\"}", error);
+    return reply_json(req, "503 Service Unavailable", this->block_);
+  }
+  RawReadGuard guard(this->parent_);
+
+  httpd_resp_set_type(req, "application/octet-stream");
+  for (uint32_t i = 0; i < request.count; i++) {
+    if (!this->parent_->collection_raw_read_sector(request.lba + i, reinterpret_cast<uint8_t *>(this->block_), error,
+                                                   sizeof(error)))
+      return ESP_FAIL;
+    if (httpd_resp_send_chunk(req, this->block_, SD_LOGGER_CARD_SECTOR_BYTES) != ESP_OK)
+      return ESP_FAIL;
+  }
+  return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+// ----------------------------------------------------------------------------- GET /sdlog/chain
+
+esp_err_t CollectionServer::serve_chain_(httpd_req_t *req) {
+  char query[80];
+  ChainPageRequest page{};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK || !parse_chain_page_query(query, &page))
+    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"name is required; from defaults to 0; count is 1..20\"}");
+
+  uint32_t seq = 0;
+  ChunkState ignored_state = ChunkState::NONE;
+  if (!parse_chunk_name(page.name, &seq, &ignored_state))
+    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"invalid chunk name\"}");
+
+  const SdLogger::FsDebugResult result =
+      this->parent_->collection_chain_debug(page.name, page.from, page.count, this->block_, SD_LOG_SERVE_BLOCK);
+  if (result == SdLogger::FsDebugResult::NOT_INDEXED)
+    return reply_json(req, "404 Not Found", this->block_);
+  if (result != SdLogger::FsDebugResult::OK)
+    return reply_json(req, "503 Service Unavailable", this->block_);
+  return reply_json(req, "200 OK", this->block_);
+}
+
+// ----------------------------------------------------------------------------- GET /sdlog/spitrace
+
+esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
+  bool clear = false;
+  char query[16];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char value[2];
+    if (httpd_query_key_value(query, "clear", value, sizeof(value)) == ESP_OK) {
+      if (std::strcmp(value, "1") != 0)
+        return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"clear must be 1\"}");
+      clear = true;
+    }
+  }
+
+  SdSpiTraceRing &trace = this->parent_->collection_sdspi_trace();
+  const uint32_t write_start = trace.write_index();
+  const uint32_t oldest = trace.oldest(write_start);
+  httpd_resp_set_type(req, "text/csv");
+  int n =
+      snprintf(this->block_, SD_LOG_SERVE_BLOCK,
+               "#write_index_start,%" PRIu32 ",dropped,%" PRIu32 "\nseq,us,task,opcode,arg,blklen,datalen,flags,err\n",
+               write_start, trace.dropped());
+  if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)
+    return ESP_FAIL;
+
+  for (uint32_t seq = oldest; seq != write_start; seq++) {
+    const SdSpiTraceEntry entry = trace.read(seq);
+    char task[sizeof(entry.task)];
+    std::memcpy(task, entry.task, sizeof(task));
+    task[sizeof(task) - 1] = '\0';
+    for (size_t i = 0; task[i] != '\0'; i++) {
+      if (task[i] == ',' || task[i] == '\r' || task[i] == '\n' || task[i] == '"')
+        task[i] = '_';
+    }
+    n = snprintf(this->block_, SD_LOG_SERVE_BLOCK,
+                 "%" PRIu32 ",%" PRId64 ",%s,%" PRId32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRId32 "\n",
+                 entry.seq, entry.us, task, entry.opcode, entry.arg, entry.blklen, entry.datalen, entry.flags,
+                 entry.err);
+    if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)
+      return ESP_FAIL;
+  }
+  const uint32_t write_end = trace.write_index();
+  n = snprintf(this->block_, SD_LOG_SERVE_BLOCK, "#write_index_end,%" PRIu32 ",dropped,%" PRIu32 "\n", write_end,
+               trace.dropped());
+  if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)
+    return ESP_FAIL;
+  if (clear)
+    trace.clear();
+  return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 }  // namespace sd_logger

@@ -11,7 +11,7 @@ reference the same numbers. V10 is deferred; V7/V11/V12 arrived with the native
 can_gateway tap (M2), V13-V18 with write format v1 (spec §6), V19-V21 with card
 recovery (spec §7 Layer C), V22-V26 with chunk collection
 (docs/sdlog-collection-design.md), V27-V28 with the in-band card reset
-(components/sd_logger/card_reset.h).
+(components/sd_logger/card_reset.h), and V29 with capacity confinement.
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - depends on which components were pulle
 sd_logger_ns = cg.esphome_ns.namespace("sd_logger")
 SdLogger = sd_logger_ns.class_("SdLogger", cg.Component)
 LogAction = sd_logger_ns.class_("LogAction", automation.Action)
+ConfineFormatAction = sd_logger_ns.class_("ConfineFormatAction", automation.Action)
 
 CONF_CLK_PIN = "clk_pin"
 CONF_MOSI_PIN = "mosi_pin"
@@ -117,6 +118,8 @@ CONF_MAX_CHUNKS = "max_chunks"
 CONF_SERVE = "serve"
 CONF_TIME_ID = "time_id"
 CONF_ORIGIN = "origin"
+CONF_CONFINE_BYTES = "confine_bytes"
+CONF_CONFIRMATION = "confirmation"
 
 # Source tag 0 is the `sd_logger.log` action (S1). Native taps start at 1 so a
 # record's origin stays readable in the file without a side table (V11).
@@ -181,6 +184,34 @@ def _validate_size(value):
         return int(float(text) * mult)
     except ValueError as err:
         raise cv.Invalid(f"invalid size {value!r}") from err
+
+
+CONFINE_MIN_BYTES = 1 * 1024 * 1024
+# A typo guard, not a policy: the right cap for a given card is whatever its capacity
+# self-test proves, and that is a runtime fact this schema cannot know.
+CONFINE_MAX_BYTES = 32 * 1024 * 1024 * 1024
+CONFINE_SECTOR_BYTES = 512
+
+
+def _validate_confine_bytes(value):
+    """V29: a small, whole-sector partition for a known-counterfeit card."""
+    try:
+        size = _validate_size(value)
+    except cv.Invalid:
+        raise
+    if size <= 0:
+        raise cv.Invalid(f"'{CONF_CONFINE_BYTES}' must be greater than zero")
+    if size % CONFINE_SECTOR_BYTES != 0:
+        raise cv.Invalid(
+            f"'{CONF_CONFINE_BYTES}' must be a multiple of {CONFINE_SECTOR_BYTES} bytes "
+            f"(got {size})"
+        )
+    if not CONFINE_MIN_BYTES <= size <= CONFINE_MAX_BYTES:
+        raise cv.Invalid(
+            f"'{CONF_CONFINE_BYTES}' must be between {CONFINE_MIN_BYTES} and "
+            f"{CONFINE_MAX_BYTES} bytes (got {size})"
+        )
+    return size
 
 
 # V23: the time bound on rotation. The floor keeps the writer from sealing chunks
@@ -727,6 +758,9 @@ CONFIG_SCHEMA = cv.All(
             # is the one path that has never fired on hardware (design §4). Absent
             # is size-only, i.e. exactly today's behaviour.
             cv.Optional(CONF_MAX_FILE_SECONDS): _validate_max_file_seconds,
+            # V29: absent preserves today's full-volume behaviour. Present is a
+            # compile-time constant so an external component needs no core edit.
+            cv.Optional(CONF_CONFINE_BYTES): _validate_confine_bytes,
             cv.Optional(CONF_FORMAT_IF_MOUNT_FAILED, default=False): cv.boolean,
             cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
             cv.Optional(CONF_ORIGIN): cv.string,
@@ -1066,6 +1100,8 @@ async def to_code(config):
     cg.add(var.set_sync_interval(config[CONF_SYNC_INTERVAL].total_milliseconds))
     cg.add(var.set_max_file_size(config[CONF_MAX_FILE_SIZE]))
     cg.add(var.set_format_if_mount_failed(config[CONF_FORMAT_IF_MOUNT_FAILED]))
+    if (confine_bytes := config.get(CONF_CONFINE_BYTES)) is not None:
+        cg.add_define("SD_LOG_CONFINE_BYTES", confine_bytes)
     if (origin := config.get(CONF_ORIGIN)) is not None:
         cg.add(var.set_origin(origin))
     if (time_id := config.get(CONF_TIME_ID)) is not None:
@@ -1269,4 +1305,23 @@ async def log_action_to_code(config, action_id, template_arg, args):
         cg.add(var.set_data_template(template_))
     else:
         cg.add(var.set_data_static(data))
+    return var
+
+
+@automation.register_action(
+    "sd_logger.confine_format",
+    ConfineFormatAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(SdLogger),
+            cv.Required(CONF_CONFIRMATION): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def confine_format_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    confirmation = await cg.templatable(config[CONF_CONFIRMATION], args, cg.std_string)
+    cg.add(var.set_confirmation(confirmation))
     return var

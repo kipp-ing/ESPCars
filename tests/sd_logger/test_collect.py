@@ -403,6 +403,7 @@ class FakeDevice:
             "index_refused": 0,
             "mounted": True,
             "degraded": False,
+            "capacity": "healthy",
             "records": 0,
             "dropped": 0,
             "card_dropped": 0,
@@ -537,6 +538,7 @@ def test_the_fake_device_serves_the_complete_status_contract(device: FakeDevice)
         "index_refused",
         "mounted",
         "degraded",
+        "capacity",
         "records",
         "dropped",
         "card_dropped",
@@ -548,6 +550,7 @@ def test_the_fake_device_serves_the_complete_status_contract(device: FakeDevice)
     }
     assert payload["mounted"] is True
     assert payload["degraded"] is False
+    assert payload["capacity"] == "healthy"
 
 
 def test_the_fake_device_can_stumble_on_its_own_index(device: FakeDevice) -> None:

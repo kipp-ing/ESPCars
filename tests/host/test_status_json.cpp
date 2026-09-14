@@ -26,8 +26,9 @@ size_t occurrences(const char *text, const char *needle) {
 }  // namespace
 
 TEST(status_json_has_the_complete_additive_wire_contract) {
-  char body[512];
-  const StatusFields fields{"mr-orange", 3, 2, 41, 7, 9, true, 123, 11, true, false, 17, 19, 23, 29, 31, 37, 41, 43};
+  char body[560];
+  const StatusFields fields{"mr-orange", 3,         2,  41, 7,  9,  true, 123, 11, true,
+                            false,       "healthy", 17, 19, 23, 29, 31,   37,  41, 43};
   const int n = format_status_json(body, sizeof(body), fields);
 
   CHECK(n > 0);
@@ -43,6 +44,7 @@ TEST(status_json_has_the_complete_additive_wire_contract) {
       "\"index_refused\":",
       "\"mounted\":",
       "\"degraded\":",
+      "\"capacity\":",
       "\"records\":",
       "\"dropped\":",
       "\"card_dropped\":",
@@ -56,12 +58,13 @@ TEST(status_json_has_the_complete_additive_wire_contract) {
     CHECK_EQ(occurrences(body, key), 1u);
   CHECK(std::strstr(body, "\"mounted\":true") != nullptr);
   CHECK(std::strstr(body, "\"degraded\":false") != nullptr);
+  CHECK(std::strstr(body, "\"capacity\":\"healthy\"") != nullptr);
   CHECK(std::strstr(body, "\"mounted\":1") == nullptr);
   CHECK(std::strstr(body, "\"degraded\":0") == nullptr);
 }
 
 TEST(status_json_maximum_values_fit_the_status_response_buffer) {
-  char body[512];
+  char body[560];
   const std::string device(39, 'x');  // CollectionServer::device_ reserves one byte for NUL.
   const StatusFields fields{device.c_str(),
                             std::numeric_limits<uint32_t>::max(),
@@ -74,6 +77,7 @@ TEST(status_json_maximum_values_fit_the_status_response_buffer) {
                             std::numeric_limits<uint32_t>::max(),
                             false,
                             true,
+                            "self_test_failed",
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
@@ -84,9 +88,9 @@ TEST(status_json_maximum_values_fit_the_status_response_buffer) {
                             std::numeric_limits<uint32_t>::max()};
   const int n = format_status_json(body, sizeof(body), fields);
 
-  CHECK_EQ(n, 487);
+  CHECK_EQ(n, 517);
   CHECK(static_cast<size_t>(n) < sizeof(body));
-  CHECK_EQ(std::strlen(body), 487u);
+  CHECK_EQ(std::strlen(body), 517u);
   CHECK(std::strstr(body, "\"mounted\":false") != nullptr);
   CHECK(std::strstr(body, "\"degraded\":true") != nullptr);
 }

@@ -24,6 +24,7 @@ struct StatusFields {
   uint32_t index_refused;
   bool mounted;
   bool degraded;
+  const char *capacity;
   uint32_t records;
   uint32_t dropped;
   uint32_t card_dropped;
@@ -48,14 +49,15 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
                   "{\"device\":\"%s\",\"sealed\":%" PRIu32 ",\"confirmed\":%" PRIu32
                   ",\"card_percent\":%s,\"discarded_chunks\":%" PRIu32 ",\"discarded_bytes\":%" PRIu64
                   ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"mounted\":%s,\"degraded\":%s"
+                  ",\"capacity\":\"%s\""
                   ",\"records\":%" PRIu32 ",\"dropped\":%" PRIu32 ",\"card_dropped\":%" PRIu32
                   ",\"write_lost\":%" PRIu32 ",\"tap_shutdown_lost\":%" PRIu32 ",\"tap_accepted\":%" PRIu32
                   ",\"tap_drained\":%" PRIu32 ",\"tap_record_ring_accepted\":%" PRIu32 "}",
                   fields.device, fields.sealed, fields.confirmed, fill_text, fields.discarded_chunks,
                   fields.discarded_bytes, oldest_text, fields.index_refused, fields.mounted ? "true" : "false",
-                  fields.degraded ? "true" : "false", fields.records, fields.dropped, fields.card_dropped,
-                  fields.write_lost, fields.tap_shutdown_lost, fields.tap_accepted, fields.tap_drained,
-                  fields.tap_record_ring_accepted);
+                  fields.degraded ? "true" : "false", fields.capacity, fields.records, fields.dropped,
+                  fields.card_dropped, fields.write_lost, fields.tap_shutdown_lost, fields.tap_accepted,
+                  fields.tap_drained, fields.tap_record_ring_accepted);
 }
 
 }  // namespace sd_logger

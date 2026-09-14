@@ -5,12 +5,18 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
 
+#ifdef USE_SWITCH
+#include "esphome/components/switch/switch.h"
+#endif
+
 #include "card_reset.h"
 #include "collection_policy.h"
 #include "collection_server.h"
 #include "log_format.h"
 #include "log_record.h"
 #include "recovery_policy.h"
+#include "sd_diagnostics.h"
+#include "sd_confine_policy.h"
 #include "utc_anchor.h"
 
 #ifdef USE_SD_LOGGER_CAN_TAP
@@ -19,6 +25,7 @@
 #endif
 
 #include <atomic>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -28,6 +35,7 @@
 #include "freertos/task.h"
 
 #include "esp_timer.h"
+#include "esp_err.h"
 
 // `spi_device_handle_t`, for the raw-SPI helpers the reset and readiness paths share.
 #include "driver/spi_master.h"
@@ -41,6 +49,10 @@ extern "C" {
 
 namespace esphome {
 namespace sd_logger {
+
+#ifdef USE_SWITCH
+class DebugWriterFreezeSwitch;
+#endif
 
 // LogRecord and the REC_FLAG_* bits live in log_record.h, the tap translation in
 // tap_translate.h and the whole of format v1 in log_format.h — all three
@@ -160,6 +172,14 @@ class SdLogger : public Component {
     apply_rotation_bounds_();
   }
   void set_format_if_mount_failed(bool v) { format_if_mount_failed_ = v; }
+#ifdef USE_SWITCH
+  /// Debug-only: request that the writer seal its current chunk and park before
+  /// issuing another card command. The switch publishes only the acknowledged
+  /// state from the writer task, not this request.
+  void set_debug_writer_freeze_requested(bool requested);
+  bool is_debug_writer_frozen() const { return this->debug_writer_frozen_.load(std::memory_order_acquire); }
+  void set_debug_writer_freeze_switch(DebugWriterFreezeSwitch *sw) { this->debug_writer_freeze_switch_ = sw; }
+#endif
   // Chunk collection (design §7). Phase A wires the *policy* — the chunk index, retention and the
   // `#gap` marker; `serve` and `port` belong to the esp_http_server that hands sealed chunks to a
   // puller, which is Phase B. They are recorded rather than dropped so `dump_config` reports what
@@ -205,6 +225,9 @@ class SdLogger : public Component {
     recovery_.configure_reset(enabled, busy_timeout_ms, max_busy_timeout_ms);
   }
   void set_origin(const std::string &origin) { origin_ = origin; }
+  // Explicit destructive action. It rejects every confirmation except ERASE
+  // before it touches the card and is never called from setup/recovery.
+  void confine_format(const std::string &confirmation);
 
   // Called by a time component's on-time-sync callback. It only publishes the
   // correspondence here; the writer task owns block_ and emits the #utc line on
@@ -256,6 +279,9 @@ class SdLogger : public Component {
   // Getters (stats / template sensors)
   bool is_mounted() const { return mounted_; }
   bool identification_degraded() const { return degraded_identification_; }
+  bool capacity_degraded() const { return capacity_state_ != CapacityState::HEALTHY; }
+  bool is_degraded() const { return this->identification_degraded() || this->capacity_degraded(); }
+  const char *capacity_status() const;
   uint32_t get_records_written() const { return records_written_; }
   uint32_t get_dropped_records() const { return dropped_records_; }
   uint32_t get_bytes_written() const { return bytes_written_; }
@@ -337,6 +363,18 @@ class SdLogger : public Component {
     BUSY,         ///< the writer's intent queue is full; retryable
   };
 
+  enum class FsDebugResult : uint8_t {
+    OK,
+    NOT_INDEXED,
+    UNAVAILABLE,
+  };
+
+  enum class RawReadResult : uint8_t {
+    OK,
+    INVALID,
+    UNAVAILABLE,
+  };
+
   uint16_t collection_count() const;
   /// A **copy** of entry `index`, taken under the lock. `false` past the end, which is also how a
   /// walk that dropped the lock between entries discovers that `discard()` compacted the array.
@@ -352,6 +390,20 @@ class SdLogger : public Component {
   /// **Exactly once per successful `collection_begin_serve()`.** Two things ride on the pairing:
   /// the serving flag retention checks, and the in-flight count `unmount_card_()` waits on.
   void collection_end_serve(uint32_t seq);
+  /// Read-only raw FAT32 inspection for `/sdlog/fsdebug`. The caller provides a bounded JSON
+  /// buffer; this never writes, mounts, formats, or repairs the card.
+  FsDebugResult collection_fs_debug(const char *name, char *out, size_t out_size);
+  /// A raw card-read grant with the same unmount gate as fsdebug, but no chunk reservation. The
+  /// matching end call is required after every successful begin, including a socket send failure.
+  RawReadResult collection_begin_raw_read(uint32_t lba, uint32_t count, char *error, size_t error_size);
+  bool collection_raw_read_sector(uint32_t lba, uint8_t *out, char *error, size_t error_size);
+  void collection_end_raw_read();
+  /// A page of the raw FAT chain for an indexed chunk. This is read-only and keeps its chunk
+  /// reservation while walking, so retention cannot rename or discard the directory entry under it.
+  FsDebugResult collection_chain_debug(const char *name, uint32_t from, uint32_t count, char *out, size_t out_size);
+  /// The SDSPI command ring is intentionally lock-free: the reader snapshots it while transactions
+  /// continue, so its tail may be torn rather than ever delaying the card command path.
+  SdSpiTraceRing &collection_sdspi_trace();
   /// The confirm, index-side. Flips SEALED -> CONFIRMED and hands the *rename* to the writer as an
   /// intent, because every filesystem mutation belongs to that task (§8).
   ConfirmResult collection_confirm(uint32_t seq);
@@ -368,6 +420,13 @@ class SdLogger : public Component {
   static void writer_trampoline(void *arg) { static_cast<SdLogger *>(arg)->writer_loop_(); }
   static void monitor_trampoline(void *arg) { static_cast<SdLogger *>(arg)->monitor_loop_(); }
   void writer_loop_();
+#ifdef USE_SWITCH
+  // Cooperatively park at the end of a writer pass. It seals rather than
+  // suspending a task mid-FatFs call, so a frozen card has neither a held
+  // filesystem lock nor a partially buffered record.
+  void debug_freeze_writer_();
+  void publish_debug_writer_frozen_(bool frozen);
+#endif
   void monitor_loop_();
   // Attach the eFuse calibration curve to the VCC channel, or say loudly that there is none.
   void init_vcc_calibration_(adc_channel_t channel);
@@ -379,6 +438,14 @@ class SdLogger : public Component {
   // would do it repeatedly. Only the boot mount honours the option (V21 says so out loud).
   bool mount_card_(bool allow_format);
   void unmount_card_();
+  // Run one card-initialisation attempt, and on the one timeout which can mean a latched ACMD41
+  // handshake, require card_probe_ready() evidence before arming the response mask and retrying.
+  // `cleanup_failed_attempt` releases anything the attempt owns before the raw-SPI probe borrows
+  // the bus; the VFS mount cleans up internally, while confine-format owns an SDSPI device itself.
+  esp_err_t init_card_with_latched_idle_recovery_(esp_err_t (*attempt)(void *), void (*cleanup_failed_attempt)(void *),
+                                                  void *context);
+  bool run_capacity_self_test_(uint64_t *volume_bytes_out);
+  bool logging_permitted_() const { return this->capacity_state_ == CapacityState::HEALTHY; }
   // Talk the card out of an aborted transaction before the next mount, over a raw SPI device on the
   // same four pins at 400 kHz. Runs only between an unmount and a mount, when nothing else owns the
   // bus. Returns what the card said; the mount is attempted regardless, because the reset's own
@@ -657,6 +724,14 @@ class SdLogger : public Component {
   sdmmc_card_t *card_{nullptr};
   TaskHandle_t writer_task_{nullptr};
   TaskHandle_t monitor_task_{nullptr};
+#ifdef USE_SWITCH
+  // Both are runtime-only diagnostics. The switch always starts OFF and its
+  // state is deliberately not restored across a reboot.
+  std::atomic<bool> debug_writer_freeze_requested_{false};
+  std::atomic<bool> debug_writer_frozen_{false};
+  bool debug_reopen_after_freeze_{false};
+  DebugWriterFreezeSwitch *debug_writer_freeze_switch_{nullptr};
+#endif
   // When the previous writer pass started (µs since boot); 0 until the first pass. Writer task
   // only. Feeds the pass-gap warning — the direct measurement of the writer outages §4.3 could
   // only infer from tap-ring burst sizes.
@@ -667,6 +742,14 @@ class SdLogger : public Component {
   // being masked. Worth surfacing rather than hiding: the card is working but has not completed a
   // real initialisation since it last had power, so the next power cycle is still owed to it.
   bool degraded_identification_{false};
+  enum class CapacityState : uint8_t {
+    HEALTHY,
+    VOLUME_TOO_BIG,
+    SELF_TEST_FAILED,
+  };
+  CapacityState capacity_state_{CapacityState::HEALTHY};
+  std::atomic<bool> confine_format_stop_requested_{false};
+  std::atomic<bool> confine_format_in_progress_{false};
 
   // Stats logging
   uint32_t stats_log_interval_ms_{60000};
@@ -702,6 +785,25 @@ class SdLogger : public Component {
 #endif
 };
 
+#ifdef USE_SWITCH
+/// A diagnostic-only control. Its published state is an acknowledgement from
+/// the writer task, not merely the request made by a remote client.
+class DebugWriterFreezeSwitch : public switch_::Switch, public Component, public Parented<SdLogger> {
+ public:
+  void setup() override {
+    // Explicitly ignore every persisted switch value: a reboot must always
+    // bring the logger up able to write.
+    this->parent_->set_debug_writer_freeze_requested(false);
+    this->publish_state(false);
+  }
+
+  void publish_frozen(bool frozen) { this->publish_state(frozen); }
+
+ protected:
+  void write_state(bool state) override { this->parent_->set_debug_writer_freeze_requested(state); }
+};
+#endif
+
 // sd_logger.log action (source S1).
 template<typename... Ts> class LogAction : public Action<Ts...> {
  public:
@@ -726,6 +828,19 @@ template<typename... Ts> class LogAction : public Action<Ts...> {
   uint8_t source_{0};
   std::vector<uint8_t> data_static_;
   optional<std::function<std::vector<uint8_t>(Ts...)>> data_func_;
+};
+
+/// Explicit destructive operation; it has no boot path and only runs when an
+/// automation invokes `sd_logger.confine_format` with confirmation: ERASE.
+template<typename... Ts> class ConfineFormatAction : public Action<Ts...> {
+ public:
+  explicit ConfineFormatAction(SdLogger *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(std::string, confirmation)
+
+  void play(const Ts &...x) override { this->parent_->confine_format(this->confirmation_.value(x...)); }
+
+ protected:
+  SdLogger *parent_;
 };
 
 }  // namespace sd_logger

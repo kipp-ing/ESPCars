@@ -7,7 +7,8 @@
 /// exposes to external components is not contractual, and coupling to it would put this component
 /// one esphome refactor away from needing a core edit.
 ///
-/// Four routes, and the shape of every one of them is fixed by a client that already exists and is
+/// Eight routes: four collection routes whose shape is fixed by a client that already exists and
+/// four read-only SD diagnostics for hardware diagnosis.
 /// already tested — `script/sdlog_collect.py` and the `FakeDevice`/`_Handler` pair in
 /// `tests/sd_logger/test_collect.py`, whose own docstring calls itself "the contract". That is the
 /// hazard this file is written against: those 66 tests stay green whatever the firmware does, so a
@@ -57,16 +58,17 @@ namespace sd_logger {
 class SdLogger;
 
 /// Card -> socket staging buffer, one heap allocation for the life of the server (§5c/§9.6).
+///
 /// Deliberately not a stack local: the httpd task's stack is a few KB and a 4 KB frame in a handler
-/// that also calls into FATFS is how this crashes on the first large chunk.
+/// that also calls into FATFS is unnecessarily risky. The heap buffer is also the precise boundary
+/// between the filesystem and socket paths, which makes it observable during corruption diagnosis.
 static const size_t SD_LOG_SERVE_BLOCK = 4096;
 
-/// The IDF HTTP server task must retain enough headroom for FATFS to follow a cluster link while a
-/// chunk handler is live. A 5 KiB stack happened to cover reads within the first cluster, but the
-/// deeper read path at the 64 KiB cluster boundary overwrote the handler's live state and made the
-/// next socket writes expose unrelated memory. Keep the 4 KiB card/socket buffer on the heap. This
-/// 8 KiB recovery allocation is deliberately provisional: `serve_chunk_()` reports the task's
-/// measured minimum free stack after each completed response, which is the evidence used to size it.
+/// The IDF HTTP server task has 8 KiB of independent headroom. The committed high-water-mark
+/// instrumentation reports 2752 B used after multi-megabyte responses, including reads across the
+/// bad transition, so stack overflow is explicitly not the cause of the old 64 KiB corruption.
+/// Keep the 4 KiB card/socket buffer on the heap; the measurement remains useful evidence if this
+/// task's call graph changes later.
 static const uint32_t SD_LOG_HTTPD_STACK_SIZE = 8192;
 
 /// `SO_SNDTIMEO` on the server's sockets, in whole seconds — `httpd_config_t` takes no finer unit.
@@ -116,16 +118,24 @@ class CollectionServer {
   uint16_t port() const { return this->port_; }
 
  protected:
-  // The four routes. `user_ctx` carries the instance, so these stay ordinary members.
+  // The eight routes. `user_ctx` carries the instance, so these stay ordinary members.
   static esp_err_t index_route_(httpd_req_t *req);
   static esp_err_t chunk_route_(httpd_req_t *req);
   static esp_err_t done_route_(httpd_req_t *req);
   static esp_err_t status_route_(httpd_req_t *req);
+  static esp_err_t fsdebug_route_(httpd_req_t *req);
+  static esp_err_t raw_route_(httpd_req_t *req);
+  static esp_err_t chain_route_(httpd_req_t *req);
+  static esp_err_t spitrace_route_(httpd_req_t *req);
 
   esp_err_t serve_index_(httpd_req_t *req);
   esp_err_t serve_chunk_(httpd_req_t *req);
   esp_err_t serve_done_(httpd_req_t *req);
   esp_err_t serve_status_(httpd_req_t *req);
+  esp_err_t serve_fsdebug_(httpd_req_t *req);
+  esp_err_t serve_raw_(httpd_req_t *req);
+  esp_err_t serve_chain_(httpd_req_t *req);
+  esp_err_t serve_spitrace_(httpd_req_t *req);
 
   /// `httpd_send()` returns a short count like `send()` does, so every raw write loops. `false`
   /// means the peer is gone — the normal end of an abandoned transfer (§10.5), not an error.

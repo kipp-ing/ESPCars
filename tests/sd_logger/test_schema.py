@@ -1,4 +1,4 @@
-"""sd_logger schema tests (V1-V26, plus defaults, size parsing and vcc_monitor).
+"""sd_logger schema tests (V1-V29, plus defaults, size parsing and vcc_monitor).
 
 V1/V8 pins must be distinct.
 V2   clock capped at the SD-over-SPI ceiling (20 MHz) on the C6.
@@ -28,6 +28,7 @@ V23  max_file_seconds is in [1s, 3600s].
 V24  collection.retention_percent is strictly between 1 and 99.
 V25  collection.port must not collide with web_server's (final validate).
 V26  collection.max_chunks is in [16, 2048], defaulting to 256.
+V29  confine_bytes is a whole-sector, small FAT volume size.
 
 V10 is still deferred.
 """
@@ -62,6 +63,7 @@ def test_defaults(set_core_config) -> None:
     assert validated["sync_interval"].total_milliseconds == 2000
     assert validated["max_file_size"] == 16 * 1024 * 1024
     assert validated["format_if_mount_failed"] is False
+    assert "confine_bytes" not in validated
 
 
 def test_pins_are_resolved_to_numbers(set_core_config) -> None:
@@ -203,6 +205,38 @@ def test_max_file_size_too_small_rejected(set_core_config) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid):
         validate(sd_logger(max_file_size="1KB"))
+
+
+# -------------------------------------------------------------------------- V29
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("400MB", 400 * 1024 * 1024),
+        ("450MB", 450 * 1024 * 1024),
+        ("1MB", 1 * 1024 * 1024),
+        (4 * 1024 * 1024, 4 * 1024 * 1024),
+    ],
+)
+def test_v29_confine_bytes_accepts_data_sizes(set_core_config, value, expected: int) -> None:
+    setup_c6(set_core_config)
+    assert validate(sd_logger(confine_bytes=value))["confine_bytes"] == expected
+
+
+@pytest.mark.parametrize(
+    "value", [0, "0B", "-1MB", "5TB", 32 * 1024 * 1024 * 1024 + 512]
+)
+def test_v29_confine_bytes_rejects_zero_negative_and_absurd_sizes(set_core_config, value) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="confine_bytes"):
+        validate(sd_logger(confine_bytes=value))
+
+
+def test_v29_confine_bytes_must_be_a_sector_multiple(set_core_config) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="multiple of 512"):
+        validate(sd_logger(confine_bytes="1048577B"))
 
 
 # ----------------------------------------------------------------- misc schema
