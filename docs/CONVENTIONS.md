@@ -67,17 +67,13 @@ sanitizers. If `.venv` is missing:
   committed: a real vehicle's model/manufacturer name, a compiled factory
   catalog derived from a real vehicle's diagnostic database, real
   reverse-engineered decode tables, real measured telemetry, or an absolute
-  path into a sibling private repo. That data lives under a gitignored
-  `private/` directory local to each bench (`private/catalogs/`,
-  `private/fixtures/`, `private/hil/`, `private/notes/`) — tests and HIL
-  configs that need it look there and skip cleanly (pytest
-  `skipif`/`pytestmark`, or C++ `SKIP_IF` in `tests/host/harness.h`) when it
-  is absent, so a fresh clone and CI both pass without it. A test whose
-  *source*, not just its data, hardcodes real field names/DIDs (not
-  something reusable against `mini`) does not get gated in place — it moves
-  to `private/tests/` or `private/tests_host/` entirely (untracked); copy it
-  back into `tests/uds/` or `tests/host/` locally to run it, per that file's
-  own header comment.
+  path into a sibling private repo. That data lives outside this repo
+  entirely, in the consuming project's own repository — not under a
+  gitignored directory here either. Tests that could use it skip cleanly
+  (pytest `skipif`/`pytestmark`, or C++ `SKIP_IF` in `tests/host/harness.h`)
+  when it is absent, so a fresh clone and CI both pass without it. A test
+  whose *source*, not just its data, hardcodes real field names/DIDs belongs
+  in that consuming project, not here.
   `script/check_no_private_data.py` (run from `script/check.sh`) greps
   tracked files for the known markers of this — extend its pattern list
   rather than silencing a hit.
