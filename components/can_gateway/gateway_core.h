@@ -655,7 +655,8 @@ struct TapRecord {
   uint32_t can_id{0};
   uint8_t data[MAX_FRAME_DATA_LEN]{};
   uint8_t dlc{0};
-  uint8_t flags{0};     ///< bit0 extended, bit1 rtr, bit2 shed (frame was received but not forwarded)
+  uint8_t flags{0};     ///< bit0 extended, bit1 rtr, bit2 shed (received but not forwarded), bit3 tx
+                        ///< (this node transmitted)
   uint8_t source{0};    ///< producer id: gateway port index for S2, or a linbus/user id (S1/S3)
   uint8_t reserved{0};  ///< pad the trailing byte quartet out; keeps the struct 4-byte aligned
 };
@@ -666,8 +667,9 @@ static_assert(sizeof(TapRecord) == 20, "TapRecord must stay a compact 20 bytes")
 static constexpr uint8_t TAP_FLAG_EXTENDED = 0x01;
 static constexpr uint8_t TAP_FLAG_RTR = 0x02;
 static constexpr uint8_t TAP_FLAG_SHED = 0x04;
+static constexpr uint8_t TAP_FLAG_TX = 0x08;
 
-/// Single-producer (RX ISR) / single-consumer (loop) bounded FIFO of frame records (A13).
+/// Single-producer / single-consumer bounded FIFO of frame records (A13).
 ///
 /// Unlike SnapshotRing (keep-newest, for a debug sensor), this preserves arrival order and sheds
 /// the NEWEST record on overflow (B22): a stalled loop must never build an unbounded backlog of
@@ -677,6 +679,9 @@ static constexpr uint8_t TAP_FLAG_SHED = 0x04;
 /// unsigned subtraction never wraps meaningfully).
 /// RecordT is templated so the datalogger tap (TapRecord) reuses this exact queue rather than
 /// growing a second copy of a concurrency contract that took a real-thread host test to get right.
+/// Each instance has exactly one producer: the RX ISR uses one instance and the TX-completion ISR
+/// uses another. Sharing an instance between those ISRs would tear records: push() deliberately
+/// makes its slot write and tail publication a single-producer operation.
 /// It defaults to FrameRecord, so every existing ObserveRing<N> is unchanged.
 template<uint16_t N, typename RecordT = FrameRecord> class ObserveRing {
   static_assert(N >= 2, "observation ring needs at least two slots");

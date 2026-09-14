@@ -19,6 +19,9 @@ sd_logger:
   buffer_depth: 2048
   sync_interval: 2s
   max_file_size: 16MB
+  # V29: a compile-time safety cap; it never repartitions automatically. The
+  # one-shot action below is the only destructive path and is not invoked here.
+  confine_bytes: 400MB
   # M6: rotation is bounded by time as well as size, whichever fires first. An
   # OPEN file is never servable, so without this a quiet bus traps the newest
   # records indefinitely (docs/sdlog-collection-design.md §4). 1-4 MB chunks are
@@ -93,6 +96,12 @@ sd_logger:
   statistics:
     log_interval: 10s
 
+switch:
+  - platform: sd_logger
+    id: sdlog_debug_writer_freeze
+    name: SD logger debug writer freeze
+    sd_logger_id: sd_log
+
 # V22: a `collection:` block is a server reached over WiFi, so the config must
 # actually bring WiFi up. Placeholder credentials — this target is compiled, never
 # flashed; the bench configs under tests/hil/ carry the real ones.
@@ -117,3 +126,13 @@ interval:
       - sd_logger.log:
           can_id: 0x3B0
           data: !lambda "return {(uint8_t)(millis() & 0xFF)};"
+
+# Compiles the explicit action without scheduling it. A caller must invoke this
+# script manually and must supply the exact confirmation string ERASE.
+script:
+  - id: sdlog_confine_format_manual
+    mode: single
+    then:
+      - sd_logger.confine_format:
+          id: sd_log
+          confirmation: ERASE

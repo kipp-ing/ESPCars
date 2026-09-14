@@ -156,6 +156,10 @@ bool GatewayPort::start_(GatewayRoute *route_out, const std::atomic<bool> *gatew
   if (this->log_tap_enabled_) {
     this->log_tap_ring_ =
         new ObserveRing<CAN_GATEWAY_LOG_TAP_DEPTH, TapRecord>();  // NOLINT(cppcoreguidelines-owning-memory)
+    if (this->log_tap_tx_) {
+      this->log_tap_tx_ring_ =
+          new ObserveRing<CAN_GATEWAY_LOG_TAP_TX_DEPTH, TapRecord>();  // NOLINT(cppcoreguidelines-owning-memory)
+    }
     // A tapped port must not let the hardware filter drop frames the log wants,
     // for the same reason observation must not (B25).
     if (route_out != nullptr)
@@ -329,8 +333,9 @@ bool GatewayPort::inject(uint32_t can_id, bool extended, bool rtr, const uint8_t
   }
   // A failed hand-off logs a throttled warning and counts nothing.
   uint32_t now = millis();
-  if (now - this->last_inject_warn_ms_ >= 1000) {
-    this->last_inject_warn_ms_ = now;
+  uint32_t last_warn = this->last_inject_warn_ms_.load(std::memory_order_relaxed);
+  if (now - last_warn >= 1000 &&
+      this->last_inject_warn_ms_.compare_exchange_strong(last_warn, now, std::memory_order_relaxed)) {
     ESP_LOGW(TAG, "Port %u: inject failed (%s)", this->index_, fail_reason);
   }
   return false;
@@ -581,23 +586,24 @@ void GatewayPort::log_id_timings_step_() {
 void IRAM_ATTR GatewayPort::handle_rx_isr() {
   GatewayRoute *route = this->route_out_;
   if (route == nullptr) {
-    // No outbound route. A port with an observation consumer receives into its
-    // static staging frame and delivers it (A12/B20), and a tapped port is a
-    // consumer the same way: the datalogger drains the ring, so the frame must
-    // be retrieved even though nothing routes, decodes or triggers on this
-    // port. Found on the bench as a port with only `log_tap: true` that never
-    // received a frame — bus load 0.0 % against a live, several-hundred-
-    // frames/s sender, because leaving the frame to the driver also skips
-    // run_rx_taps_() (private/notes/HANDOVER-guest-bms.md §8). A true
-    // destination-only port has neither ring and lets the driver discard the
-    // frame (v0.5 behavior).
-#if defined(USE_CAN_GATEWAY_OBSERVE) || defined(USE_CAN_GATEWAY_LOG_TAP)
+    // No outbound route. Any RX consumer — direct ISR hook, observation ring
+    // (A12/B20), or datalogger tap — receives into the static staging frame,
+    // even though nothing routes, decodes or triggers on this port. Found on
+    // the bench as a port with only `log_tap: true` that never received a
+    // frame — bus load 0.0 % against a live, several-hundred-frames/s sender,
+    // because leaving the frame to the driver also skips run_rx_taps_()
+    // (private/notes/HANDOVER-guest-bms.md §8). A true destination-only port
+    // has no consumer and lets the driver discard the frame (v0.5 behavior).
+#if defined(USE_CAN_GATEWAY_OBSERVE) || defined(USE_CAN_GATEWAY_LOG_TAP) || defined(USE_CAN_GATEWAY_ISR_HOOK)
     bool armed = false;
 #ifdef USE_CAN_GATEWAY_OBSERVE
     armed = this->observe_ring_ != nullptr;
 #endif
 #ifdef USE_CAN_GATEWAY_LOG_TAP
     armed = armed || this->log_tap_ring_ != nullptr;
+#endif
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+    armed = armed || this->isr_frame_hook_ != nullptr;
 #endif
     if (armed)
       this->receive_into_staging_();
@@ -759,6 +765,30 @@ void IRAM_ATTR GatewayPort::tap_shed_frame_() {
 void IRAM_ATTR GatewayPort::handle_tx_done_isr(const twai_tx_done_event_data_t *edata) {
   if (!edata->is_tx_success)
     count(this->counters_.tx_fail);
+#ifdef USE_CAN_GATEWAY_LOG_TAP
+  // Tap only frames that reached the bus. A failed arbitration or ACK must not
+  // become a log line claiming it transmitted; tx_fail is the evidence of it.
+  // This must stay before outstanding_.complete(): done_tx_frame aliases the
+  // TxSlot that completion returns to the pool.
+  if (this->log_tap_tx_ring_ != nullptr && edata->is_tx_success) {
+    const auto &tx_header = edata->done_tx_frame->header;
+    const uint8_t tx_dlc =
+        tx_header.dlc > MAX_FRAME_DATA_LEN ? MAX_FRAME_DATA_LEN : static_cast<uint8_t>(tx_header.dlc);
+    TapRecord record;
+    record.t_us = static_cast<uint32_t>(esp_timer_get_time());
+    record.can_id = tx_header.id;
+    record.dlc = tx_dlc;
+    record.flags = static_cast<uint8_t>(TAP_FLAG_TX | (tx_header.ide ? TAP_FLAG_EXTENDED : 0) |
+                                        (tx_header.rtr ? TAP_FLAG_RTR : 0));
+    record.source = this->index_;
+    if (edata->done_tx_frame->buffer != nullptr && !tx_header.rtr && tx_dlc != 0)
+      std::memcpy(record.data, edata->done_tx_frame->buffer, tx_dlc);
+    if (this->log_tap_tx_ring_->push(record))
+      this->log_tap_tx_accepted_.fetch_add(1, std::memory_order_relaxed);
+    else
+      this->log_tap_dropped_.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif
 #ifdef USE_CAN_GATEWAY_STATS
   // Our own transmissions occupy this port's bus too.
   const auto &tx_header = edata->done_tx_frame->header;

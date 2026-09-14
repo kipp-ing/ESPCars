@@ -19,6 +19,7 @@
 
 #include "harness.h"
 #include "log_format.h"
+#include "utc_anchor.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -30,15 +31,19 @@ using esphome::sd_logger::copy_log_payload;
 using esphome::sd_logger::DeltaClock;
 using esphome::sd_logger::format_close;
 using esphome::sd_logger::format_drop;
+using esphome::sd_logger::drop_marker_due;
+using esphome::sd_logger::UnflushedRecordTracker;
 using esphome::sd_logger::format_flags_legend;
 using esphome::sd_logger::format_gap;
 using esphome::sd_logger::format_header;
 using esphome::sd_logger::format_log_name;
+using esphome::sd_logger::format_origin;
 using esphome::sd_logger::format_pad;
 using esphome::sd_logger::format_rotate;
 using esphome::sd_logger::format_src;
 using esphome::sd_logger::format_src_num;
 using esphome::sd_logger::format_types;
+using esphome::sd_logger::format_utc;
 using esphome::sd_logger::KIND_CAN;
 using esphome::sd_logger::KIND_LIN;
 using esphome::sd_logger::KIND_USER;
@@ -58,6 +63,8 @@ using esphome::sd_logger::SD_LOG_RESYNC_US;
 using esphome::sd_logger::SD_LOG_SECTOR;
 using esphome::sd_logger::SD_LOG_TRUNCATED_MARK;
 using esphome::sd_logger::SourceTable;
+using esphome::sd_logger::UtcAnchor;
+using esphome::sd_logger::resolve_utc_us;
 
 namespace {
 
@@ -114,9 +121,8 @@ void check_single_trailing_newline(const std::string &text, const char *what) {
     return;
   CHECK_MSG(text.back() == '\n', std::string(what) + ": line does not end with a newline");
   const size_t first = text.find('\n');
-  CHECK_MSG(first == text.size() - 1,
-            std::string(what) + ": bare newline at offset " + std::to_string(first) + " of " +
-                std::to_string(text.size()));
+  CHECK_MSG(first == text.size() - 1, std::string(what) + ": bare newline at offset " + std::to_string(first) + " of " +
+                                          std::to_string(text.size()));
 }
 
 }  // namespace
@@ -158,6 +164,10 @@ TEST(text_line_is_the_documented_shape) {
 TEST(meta_lines_are_the_documented_shapes) {
   CHECK_EQ(line([](char *b, size_t r) { return format_header(b, r, 7, 412000, "2026.7.0"); }),
            std::string("#sdlog,2,7,@64960,2026.7.0\n"));
+  CHECK_EQ(line([](char *b, size_t r) { return format_utc(b, r, 0x1'0000'0003ull, 0x6543210FEDCBAull); }),
+           std::string("#utc,100000003,6543210FEDCBA\n"));
+  CHECK_EQ(line([](char *b, size_t r) { return format_origin(b, r, "SEV Mr. Orange"); }),
+           std::string("#origin,SEV Mr. Orange\n"));
   CHECK_EQ(line([](char *b, size_t r) { return format_src_num(b, r, KIND_CAN, "seg1", 1, "can_gateway", 500000); }),
            std::string("#src,C,seg1,1,can_gateway,500000\n"));
   CHECK_EQ(line([](char *b, size_t r) { return format_src(b, r, KIND_USER, "act", 0, "action", nullptr); }),
@@ -170,6 +180,27 @@ TEST(meta_lines_are_the_documented_shapes) {
            std::string("#rotate,@7A120,L0000008.LOG\n"));
   CHECK_EQ(line([](char *b, size_t r) { return format_close(b, r, 999120, "emergency"); }),
            std::string("#close,@F3ED0,emergency\n"));
+}
+
+TEST(utc_anchor_resolution_is_optional_and_tracks_resyncs) {
+  UtcAnchor anchor;
+  uint64_t utc = 0;
+  CHECK(!resolve_utc_us(anchor, 100, &utc));  // no sync is normal
+
+  anchor = {1'700'000'000'000'000ull, 5'000'000ull, true};
+  CHECK(resolve_utc_us(anchor, 5'123'456ull, &utc));
+  CHECK_EQ(utc, 1'700'000'000'123'456ull);
+
+  anchor = {1'700'000'100'000'000ull, 7'000'000ull, true};
+  CHECK(resolve_utc_us(anchor, 7'000'100ull, &utc));
+  CHECK_EQ(utc, 1'700'000'100'000'100ull);
+}
+
+TEST(utc_anchor_uses_the_full_boot_clock_across_the_32_bit_wrap) {
+  UtcAnchor anchor{1'700'000'000'000'000ull, 0xFFFF'FFF0ull, true};
+  uint64_t utc = 0;
+  CHECK(resolve_utc_us(anchor, 0x1'0000'0010ull, &utc));
+  CHECK_EQ(utc, 1'700'000'000'000'032ull);
 }
 
 TEST(the_legend_lines_name_every_type_and_flag_letter) {
@@ -266,7 +297,9 @@ TEST(never_a_bare_newline_under_adversarial_payloads) {
       {"tab\there", 8, "embedded TAB"},
       {"back\\slash", 10, "backslash"},
       {"esc\x1B[0mreset", 12, "bare ANSI reset"},
-      {"del\x7F" "char", 8, "DEL"},
+      {"del\x7F"
+       "char",
+       8, "DEL"},
       {"bell\x07here", 9, "BEL"},
       {embedded_nul, sizeof(embedded_nul) - 1, "embedded NUL"},
       {"comma,in,message", 16, "commas"},
@@ -444,13 +477,13 @@ TEST(reconstruct_us_never_reports_a_time_wildly_far_from_the_sample) {
   for (uint64_t now : samples) {
     for (uint32_t t32 : stamps) {
       const uint64_t got = reconstruct_us(now, t32);
-      CHECK_MSG(got <= now + bound, "reconstruct_us(" + std::to_string(now) + ", " + std::to_string(t32) + ") = " +
-                                        std::to_string(got) + ", which is absurdly far in the future");
+      CHECK_MSG(got <= now + bound, "reconstruct_us(" + std::to_string(now) + ", " + std::to_string(t32) +
+                                        ") = " + std::to_string(got) + ", which is absurdly far in the future");
       if (now < bound)
         continue;  // a stamp older than the clock itself is unreachable; see the saturation case
       if (got < now)
-        CHECK_MSG(now - got <= bound, "reconstruct_us(" + std::to_string(now) + ", " + std::to_string(t32) + ") = " +
-                                          std::to_string(got) + ", which is absurdly far in the past");
+        CHECK_MSG(now - got <= bound, "reconstruct_us(" + std::to_string(now) + ", " + std::to_string(t32) +
+                                          ") = " + std::to_string(got) + ", which is absurdly far in the past");
       CHECK_EQ_MSG(static_cast<uint32_t>(got), t32, "low word must always be the record's own stamp");
     }
   }
@@ -852,7 +885,7 @@ TEST(the_boot_scan_rejects_everything_that_is_not_a_log_file) {
   uint32_t seq = 0xDEADBEEF;
   const char *rejects[] = {"",
                            "L.LOG",
-                           "L000000.LOG",   // six digits
+                           "L000000.LOG",    // six digits
                            "L00000007.LOG",  // eight digits
                            "L0000007.TXT",
                            "L0000007LOG",
@@ -1106,4 +1139,36 @@ TEST(a_gap_line_refuses_a_buffer_too_small_for_any_line) {
   CHECK_EQ(gap_golden(buf, sizeof(buf)), 0u);
   for (char c : buf)
     CHECK_EQ(static_cast<unsigned char>(c), 0xEEu);
+}
+
+// ---------------------------------------------------------------------------
+// Writer-failure accounting
+// ---------------------------------------------------------------------------
+
+TEST(unflushed_frame_records_survive_partial_write_accounting_until_their_line_finishes) {
+  // Simulated write failure: the first line reached the card, the second only half did. The
+  // tracker must retain that second record for enter_failed_() to count; resetting a plain counter
+  // on the partial write is precisely how a torn record previously disappeared from accounting.
+  UnflushedRecordTracker pending;
+  pending.commit_record(20);
+  pending.commit_record(45);
+  pending.commit_record(70);
+  pending.consume(20);
+  CHECK_EQ(pending.count(), 2u);
+  pending.consume(15);  // partial second line: it remains a loss if the next write fails
+  CHECK_EQ(pending.count(), 2u);
+  pending.consume(10);  // second line is now complete
+  CHECK_EQ(pending.count(), 1u);
+  pending.reset();  // enter_failed_() has counted the remaining record before resetting block_
+  CHECK_EQ(pending.count(), 0u);
+}
+
+TEST(drop_marker_baseline_survives_a_simulated_outage) {
+  // A recovered file must compare against the marker written before the outage, not reset to the
+  // current value at header time. That makes the three losses incurred while no file was writable
+  // appear as one `#drop` in the first recovered file.
+  uint32_t delta = 0;
+  CHECK_EQ(drop_marker_due(17, 14, &delta), true);
+  CHECK_EQ(delta, 3u);
+  CHECK_EQ(drop_marker_due(17, 17, &delta), false);
 }
