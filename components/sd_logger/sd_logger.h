@@ -473,6 +473,9 @@ class SdLogger : public Component {
   // **Writer task only** — §8 gives every filesystem mutation to the writer, and an unlink from
   // loop() would race the remount that card recovery runs on exactly this card.
   void retention_pass_();
+  bool reclaim_index_pressure_slot_();
+  bool discard_reserved_chunk_(uint32_t seq, uint64_t bytes, ChunkState state, const char *reason, uint8_t fill_percent,
+                               bool have_fill);
 #endif
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
   // Execute the confirms the httpd task posted: `.LOG` -> `.UPL`, on the writer task, for the same

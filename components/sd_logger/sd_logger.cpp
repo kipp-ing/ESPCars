@@ -24,6 +24,7 @@ extern "C" {
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "esp_vfs_fat.h"
 #include "diskio_sdmmc.h"
 #include "diskio_impl.h"  // ff_diskio_get_drive / ff_diskio_unregister: IDF exposes these from the fatfs "diskio" include dir
@@ -117,6 +118,30 @@ static const size_t FAT_PARTITION_ENTRY_BYTES = 16;
 static const size_t FAT_PARTITION_COUNT = 4;
 static const uint32_t CONFINE_FORMAT_WRITER_STOP_MS = 8000;
 static const size_t CONFINE_FORMAT_WORKBUF_BYTES = 4096;
+
+class ScopedTaskWatchdogPause {
+ public:
+  ScopedTaskWatchdogPause() : task_(xTaskGetCurrentTaskHandle()) {
+    if (this->task_ != nullptr && esp_task_wdt_status(this->task_) == ESP_OK) {
+      this->paused_ = esp_task_wdt_delete(this->task_) == ESP_OK;
+      if (this->paused_)
+        vTaskDelay(1);
+    }
+  }
+  ~ScopedTaskWatchdogPause() {
+    if (this->paused_) {
+      esp_task_wdt_add(this->task_);
+      esp_task_wdt_reset();
+      vTaskDelay(1);
+    }
+  }
+  ScopedTaskWatchdogPause(const ScopedTaskWatchdogPause &) = delete;
+  ScopedTaskWatchdogPause &operator=(const ScopedTaskWatchdogPause &) = delete;
+
+ private:
+  TaskHandle_t task_{nullptr};
+  bool paused_{false};
+};
 
 uint16_t read_le16_(const uint8_t *p) { return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8); }
 
@@ -1132,7 +1157,11 @@ void SdLogger::confine_format(const std::string &confirmation) {
   }
   LBA_t plist[4] = {sectors, 0, 0, 0};
   ESP_LOGI(TAG, "confine format: card initialized; partitioning %" PRIu32 " sectors", sectors);
-  FRESULT result = f_fdisk(pdrv, plist, workbuf);
+  FRESULT result;
+  {
+    ScopedTaskWatchdogPause wdt_pause;
+    result = f_fdisk(pdrv, plist, workbuf);
+  }
   if (result != FR_OK) {
     ESP_LOGE(TAG, "confine format failed at f_fdisk: %d", static_cast<int>(result));
     std::free(workbuf);
@@ -1170,7 +1199,10 @@ void SdLogger::confine_format(const std::string &confirmation) {
                                        : (requested_au > maximum_au ? maximum_au : requested_au);
   const MKFS_PARM options = {(BYTE) FM_ANY, 2, 0, 0, allocation_unit};
   ESP_LOGI(TAG, "confine format: partition created; formatting");
-  result = f_mkfs(drv, &options, workbuf, CONFINE_FORMAT_WORKBUF_BYTES);
+  {
+    ScopedTaskWatchdogPause wdt_pause;
+    result = f_mkfs(drv, &options, workbuf, CONFINE_FORMAT_WORKBUF_BYTES);
+  }
   VolToPart[pdrv] = saved_mapping;
   std::free(workbuf);
   ff_diskio_unregister(pdrv);
@@ -1338,6 +1370,15 @@ bool SdLogger::open_next_file_() {
   // about to overwrite, and a stale `gap_line_end_` carried into a fresh file — whose offsets start
   // again from ~0 — would be satisfied immediately and spend a window whose line was never written.
   this->drop_unflushed_gap_();
+#ifdef USE_SD_LOGGER_COLLECTION
+  bool index_full = false;
+  {
+    IndexLock lock(this->index_mux_);
+    index_full = this->collection_.enabled() && this->collection_.full();
+  }
+  if (index_full)
+    this->reclaim_index_pressure_slot_();
+#endif
   char name[SD_LOG_NAME_LEN];
   format_log_name(name, this->seq_);
   const std::string path = this->mount_point_ + "/" + name;
@@ -1373,16 +1414,23 @@ bool SdLogger::open_next_file_() {
     tracked = this->collection_.add(this->seq_, this->file_bytes_, ChunkState::OPEN);
     held = this->collection_.count();
   }
+#ifdef USE_SD_LOGGER_COLLECTION
+  if (!tracked && held >= SD_LOG_MAX_CHUNKS && this->reclaim_index_pressure_slot_()) {
+    IndexLock lock(this->index_mux_);
+    tracked = this->collection_.add(this->seq_, this->file_bytes_, ChunkState::OPEN);
+    held = this->collection_.count();
+  }
+#endif
   if (!tracked) {
     // The counter is the part a bench run can actually see: this warning is printed once per
     // rotation and a run that scrolls looks identical to a healthy one, which is exactly how a
     // 12-minute soak came back with 29 rotations and an index that was full at the first of them.
     // `index_refused=` in the periodic stats line is the same fact, standing still where it can be
-    // read. Raise `collection: max_chunks:` when it moves.
+    // read. Raise `collection: max_chunks:` or shorten the unconfirmed stretch when it moves.
     this->index_refused_.fetch_add(1, std::memory_order_relaxed);
     ESP_LOGW(TAG,
              "chunk index full (%u of %u entries): L%07" PRIu32 " is untracked, so retention cannot reclaim it "
-             "(raise collection.max_chunks; %" PRIu32 " refused so far)",
+             "(raise collection.max_chunks or collect sooner; %" PRIu32 " refused so far)",
              held, static_cast<unsigned>(SD_LOG_MAX_CHUNKS), this->seq_,
              this->index_refused_.load(std::memory_order_relaxed));
   }
@@ -2385,6 +2433,109 @@ uint32_t SdLogger::get_tap_record_ring_accepted_records() const { return 0; }
 #endif
 
 #ifdef USE_SD_LOGGER_COLLECTION
+bool SdLogger::discard_reserved_chunk_(uint32_t seq, uint64_t bytes, ChunkState state, const char *reason,
+                                       uint8_t fill_percent, bool have_fill) {
+  char name[SD_LOG_NAME_LEN];
+  format_chunk_name(name, seq, state);
+  const bool never_collected = state == ChunkState::SEALED;
+  const std::string path = this->mount_point_ + "/" + name;
+  // The result is captured rather than re-read off `errno`, which a *successful* unlink leaves
+  // untouched at whatever the last failing call set it to.
+  errno = 0;
+  const bool unlinked = unlink(path.c_str()) == 0;
+  const int unlink_errno = errno;
+  if (!unlinked && unlink_errno != ENOENT) {
+    // Left tracked on purpose. The file is still there, and an index that forgets a file that
+    // exists is the one failure retention cannot recover from — that chunk would then never be
+    // listed, never served and never deleted while the card fills behind it. The next pass retries.
+    // The reservation goes back first: a chunk left flagged is a chunk `next_victim()` walks past
+    // forever *and* one no transfer can ever be granted for — the file would be stranded in both
+    // directions by a failure that only means "not this pass".
+    IndexLock lock(this->index_mux_);
+    this->collection_.clear_serving(seq);
+    ESP_LOGW(TAG, "%s: unlink %s failed (errno %d)", reason, path.c_str(), unlink_errno);
+    return false;
+  }
+#ifdef USE_SD_LOGGER_COLLECTION_SERVER
+  if (!never_collected && !unlinked) {
+    // The entry is CONFIRMED but its `.UPL` is not there — which happens exactly when a confirm's
+    // rename failed for something other than ENOENT and drain_confirms_() logged it and moved on.
+    // The `.LOG` file is then still on the card under a name nothing tracks any more, so reclaim it
+    // here: the collector already has these bytes, which is what CONFIRMED means.
+    char sealed_name[SD_LOG_NAME_LEN];
+    format_chunk_name(sealed_name, seq, ChunkState::SEALED);
+    const std::string sealed_path = this->mount_point_ + "/" + sealed_name;
+    if (unlink(sealed_path.c_str()) == 0)
+      ESP_LOGW(TAG, "%s: %s was never renamed; reclaimed it as %s", reason, name, sealed_name);
+  }
+#endif
+  // ENOENT lands here too: the file is gone either way, and an entry naming a file that does not
+  // exist would be chosen again on every pass.
+  //
+  // The reservation is released and the entry dropped in one critical section: `discard()` refuses a
+  // chunk that is still flagged, so clearing it in a separate scope would re-open — for exactly the
+  // width of two lock acquisitions — the window this function was rewritten to close.
+  uint32_t discarded_chunks;
+  uint64_t discarded_bytes;
+  bool dropped;
+  {
+    IndexLock lock(this->index_mux_);
+    this->collection_.clear_serving(seq);
+    dropped = this->collection_.discard(seq);
+    discarded_chunks = this->collection_.discarded_chunks();
+    discarded_bytes = this->collection_.discarded_bytes();
+  }
+  // Mirrored out of the index rather than read from it: the index belongs to this task (§8) and the
+  // stats line runs on the main loop. Unconditional, because `discard()` bills only never-collected
+  // chunks — deleting a CONFIRMED one leaves both totals exactly where they were.
+  this->discarded_chunks_.store(discarded_chunks, std::memory_order_relaxed);
+  this->discarded_kib_.store(static_cast<uint32_t>(discarded_bytes / 1024), std::memory_order_relaxed);
+  if (!dropped) {
+    // The file is gone but the entry was not the writer's to drop — `discard()` refuses an unknown
+    // seq and the OPEN chunk. Neither is reachable from a reserved victim on this task, so if this
+    // ever prints, the index and the card have disagreed about what was deleted and the console is
+    // the only place that will say so. Said once, and **not** as a discard: the lines below claim
+    // `#gap` accounting that did not happen, which is precisely the over-reporting design §7a exists
+    // to prevent — a console that bills a loss twice (once when the discard was refused, again when
+    // it finally took) sends someone hunting for files that are not missing.
+    ESP_LOGW(TAG, "%s: unlinked %s but the index would not drop it", reason, name);
+  } else if (never_collected) {
+    if (have_fill) {
+      ESP_LOGW(TAG, "%s: card %u%% full — discarded %s, %" PRIu32 " KB never collected (total %" PRIu32 ")",
+               reason, fill_percent, name, static_cast<uint32_t>(bytes / 1024), discarded_chunks);
+    } else {
+      ESP_LOGW(TAG, "%s: discarded %s, %" PRIu32 " KB never collected (total %" PRIu32 ")", reason, name,
+               static_cast<uint32_t>(bytes / 1024), discarded_chunks);
+    }
+  } else {
+    if (have_fill)
+      ESP_LOGI(TAG, "%s: card %u%% full — deleted collected %s", reason, fill_percent, name);
+    else
+      ESP_LOGI(TAG, "%s: deleted collected %s", reason, name);
+  }
+  return dropped;
+}
+
+bool SdLogger::reclaim_index_pressure_slot_() {
+  uint32_t seq = 0;
+  uint64_t bytes = 0;
+  ChunkState state = ChunkState::NONE;
+  {
+    IndexLock lock(this->index_mux_);
+    const ChunkEntry *victim = this->collection_.index_pressure_victim();
+    if (victim == nullptr)
+      return false;
+    seq = victim->seq;
+    bytes = victim->bytes;
+    state = victim->state;
+    // The index-pressure victim is CONFIRMED and `index_pressure_victim()` skipped serving chunks, so
+    // this cannot take data the collector has not acknowledged and cannot steal an in-flight transfer.
+    if (!this->collection_.mark_serving(seq))
+      return false;
+  }
+  return this->discard_reserved_chunk_(seq, bytes, state, "retention: index pressure", 0, false);
+}
+
 void SdLogger::retention_pass_() {
   // "Store everything all the time" is bounded by collection, and this is what happens when
   // collection does not keep up (design §7): above the fill threshold the card becomes a circular
@@ -2443,9 +2594,7 @@ void SdLogger::retention_pass_() {
   // and a chunk being read are the same state to `next_victim()` for the length of one unlink.
   uint32_t seq = 0;
   uint64_t bytes = 0;
-  bool never_collected = false;
-  bool reserved = false;
-  char name[SD_LOG_NAME_LEN];
+  ChunkState state = ChunkState::NONE;
   {
     IndexLock lock(this->index_mux_);
     const ChunkEntry *victim = this->collection_.next_victim(fill);
@@ -2453,87 +2602,14 @@ void SdLogger::retention_pass_() {
       return;
     seq = victim->seq;
     bytes = victim->bytes;
-    // False once the collection server exists and a puller has confirmed something: a CONFIRMED
-    // chunk is not a gap, because the collector already has it. Without a server this is always
-    // true, which is what makes the `#gap` path soak-testable on a bench with no network — every
-    // retention pass there is a real, never-collected loss.
-    never_collected = victim->state == ChunkState::SEALED;
-    format_chunk_name(name, seq, victim->state);
+    state = victim->state;
     // `next_victim()` already skipped everything serving, so this cannot be stealing a transfer's
-    // chunk; it is claiming one nobody holds. Cleared on **every** path out of here, which is why
-    // the failed-unlink branch below is not a bare `return`.
-    reserved = this->collection_.mark_serving(seq);
+    // chunk; it is claiming one nobody holds. Cleared on **every** path out of
+    // `discard_reserved_chunk_()`, which is why a failed unlink is not a bare return.
+    if (!this->collection_.mark_serving(seq))
+      return;
   }
-  const std::string path = this->mount_point_ + "/" + name;
-  // The result is captured rather than re-read off `errno`, which a *successful* unlink leaves
-  // untouched at whatever the last failing call set it to.
-  errno = 0;
-  const bool unlinked = unlink(path.c_str()) == 0;
-  const int unlink_errno = errno;
-  if (!unlinked && unlink_errno != ENOENT) {
-    // Left tracked on purpose. The file is still there, and an index that forgets a file that
-    // exists is the one failure retention cannot recover from — that chunk would then never be
-    // listed, never served and never deleted while the card fills behind it. The next pass retries.
-    // The reservation goes back first: a chunk left flagged is a chunk `next_victim()` walks past
-    // forever *and* one no transfer can ever be granted for — the file would be stranded in both
-    // directions by a failure that only means "not this pass".
-    if (reserved) {
-      IndexLock lock(this->index_mux_);
-      this->collection_.clear_serving(seq);
-    }
-    ESP_LOGW(TAG, "retention: unlink %s failed (errno %d)", path.c_str(), unlink_errno);
-    return;
-  }
-#ifdef USE_SD_LOGGER_COLLECTION_SERVER
-  if (!never_collected && !unlinked) {
-    // The entry is CONFIRMED but its `.UPL` is not there — which happens exactly when a confirm's
-    // rename failed for something other than ENOENT and drain_confirms_() logged it and moved on.
-    // The `.LOG` file is then still on the card under a name nothing tracks any more, so reclaim it
-    // here: the collector already has these bytes, which is what CONFIRMED means.
-    char sealed_name[SD_LOG_NAME_LEN];
-    format_chunk_name(sealed_name, seq, ChunkState::SEALED);
-    const std::string sealed_path = this->mount_point_ + "/" + sealed_name;
-    if (unlink(sealed_path.c_str()) == 0)
-      ESP_LOGW(TAG, "retention: %s was never renamed; reclaimed it as %s", name, sealed_name);
-  }
-#endif
-  // ENOENT lands here too: the file is gone either way, and an entry naming a file that does not
-  // exist would be chosen again on every pass.
-  //
-  // The reservation is released and the entry dropped in one critical section: `discard()` refuses a
-  // chunk that is still flagged, so clearing it in a separate scope would re-open — for exactly the
-  // width of two lock acquisitions — the window this function was rewritten to close.
-  uint32_t discarded_chunks;
-  uint64_t discarded_bytes;
-  bool billed;
-  {
-    IndexLock lock(this->index_mux_);
-    if (reserved)
-      this->collection_.clear_serving(seq);
-    billed = this->collection_.discard(seq);
-    discarded_chunks = this->collection_.discarded_chunks();
-    discarded_bytes = this->collection_.discarded_bytes();
-  }
-  // Mirrored out of the index rather than read from it: the index belongs to this task (§8) and the
-  // stats line runs on the main loop. Unconditional, because `discard()` bills only never-collected
-  // chunks — deleting a CONFIRMED one leaves both totals exactly where they were.
-  this->discarded_chunks_.store(discarded_chunks, std::memory_order_relaxed);
-  this->discarded_kib_.store(static_cast<uint32_t>(discarded_bytes / 1024), std::memory_order_relaxed);
-  if (!billed) {
-    // The file is gone but the entry was not the writer's to drop — `discard()` refuses an unknown
-    // seq and the OPEN chunk. Neither is reachable from a reserved victim on this task, so if this
-    // ever prints, the index and the card have disagreed about what was deleted and the console is
-    // the only place that will say so. Said once, and **not** as a discard: the lines below claim
-    // `#gap` accounting that did not happen, which is precisely the over-reporting design §7a exists
-    // to prevent — a console that bills a loss twice (once when the discard was refused, again when
-    // it finally took) sends someone hunting for files that are not missing.
-    ESP_LOGW(TAG, "retention: unlinked %s but the index would not drop it", name);
-  } else if (never_collected) {
-    ESP_LOGW(TAG, "retention: card %u%% full — discarded %s, %" PRIu32 " KB never collected (total %" PRIu32 ")", fill,
-             name, static_cast<uint32_t>(bytes / 1024), discarded_chunks);
-  } else {
-    ESP_LOGI(TAG, "retention: card %u%% full — deleted collected %s", fill, name);
-  }
+  this->discard_reserved_chunk_(seq, bytes, state, "retention", fill, true);
 }
 #endif
 
@@ -3323,8 +3399,8 @@ void SdLogger::loop() {
   //
   // `index_refused` is not a drop at all and sits next to `file=` for that reason: no record was
   // lost, but that many chunks are on the card outside the index, so retention will never reclaim
-  // them and the card fills with the writer reporting a clean run. It is the only counter here that
-  // a healthy build fixes from the *config* (`collection: max_chunks:`) rather than from throughput.
+  // them and the card fills with the writer reporting a clean run. It is fixed by more index
+  // capacity or by confirming chunks sooner, not by writer throughput.
 #ifdef USE_SD_LOGGER_CAN_TAP
   ESP_LOGI(TAG,
            "records=%" PRIu32 " dropped=%" PRIu32 " tap_dropped=%" PRIu32 " text_dropped=%" PRIu32

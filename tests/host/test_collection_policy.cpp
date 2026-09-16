@@ -416,6 +416,89 @@ TEST(collection_a_full_index_recovers_when_one_chunk_is_discarded) {
   CHECK_EQ(policy.discarded_chunks(), 1u);  // the loss was billed once, and only once
 }
 
+TEST(collection_index_pressure_reclaims_one_confirmed_chunk_and_add_retries) {
+  CollectionPolicy policy = make_policy(90);
+  for (uint32_t i = 0; i < CAP; i++)
+    CHECK_MSG(policy.add(i, 1000 + i, ChunkState::SEALED), std::to_string(i));
+  CHECK(policy.confirm(9));
+  CHECK(policy.confirm(3));
+  CHECK(policy.full());
+  CHECK(!policy.add(CAP, 1, ChunkState::OPEN));
+
+  const ChunkEntry *victim = policy.index_pressure_victim();
+  CHECK_EQ(seq_of(victim), 3u);
+  CHECK_EQ(state_of(victim), ChunkState::CONFIRMED);
+  CHECK(policy.mark_serving(victim->seq));
+  policy.clear_serving(victim->seq);
+  CHECK(policy.discard(victim->seq));
+  CHECK_EQ(policy.count(), CAP - 1);
+  CHECK(policy.find(3) == nullptr);
+  CHECK(policy.find(9) != nullptr);
+
+  CHECK(policy.add(CAP, 4096, ChunkState::OPEN));
+  CHECK(policy.full());
+  CHECK_EQ(seq_of(policy.at(static_cast<uint16_t>(CAP - 1))), CAP);
+  CHECK(!policy.has_pending_discards());  // confirmed data is already in the collector's archive
+  CHECK_EQ(policy.discarded_chunks(), 0u);
+  CHECK_EQ(policy.discarded_bytes(), 0u);
+}
+
+TEST(collection_index_pressure_refuses_when_only_sealed_chunks_exist) {
+  CollectionPolicy policy = make_policy(90);
+  for (uint32_t i = 0; i < CAP; i++)
+    CHECK_MSG(policy.add(i, 1, ChunkState::SEALED), std::to_string(i));
+  CHECK(policy.full());
+
+  CHECK(policy.index_pressure_victim() == nullptr);
+  CHECK(!policy.add(CAP, 1, ChunkState::OPEN));
+  CHECK_EQ(policy.count(), CAP);
+  CHECK_EQ(policy.discarded_chunks(), 0u);
+  CHECK(!policy.has_pending_discards());
+}
+
+TEST(collection_index_pressure_skips_a_confirmed_chunk_being_served) {
+  CollectionPolicy policy = make_policy(90);
+  for (uint32_t i = 0; i < CAP; i++)
+    CHECK_MSG(policy.add(i, 1, ChunkState::SEALED), std::to_string(i));
+  CHECK(policy.confirm(0));
+  CHECK(policy.mark_serving(0));
+
+  CHECK(policy.index_pressure_victim() == nullptr);
+  CHECK(!policy.add(CAP, 1, ChunkState::OPEN));
+  CHECK_EQ(policy.count(), CAP);
+
+  policy.clear_serving(0);
+  CHECK_EQ(seq_of(policy.index_pressure_victim()), 0u);
+}
+
+TEST(collection_index_pressure_and_fill_retention_do_not_double_count) {
+  CollectionPolicy policy = make_policy(90);
+  for (uint32_t i = 0; i < CAP; i++)
+    CHECK_MSG(policy.add(i, 1000 + i, ChunkState::SEALED), std::to_string(i));
+  CHECK(policy.confirm(5));
+
+  const uint32_t pressure = seq_of(policy.index_pressure_victim());
+  CHECK_EQ(pressure, 5u);
+  CHECK(policy.mark_serving(pressure));
+  policy.clear_serving(pressure);
+  CHECK(policy.discard(pressure));
+  CHECK(!policy.has_pending_discards());
+  CHECK_EQ(policy.discarded_chunks(), 0u);
+
+  CHECK(policy.add(CAP, 2000, ChunkState::SEALED));
+  CHECK(policy.full());
+  CHECK_EQ(seq_of(policy.next_victim(95)), 0u);
+  CHECK(policy.discard(0));
+  CHECK(policy.has_pending_discards());
+  const DiscardStats gap = policy.take_pending_discards();
+  CHECK_EQ(gap.chunks, 1u);
+  CHECK_EQ(gap.bytes, 1000u);
+  CHECK_EQ(gap.first_seq, 0u);
+  CHECK_EQ(gap.last_seq, 0u);
+  CHECK_EQ(policy.discarded_chunks(), 1u);
+  CHECK_EQ(policy.discarded_bytes(), 1000u);
+}
+
 TEST(collection_discard_closes_the_hole_in_insertion_order) {
   // `at()` promises insertion order, and on a card that was found rather than written the boot
   // scan's order is the only clue a dump gives about how it was found.

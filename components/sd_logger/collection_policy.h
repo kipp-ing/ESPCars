@@ -29,18 +29,25 @@
 ///
 /// **Index capacity is a known, deliberate limit.** `SD_LOG_MAX_CHUNKS` entries is not a full card:
 /// a 32 GB card at the 4 MB chunk size §4 targets holds ~8000 chunks, and the default 256 entries
-/// index only ~1 GB of it. `add()` therefore *refuses* when full rather than evicting — forgetting
-/// a file that still exists is the one failure retention cannot recover from, because that chunk is
-/// then never listed, never served and never deleted while the card fills behind it.
+/// index only ~1 GB of it. `add()` therefore *refuses* when full rather than evicting anything on its
+/// own — forgetting a file that still exists is the one failure retention cannot recover from,
+/// because that chunk is then never listed, never served and never deleted while the card fills
+/// behind it. The writer may answer that refusal by deleting the oldest non-serving CONFIRMED chunk
+/// and retrying: the file is already collected, the unlink happens before the slot is freed, and if
+/// no such chunk exists the refusal stands. Index pressure never spends a SEALED or OPEN chunk; only
+/// the fill-triggered retention path may decide to lose never-collected data, and `discard()` bills
+/// that through the `#gap` window.
 ///
 /// The default was 64 until a 12-minute PERF soak on the bench (2026-07-28) rotated 29 times and
 /// found the index **already full at the first rotation**: every chunk of that run was untracked,
 /// retention could reclaim nothing, and the only witness was one `chunk index full` warning that
 /// scrolls past. At the 4 MB / 60 s bounds that run used, a chunk lands every ~25 s, so 64 entries
 /// was ~27 minutes of cumulative logging — less than a drive to work. 256 entries is ~1.8 hours and
-/// costs 3 KB (12 B an entry, below) against the 1.5 KB the old default spent. Refusals are now
-/// counted and printed in sd_logger's periodic stats line (`index_refused=`), so a run that outgrows
-/// its index says so every stats interval rather than once.
+/// costs 3 KB (12 B an entry, below) against the 1.5 KB the old default spent. Confirmed chunks now
+/// recycle slots under index pressure, so capacity is sized for the longest stretch the collector has
+/// not yet confirmed, not for the whole card. Refusals are still counted and printed in sd_logger's
+/// periodic stats line (`index_refused=`), so a run that outgrows even that window says so every stats
+/// interval rather than once.
 ///
 /// Two ways further out: raise the macro from the build — `collection: max_chunks:` does exactly
 /// that, and even the 2048 the schema allows is only 24 KB of the ~100–200 KB free — or have the
@@ -65,8 +72,9 @@ static const uint32_t SD_LOG_SEQ_MAX = SD_LOG_SEQ_MODULUS - 1u;
 
 /// How many chunks the in-RAM index holds. Static, like every other allocation in this component.
 /// Overridable from the build — `collection: max_chunks:` emits this define from the component's
-/// Python, the same way `SD_LOG_MAX_SOURCES` is sized. `add()` refuses rather than evicting when it
-/// is reached, because silently forgetting a chunk means silently never deleting its file.
+/// Python, the same way `SD_LOG_MAX_SOURCES` is sized. `add()` still refuses when it is reached; the
+/// writer may first delete a collected CONFIRMED chunk to make room, but this class never silently
+/// forgets a file that may still exist.
 #ifndef SD_LOG_MAX_CHUNKS
 #define SD_LOG_MAX_CHUNKS 256
 #endif
@@ -523,6 +531,16 @@ class CollectionPolicy {
     if (this->oldest_(ChunkState::CONFIRMED, /*skip_serving=*/false) != nullptr)
       return nullptr;  // the free list is not empty, only busy — wait for it rather than lose data.
     return this->oldest_(ChunkState::SEALED, /*skip_serving=*/true);
+  }
+
+  /// Which chunk may be deleted solely to free an index slot. This is retention pressure, but not
+  /// card-fill pressure: it is allowed to spend only the collected free list, never the
+  /// never-collected SEALED fallback. A busy CONFIRMED chunk is skipped the same way
+  /// `next_victim()` skips it, and if all confirmed chunks are busy the answer is "wait/refuse".
+  const ChunkEntry *index_pressure_victim() const {
+    if (!this->enabled_ || !this->full())
+      return nullptr;
+    return this->oldest_(ChunkState::CONFIRMED, /*skip_serving=*/true);
   }
 
   /// The file is gone: drop the entry and, if it was SEALED, bill it to the discard window.
