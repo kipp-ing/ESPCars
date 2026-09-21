@@ -247,5 +247,47 @@ class SdSpiTraceRing {
   std::atomic<uint32_t> dropped_{0};
 };
 
+/// Writer task stack, in BYTES. On the ESP-IDF RISC-V port `StackType_t` is
+/// `uint8_t`, so xTaskCreatePinnedToCore()'s depth argument and
+/// uxTaskGetStackHighWaterMark()'s return value are both already in bytes.
+static constexpr uint32_t SD_WRITER_STACK_BYTES = 8192;
+
+/// Worst-case depth of writer_trampoline() -> try_recover_() -> mount_card_()
+/// -> run_capacity_self_test_() -> sdmmc/sdspi, measured by static call-graph
+/// analysis of the flashed ELF (orange-webui-14, IDF 5.5.4, -Os).
+static constexpr uint32_t SD_WRITER_STACK_MEASURED_NEED_BYTES = 4816;
+
+/// Below this much free stack the writer says so. One quarter of the budget.
+static constexpr uint32_t SD_WRITER_STACK_WARN_FREE_BYTES = 2048;
+
+static_assert(SD_WRITER_STACK_BYTES >= SD_WRITER_STACK_MEASURED_NEED_BYTES + SD_WRITER_STACK_WARN_FREE_BYTES,
+              "writer stack must clear its measured worst case by the warn margin");
+
+enum class StackHeadroom : uint8_t { OK = 0, LOW = 1, CRITICAL = 2 };
+
+/// Classify a uxTaskGetStackHighWaterMark() reading (free bytes).
+/// CRITICAL: at or below what one more mount attempt would need beyond what has
+/// already been used — i.e. free < the warn margin's half. LOW: free below the
+/// warn margin. OK otherwise. A reading of 0 is CRITICAL, never OK.
+inline StackHeadroom classify_stack_headroom(uint32_t free_bytes) {
+  if (free_bytes < SD_WRITER_STACK_WARN_FREE_BYTES / 2)
+    return StackHeadroom::CRITICAL;
+  if (free_bytes < SD_WRITER_STACK_WARN_FREE_BYTES)
+    return StackHeadroom::LOW;
+  return StackHeadroom::OK;
+}
+
+inline const char *stack_headroom_str(StackHeadroom h) {
+  switch (h) {
+    case StackHeadroom::CRITICAL:
+      return "critical";
+    case StackHeadroom::LOW:
+      return "low";
+    case StackHeadroom::OK:
+    default:
+      return "ok";
+  }
+}
+
 }  // namespace sd_logger
 }  // namespace esphome

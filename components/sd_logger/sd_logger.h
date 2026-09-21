@@ -295,6 +295,8 @@ class SdLogger : public Component {
   /// Frame records formatted into the writer block but discarded when the file failed before their
   /// complete lines reached write(). Kept separate from card_dropped_: these had entered logging.
   uint32_t get_write_lost_records() const { return write_lost_.load(std::memory_order_relaxed); }
+  /// Minimum free bytes ever seen on the writer task stack; 0 until first sampled.
+  uint32_t get_writer_stack_free() const { return this->writer_stack_min_free_.load(std::memory_order_relaxed); }
   /// Tap entries intentionally left behind at emergency close; one counter per port is retained
   /// internally so their `#drop` markers remain attributable, this is the status total.
   uint32_t get_tap_shutdown_lost_records() const;
@@ -496,6 +498,10 @@ class SdLogger : public Component {
   void enter_failed_(const char *why);
   // One bounded remount attempt: unmount, optionally power-cycle the card, mount, open a file.
   bool try_recover_();
+  // Samples uxTaskGetStackHighWaterMark() for the writer task and keeps the running minimum. Called
+  // from writer_loop_() only — after try_recover_() returns and on the retention cadence, never
+  // every pass (see sd_logger.cpp for why).
+  void sample_writer_stack_();
   // Is there a file to write into right now? The writer's drain loops all gate on this, because a
   // write that fails mid-pass must not have the rest of the pass silently discarded into it.
   bool file_ok_() const { return fd_ >= 0; }
@@ -739,6 +745,9 @@ class SdLogger : public Component {
   // only. Feeds the pass-gap warning — the direct measurement of the writer outages §4.3 could
   // only infer from tap-ring burst sizes.
   int64_t last_pass_us_{0};
+  // Minimum free bytes ever seen on the writer task stack; 0 until first sampled.
+  // Written only by the writer task, read by the status server.
+  std::atomic<uint32_t> writer_stack_min_free_{0};
   volatile bool mounted_{false};
   bool spi_bus_ok_{false};
   // True while the current mount only exists because the card's latched "in idle state" bit is

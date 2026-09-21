@@ -33,6 +33,7 @@ struct StatusFields {
   uint32_t tap_accepted;
   uint32_t tap_drained;
   uint32_t tap_record_ring_accepted;
+  uint32_t writer_stack_free;  // bytes; 0 == never sampled
 };
 
 /// Formats the status response and returns `snprintf`'s result. A card percent
@@ -45,19 +46,19 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
   if (fields.card_percent <= 100)
     snprintf(fill_text, sizeof(fill_text), "%" PRIu32, fields.card_percent);
 
-  return snprintf(out, len,
-                  "{\"device\":\"%s\",\"sealed\":%" PRIu32 ",\"confirmed\":%" PRIu32
-                  ",\"card_percent\":%s,\"discarded_chunks\":%" PRIu32 ",\"discarded_bytes\":%" PRIu64
-                  ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"mounted\":%s,\"degraded\":%s"
-                  ",\"capacity\":\"%s\""
-                  ",\"records\":%" PRIu32 ",\"dropped\":%" PRIu32 ",\"card_dropped\":%" PRIu32
-                  ",\"write_lost\":%" PRIu32 ",\"tap_shutdown_lost\":%" PRIu32 ",\"tap_accepted\":%" PRIu32
-                  ",\"tap_drained\":%" PRIu32 ",\"tap_record_ring_accepted\":%" PRIu32 "}",
-                  fields.device, fields.sealed, fields.confirmed, fill_text, fields.discarded_chunks,
-                  fields.discarded_bytes, oldest_text, fields.index_refused, fields.mounted ? "true" : "false",
-                  fields.degraded ? "true" : "false", fields.capacity, fields.records, fields.dropped,
-                  fields.card_dropped, fields.write_lost, fields.tap_shutdown_lost, fields.tap_accepted,
-                  fields.tap_drained, fields.tap_record_ring_accepted);
+  return snprintf(
+      out, len,
+      "{\"device\":\"%s\",\"sealed\":%" PRIu32 ",\"confirmed\":%" PRIu32
+      ",\"card_percent\":%s,\"discarded_chunks\":%" PRIu32 ",\"discarded_bytes\":%" PRIu64
+      ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"mounted\":%s,\"degraded\":%s"
+      ",\"capacity\":\"%s\""
+      ",\"records\":%" PRIu32 ",\"dropped\":%" PRIu32 ",\"card_dropped\":%" PRIu32 ",\"write_lost\":%" PRIu32
+      ",\"tap_shutdown_lost\":%" PRIu32 ",\"tap_accepted\":%" PRIu32 ",\"tap_drained\":%" PRIu32
+      ",\"tap_record_ring_accepted\":%" PRIu32 ",\"writer_stack_free\":%" PRIu32 "}",
+      fields.device, fields.sealed, fields.confirmed, fill_text, fields.discarded_chunks, fields.discarded_bytes,
+      oldest_text, fields.index_refused, fields.mounted ? "true" : "false", fields.degraded ? "true" : "false",
+      fields.capacity, fields.records, fields.dropped, fields.card_dropped, fields.write_lost, fields.tap_shutdown_lost,
+      fields.tap_accepted, fields.tap_drained, fields.tap_record_ring_accepted, fields.writer_stack_free);
 }
 
 }  // namespace sd_logger

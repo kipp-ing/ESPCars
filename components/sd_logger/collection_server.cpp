@@ -771,9 +771,13 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       confirmed++;
   }
   uint32_t oldest = 0;
-  // 517 rendered bytes worst case: the established fields plus the capacity verdict and five ten-digit loss-pipeline
-  // counters. Keep headroom so an additive status field cannot silently turn this route into 500.
-  char body[560];
+  // 548 rendered bytes worst case (549 with the NUL snprintf always writes when len > 0): the
+  // established fields plus the capacity verdict, five ten-digit loss-pipeline counters and the
+  // ten-digit writer_stack_free. body[640] leaves 91 B of headroom over that, so one more additive
+  // status field cannot silently turn this route into 500 the way 560 - 549 = 11 B once nearly did.
+  // The handler still fails safe either way (`n >= sizeof(body)` below -> HTTP 500); this is margin,
+  // not a live bug.
+  char body[640];
   const StatusFields fields{
       this->device_,
       sealed,
@@ -795,6 +799,7 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       this->parent_->get_tap_accepted_records(),
       this->parent_->get_tap_drained_records(),
       this->parent_->get_tap_record_ring_accepted_records(),
+      this->parent_->get_writer_stack_free(),
   };
   const int n = format_status_json(body, sizeof(body), fields);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(body))

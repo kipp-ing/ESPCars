@@ -1,4 +1,5 @@
 #include "sd_logger.h"
+#include "sd_diagnostics.h"
 #include "esphome/core/log.h"
 // ESPHOME_VERSION, for the `#sdlog` header line: a card should say which
 // firmware wrote it without anyone having to remember.
@@ -86,10 +87,10 @@ static const uint32_t TAP_DRAIN_POLL_MS = 5;
 // heap's min-since-boot at 1668 B under load, and a task stack taken from the heap at setup would
 // move that floor down by its whole size.
 static const uint32_t TAP_DRAIN_STACK_BYTES = 3072;
-// xTaskCreateStatic() measures its depth in StackType_t entries, not bytes.  Keep the allocation
-// and the advertised depth derived from the same value: passing the byte count as the depth tells
-// FreeRTOS that this 3 KiB array is 12 KiB on the C6, so a busy drain task can overwrite adjacent
-// static state without tripping the stack limit.
+// xTaskCreateStatic()'s depth argument is in StackType_t entries; on the ESP-IDF RISC-V port
+// StackType_t is uint8_t, so on the C6 that is bytes and this division is by one. Keep the
+// allocation and the advertised depth derived from the same value regardless, so the two can never
+// drift apart on a port where they are not the same unit.
 static const uint32_t TAP_DRAIN_STACK_WORDS = TAP_DRAIN_STACK_BYTES / sizeof(StackType_t);
 static_assert(TAP_DRAIN_STACK_WORDS * sizeof(StackType_t) == TAP_DRAIN_STACK_BYTES,
               "tap-drain stack byte budget must contain whole StackType_t entries");
@@ -510,7 +511,12 @@ void SdLogger::setup() {
   // Writer task: below LIN (18) and the TWAI ISR so bus timing always wins,
   // above the esphome main loop (1) so draining is steady (spec D5). Started even with no card,
   // because it is also what drives recovery.
-  xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", 4096, this, 6, &this->writer_task_, tskNO_AFFINITY);
+  if (xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", SD_WRITER_STACK_BYTES, this, 6,
+                              &this->writer_task_, tskNO_AFFINITY) != pdPASS) {
+    this->writer_task_ = nullptr;
+    ESP_LOGE(TAG, "writer task could not be created (%" PRIu32 " B stack) — logging is off for this run",
+             static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
+  }
 
 #ifdef USE_SD_LOGGER_CAN_TAP
   // Tap drain: one step above the writer, so a writer stuck inside a card call (sdspi busy-polls a
@@ -1247,7 +1253,12 @@ void SdLogger::confine_format(const std::string &confirmation) {
   this->last_sync_ms_ = millis();
   this->mounted_ = true;
   this->confine_format_stop_requested_.store(false, std::memory_order_release);
-  xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", 4096, this, 6, &this->writer_task_, tskNO_AFFINITY);
+  if (xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", SD_WRITER_STACK_BYTES, this, 6,
+                              &this->writer_task_, tskNO_AFFINITY) != pdPASS) {
+    this->writer_task_ = nullptr;
+    ESP_LOGE(TAG, "writer task could not be created (%" PRIu32 " B stack) — logging is off for this run",
+             static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
+  }
   ESP_LOGI(TAG, "confine format complete: %" PRIu64 " B volume; self-test passed", total);
   this->confine_format_in_progress_.store(false, std::memory_order_release);
   return;
@@ -1884,6 +1895,21 @@ bool SdLogger::try_recover_() {
   this->last_sync_ms_ = millis();
   this->mounted_ = true;
   return true;
+}
+
+void SdLogger::sample_writer_stack_() {
+  const uint32_t free_bytes = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+  uint32_t prev = this->writer_stack_min_free_.load(std::memory_order_relaxed);
+  if (prev != 0 && free_bytes >= prev)
+    return;
+  this->writer_stack_min_free_.store(free_bytes, std::memory_order_relaxed);
+  const StackHeadroom h = classify_stack_headroom(free_bytes);
+  if (h == StackHeadroom::OK)
+    ESP_LOGD(TAG, "writer stack: %" PRIu32 " B free of %" PRIu32 " B", free_bytes,
+             static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
+  else
+    ESP_LOGW(TAG, "writer stack %s: %" PRIu32 " B free of %" PRIu32 " B", stack_headroom_str(h), free_bytes,
+             static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
 }
 
 void SdLogger::maybe_rotate_(uint64_t now64) {
@@ -3184,12 +3210,16 @@ void SdLogger::writer_loop_() {
       // sit in a queue for five seconds, and an empty queue costs one non-blocking xQueueReceive.
       this->drain_confirms_();
 #endif
-#ifdef USE_SD_LOGGER_COLLECTION
+      // The 5 s retention cadence, kept outside USE_SD_LOGGER_COLLECTION so it still fires in a
+      // build with no collection server — the steady-state stack sample below needs a cadence that
+      // exists in every build, not one gated on collection.
       if (now - this->last_retention_ms_ >= RETENTION_POLL_MS) {
         this->last_retention_ms_ = now;
+#ifdef USE_SD_LOGGER_COLLECTION
         this->retention_pass_();
-      }
 #endif
+        this->sample_writer_stack_();
+      }
 
       if (now - this->last_sync_ms_ >= this->sync_interval_ms_) {
         this->sync_file_();
@@ -3225,6 +3255,10 @@ void SdLogger::writer_loop_() {
       } else {
         ESP_LOGW(TAG, "card recovery failed — next attempt in %" PRIu32 " ms", this->recovery_.delay_ms());
       }
+      // The deep-path sample: try_recover_() is the only caller of mount_card_() ->
+      // run_capacity_self_test_(), the call chain SD_WRITER_STACK_MEASURED_NEED_BYTES was measured
+      // against, whichever of the three branches above it took.
+      this->sample_writer_stack_();
     }
 
     if (this->dying_.load(std::memory_order_acquire)) {
