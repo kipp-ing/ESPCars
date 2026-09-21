@@ -771,13 +771,10 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       confirmed++;
   }
   uint32_t oldest = 0;
-  // 548 rendered bytes worst case (549 with the NUL snprintf always writes when len > 0): the
-  // established fields plus the capacity verdict, five ten-digit loss-pipeline counters and the
-  // ten-digit writer_stack_free. body[640] leaves 91 B of headroom over that, so one more additive
-  // status field cannot silently turn this route into 500 the way 560 - 549 = 11 B once nearly did.
-  // The handler still fails safe either way (`n >= sizeof(body)` below -> HTTP 500); this is margin,
-  // not a live bug.
-  char body[640];
+  // The status object is deliberately roomy: it is the remote view during card failures, so new
+  // additive diagnostics should not silently turn the route into 500. The handler still fails safe
+  // either way (`n >= sizeof(body)` below -> HTTP 500); this is margin, not a live bug.
+  char body[1536];
   const StatusFields fields{
       this->device_,
       sealed,
@@ -799,6 +796,30 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       this->parent_->get_tap_accepted_records(),
       this->parent_->get_tap_drained_records(),
       this->parent_->get_tap_record_ring_accepted_records(),
+      this->parent_->get_recovery_state(),
+      this->parent_->get_write_failures(),
+      this->parent_->get_last_write_action(),
+      this->parent_->get_last_write_errno(),
+      this->parent_->get_last_write_result(),
+      this->parent_->get_last_write_offset(),
+      this->parent_->get_last_write_derived_offset(),
+      this->parent_->get_last_write_lseek_errno(),
+      this->parent_->get_last_write_committed_end(),
+      this->parent_->get_last_write_len(),
+      this->parent_->get_last_write_elapsed_us(),
+      this->parent_->get_last_write_spi_begin(),
+      this->parent_->get_last_write_spi_end(),
+      this->parent_->get_last_write_spi_commands(),
+      this->parent_->get_last_write_spi_available(),
+      this->parent_->get_last_write_spi_missing(),
+      this->parent_->get_last_write_spi_worst_err(),
+      this->parent_->get_last_write_card_sectors(),
+      this->parent_->get_last_write_volume_first_lba(),
+      this->parent_->get_last_write_volume_sectors(),
+      this->parent_->get_last_write_heap_default_free(),
+      this->parent_->get_last_write_heap_default_largest(),
+      this->parent_->get_last_write_heap_dma_free(),
+      this->parent_->get_last_write_heap_dma_largest(),
       this->parent_->get_writer_stack_free(),
   };
   const int n = format_status_json(body, sizeof(body), fields);
@@ -901,7 +922,8 @@ esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/csv");
   int n =
       snprintf(this->block_, SD_LOG_SERVE_BLOCK,
-               "#write_index_start,%" PRIu32 ",dropped,%" PRIu32 "\nseq,us,task,opcode,arg,blklen,datalen,flags,err\n",
+               "#write_index_start,%" PRIu32 ",dropped,%" PRIu32
+               "\nseq,us,task,opcode,arg,blklen,datalen,flags,response_raw,response,err\n",
                write_start, trace.dropped());
   if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)
     return ESP_FAIL;
@@ -916,9 +938,10 @@ esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
         task[i] = '_';
     }
     n = snprintf(this->block_, SD_LOG_SERVE_BLOCK,
-                 "%" PRIu32 ",%" PRId64 ",%s,%" PRId32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRId32 "\n",
+                 "%" PRIu32 ",%" PRId64 ",%s,%" PRId32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+                 ",%" PRIu32 ",%" PRIu32 ",%" PRId32 "\n",
                  entry.seq, entry.us, task, entry.opcode, entry.arg, entry.blklen, entry.datalen, entry.flags,
-                 entry.err);
+                 entry.response_raw, entry.response, entry.err);
     if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)
       return ESP_FAIL;
   }

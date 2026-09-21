@@ -30,6 +30,9 @@ V25  collection.port must not collide with web_server's (final validate).
 V26  collection.max_chunks is in [16, 2048], defaulting to 256.
 V29  confine_bytes is a whole-sector, small FAT volume size.
 
+SDK  warn when CONFIG_WL_SECTOR_SIZE is absent or explicitly 4096, because then
+     FF_MAX_SS can make every FAT FIL carry a 4 KiB per-file cache.
+
 V10 is still deferred.
 """
 
@@ -321,6 +324,7 @@ def test_can_ports_empty_list_rejected(set_core_config) -> None:
 def _gateway_full_config(
     *log_tap_flags: bool,
     logger: dict | None = None,
+    sdkconfig_options: dict | None = None,
     wifi: dict | None = None,
     web_server: dict | None = None,
     ethernet: dict | None = None,
@@ -347,6 +351,7 @@ def _gateway_full_config(
     }
     if logger is not None:
         full["logger"] = logger
+    full["esp32"] = {"framework": {"sdkconfig_options": sdkconfig_options or {}}}
     if wifi is not None:
         full["wifi"] = wifi
     if web_server is not None:
@@ -360,6 +365,7 @@ def _run_final_validate(
     config: dict,
     *log_tap_flags: bool,
     logger: dict | None = None,
+    sdkconfig_options: dict | None = None,
     wifi: dict | None = None,
     web_server: dict | None = None,
     ethernet: dict | None = None,
@@ -371,6 +377,7 @@ def _run_final_validate(
         _gateway_full_config(
             *log_tap_flags,
             logger=logger,
+            sdkconfig_options=sdkconfig_options,
             wifi=wifi,
             web_server=web_server,
             ethernet=ethernet,
@@ -434,6 +441,38 @@ def test_final_validate_requires_vfs_dir(set_core_config, can_ports) -> None:
     config = validate(sd_logger(can_ports=can_ports))
     _run_final_validate(config, True, True)
     assert CORE.data.get(KEY_VFS_DIR_REQUIRED) is True
+
+
+# ------------------------------------------------------------ FATFS sdkconfig
+
+
+def test_wl_sector_size_absent_warns_about_ff_max_ss_4096(set_core_config, caplog) -> None:
+    setup_c6(set_core_config)
+    config = validate(sd_logger())
+    _run_final_validate(config)
+    assert "CONFIG_WL_SECTOR_SIZE" in caplog.text
+    assert "CONFIG_WL_SECTOR_SIZE_512" in caplog.text
+
+
+def test_wl_sector_size_4096_warns_about_ff_max_ss_4096(set_core_config, caplog) -> None:
+    setup_c6(set_core_config)
+    config = validate(sd_logger())
+    _run_final_validate(config, sdkconfig_options={"CONFIG_WL_SECTOR_SIZE_4096": "y"})
+    assert "FF_MAX_SS as 4096" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "sdkconfig_options",
+    [
+        {"CONFIG_WL_SECTOR_SIZE_512": "y"},
+        {"CONFIG_WL_SECTOR_SIZE": "512"},
+    ],
+)
+def test_wl_sector_size_512_is_quiet(set_core_config, caplog, sdkconfig_options) -> None:
+    setup_c6(set_core_config)
+    config = validate(sd_logger())
+    _run_final_validate(config, sdkconfig_options=sdkconfig_options)
+    assert "CONFIG_WL_SECTOR_SIZE" not in caplog.text
 
 
 # ------------------------------------------------------------------------- V13

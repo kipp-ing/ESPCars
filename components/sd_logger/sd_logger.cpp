@@ -24,6 +24,7 @@ extern "C" {
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
+#include "esp_heap_caps.h"  // heap_caps_get_free_size / heap_caps_get_largest_free_block, for MountFailureFacts
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "esp_vfs_fat.h"
@@ -78,6 +79,24 @@ static const uint32_t RETENTION_POLL_MS = 5000;
 // attributes a tap burst to the card stall that caused it (§4.3: bursts implied 220-360 ms writer
 // outages, and nothing in the system measured them directly).
 static const int64_t STALL_WARN_US = 50000;
+
+// How many FAT VFS mounts can exist at once. `esp_vfs_fat_register_cfg()` returns
+// ESP_ERR_NO_MEM when every slot is taken, which is indistinguishable at the call site from a
+// real allocation failure — this is the number that tells the two apart (contract: mount/write
+// instruments round, orange-webui-16).
+#ifdef FF_VOLUMES
+static const uint32_t SD_FATFS_VOLUME_SLOTS = FF_VOLUMES;
+#elif defined(CONFIG_FATFS_VOLUME_COUNT)
+static const uint32_t SD_FATFS_VOLUME_SLOTS = CONFIG_FATFS_VOLUME_COUNT;
+#else
+static const uint32_t SD_FATFS_VOLUME_SLOTS = 0;  // unknown; 0 reads as "not reported"
+#endif
+#ifdef FF_MAX_SS
+static const uint32_t SD_FATFS_FF_MAX_SS = FF_MAX_SS;
+#else
+static const uint32_t SD_FATFS_FF_MAX_SS = 0;  // unknown; the dump still reports sizeof(FIL)
+#endif
+
 #ifdef USE_SD_LOGGER_CAN_TAP
 // Tap-drain task cadence. At 7000 f/s (two segments saturated at 500 kbit/s) one pass moves ~35
 // records; a 1024-slot tap ring gives ~146 ms of slack, so 5 ms of drain latency leaves a wide
@@ -743,10 +762,16 @@ esp_err_t sd_forced_do_transaction(int slot, sdmmc_command_t *cmdinfo) {
   }
   const esp_err_t err = sdspi_host_do_transaction(slot, cmdinfo);
   trace.err = static_cast<int32_t>(err);
-  g_sdspi_trace.append(trace);
   if (err == ESP_OK && cmdinfo != nullptr && g_idle_bit_override.load(std::memory_order_acquire) &&
-      (cmdinfo->opcode == SD_SPI_OPCODE_APP_OP_COND || cmdinfo->opcode == SD_SPI_OPCODE_SEND_STATUS))
+      (cmdinfo->opcode == SD_SPI_OPCODE_APP_OP_COND || cmdinfo->opcode == SD_SPI_OPCODE_SEND_STATUS)) {
+    trace.response_raw = cmdinfo->response[0];
     cmdinfo->response[0] &= ~1u;
+    trace.response = cmdinfo->response[0];
+  } else if (cmdinfo != nullptr) {
+    trace.response_raw = cmdinfo->response[0];
+    trace.response = cmdinfo->response[0];
+  }
+  g_sdspi_trace.append(trace);
   return err;
 }
 
@@ -840,8 +865,18 @@ void SdLogger::unmount_card_() {
   }
   this->drop_unflushed_gap_();
   this->block_.reset();
+  // Instrument only — does not change whether/when an unmount is attempted (contract §0/§4.5).
+  this->last_unmount_skipped_ = (this->card_ == nullptr);
   if (this->card_ != nullptr) {
-    esp_vfs_fat_sdcard_unmount(this->mount_point_.c_str(), this->card_);
+    const esp_err_t unmount_err = esp_vfs_fat_sdcard_unmount(this->mount_point_.c_str(), this->card_);
+    this->last_unmount_err_ = static_cast<int32_t>(unmount_err);
+    if (unmount_err == ESP_OK) {
+      this->unmounts_ok_++;
+    } else {
+      // Was silent before. A failed unmount leaves the FAT VFS registration in place, and
+      // FF_VOLUMES is 1 on this build, so one of these is all it takes.
+      ESP_LOGW(TAG, "unmount failed: %s — the FAT registration may still be held", esp_err_to_name(unmount_err));
+    }
     this->card_ = nullptr;
   }
   if (this->spi_bus_ok_) {
@@ -897,7 +932,18 @@ bool SdLogger::mount_card_(bool allow_format) {
   // Never the member directly: a recovery attempt passes false regardless, because a retry ladder
   // that reformats would erase the logs it is being run to save, once per attempt (V21).
   mount_cfg.format_if_mount_failed = allow_format;
-  mount_cfg.max_files = 5;
+  // Right-sized to the VFS descriptors this component can actually hold:
+  //   * writer log fd: open_next_file_() keeps one O_WRONLY descriptor open while mounted,
+  //   * collection chunk fd: CollectionServer::serve_chunk_() opens one SEALED chunk for reading,
+  //   * one spare for read-only diagnostics/future tooling while the writer and collector overlap.
+  // The collection fd cannot overlap itself because ESP-IDF's esp_http_server runs one handler task;
+  // `max_open_sockets = 3` admits sockets, not parallel FAT readers. If this server ever becomes
+  // multi-tasked, raise this number with the maximum simultaneous chunk handlers or chunk opens will
+  // fail under collection load. The boot scan's opendir() is not counted either: IDF's FAT VFS uses
+  // a separate directory object allocated with ff_memalloc(), not a FIL from this ctx array.
+  // `confine_format()` is not in this count: it stops the writer, unmounts, and uses raw FatFs
+  // helpers before remounting, so it is never concurrent with a mounted VFS descriptor.
+  mount_cfg.max_files = SD_LOGGER_FAT_MAX_FILES;
   // Larger allocation unit => fewer mid-stream FAT cluster allocations, which
   // are a latency-spike source (spec D6; no f_expand over the stdio path).
   mount_cfg.allocation_unit_size = 16 * 1024;
@@ -921,6 +967,24 @@ bool SdLogger::mount_card_(bool allow_format) {
     } else {
       ESP_LOGE(TAG, "mount failed: %s", esp_err_to_name(err));
     }
+    MountFailureFacts facts{};
+    facts.err = static_cast<int32_t>(err);
+    facts.free_internal = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    facts.largest_block = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    // ff_memalloc() (fatfs/port/freertos/ffsystem.c) allocates with MALLOC_CAP_DEFAULT, not
+    // MALLOC_CAP_INTERNAL above — CAP_INTERNAL is a strict superset that also counts 32-bit-only
+    // memory FATFS cannot use. This is the pool that actually decides whether the VFS context fits.
+    facts.largest_block_default = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+    facts.vfs_fil_array_bytes =
+        sd_fat_fil_array_bytes(static_cast<uint32_t>(sizeof(FIL)), static_cast<uint32_t>(mount_cfg.max_files));
+    facts.fatfs_volume_slots = SD_FATFS_VOLUME_SLOTS;
+    facts.last_unmount_err = this->last_unmount_err_;
+    facts.last_unmount_skipped = this->last_unmount_skipped_;
+    facts.mounts_ok = this->mounts_ok_;
+    facts.unmounts_ok = this->unmounts_ok_;
+    char line[SD_MOUNT_FAILURE_LINE_BYTES];
+    format_mount_failure(line, sizeof(line), facts);
+    ESP_LOGE(TAG, "mount failure state: %s", line);
     this->card_ = nullptr;
     if (this->spi_bus_ok_) {
       spi_bus_free(host_slot);
@@ -930,6 +994,17 @@ bool SdLogger::mount_card_(bool allow_format) {
   }
 
   this->capacity_state_ = CapacityState::HEALTHY;
+  this->mounts_ok_++;
+  this->write_recovery_stopped_ = false;
+  this->mounted_card_sectors_ = this->card_ != nullptr ? this->card_->csd.capacity : 0;
+  this->mounted_volume_first_lba_ = 0;
+  this->mounted_volume_sectors_ = 0;
+  uint32_t mounted_first_lba = 0;
+  uint32_t mounted_sector_count = 0;
+  if (mounted_volume_bounds_(this->card_, &mounted_first_lba, &mounted_sector_count)) {
+    this->mounted_volume_first_lba_ = mounted_first_lba;
+    this->mounted_volume_sectors_ = mounted_sector_count;
+  }
   uint64_t volume_bytes = 0;
   uint64_t free_bytes = 0;
   if (esp_vfs_fat_info(this->mount_point_.c_str(), &volume_bytes, &free_bytes) != ESP_OK || volume_bytes == 0) {
@@ -1034,6 +1109,18 @@ const char *SdLogger::capacity_status() const {
     default:
       return "healthy";
   }
+}
+
+const char *SdLogger::get_recovery_state() const {
+  if (this->mounted_)
+    return "mounted";
+  if (this->write_recovery_stopped_)
+    return "stopped_no_bus_traffic";
+  if (this->recovery_.armed())
+    return "retrying";
+  if (this->recovery_.exhausted())
+    return "exhausted";
+  return this->recovery_.enabled() ? "idle" : "off";
 }
 
 void SdLogger::confine_format(const std::string &confirmation) {
@@ -1672,7 +1759,7 @@ bool SdLogger::close_file_(const char *reason) {
   return true;
 }
 
-void SdLogger::enter_failed_(const char *why) {
+void SdLogger::enter_failed_(const char *why, WriteFailureAction action) {
   // The single transition into "no writable file". Everything that can discover a dead card comes
   // through here, which is what keeps `mounted_` and `fd_` from disagreeing — the state where
   // producers keep pushing into a file that is not there is exactly how a failed rotation used to
@@ -1710,7 +1797,23 @@ void SdLogger::enter_failed_(const char *why) {
   if (!was_running)
     return;  // already failed; a ladder is running and must not be restarted
 
+  if (action == WriteFailureAction::STOP_NO_BUS_TRAFFIC) {
+    // The observation that licenses stopping is narrow: the trace sequence did not advance while
+    // write() failed, so sd_logger did not ask the SDSPI/block layer to do anything for that call.
+    // Remounting can repair card state, bus state, VFS registration and a fresh FatFs file handle;
+    // it cannot repair a refusal that happened before the card was involved. If any command appears
+    // in the interval — including one from another task sharing the card — we keep the ladder,
+    // because that ambiguity must bias toward retrying a card that may really be coming back.
+    this->write_recovery_stopped_ = true;
+    ESP_LOGE(TAG,
+             "log file lost (%s) — stopping recovery: write() failed before any SD command was issued; "
+             "remounting cannot repair that filesystem/VFS refusal",
+             why);
+    return;
+  }
+
   if (this->recovery_.enabled()) {
+    this->write_recovery_stopped_ = false;
     ESP_LOGE(TAG, "log file lost (%s) — retrying in %" PRIu32 " ms", why, this->recovery_.delay_ms());
     this->recovery_.arm(millis());
   } else {
@@ -2048,6 +2151,33 @@ bool SdLogger::pop_text_(TextRecord &out) {
   return true;
 }
 
+void SdLogger::capture_write_failure_(int32_t result, int err_no, uint32_t len, uint32_t offset,
+                                      uint32_t derived_offset, int lseek_errno, uint32_t committed_end,
+                                      int64_t elapsed_us, uint32_t spi_begin, uint32_t spi_end) {
+  this->write_failures_++;
+  LastWriteFailure facts{};
+  facts.result = result;
+  facts.err_no = static_cast<int32_t>(err_no);
+  facts.offset = offset;
+  facts.derived_offset = derived_offset;
+  facts.lseek_errno = static_cast<int32_t>(lseek_errno);
+  facts.committed_end = committed_end;
+  facts.len = len;
+  facts.elapsed_us = elapsed_us <= 0 ? 0 : static_cast<uint32_t>(elapsed_us > UINT32_MAX ? UINT32_MAX : elapsed_us);
+  facts.spi_begin = spi_begin;
+  facts.spi_end = spi_end;
+  facts.spi = g_sdspi_trace.summarize(spi_begin, spi_end);
+  facts.card_sectors = this->mounted_card_sectors_;
+  facts.volume_first_lba = this->mounted_volume_first_lba_;
+  facts.volume_sectors = this->mounted_volume_sectors_;
+  facts.heap_default_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+  facts.heap_default_largest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+  facts.heap_dma_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA));
+  facts.heap_dma_largest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+  facts.action = classify_write_failure(facts.spi.commands);
+  this->last_write_failure_ = facts;
+}
+
 void SdLogger::log_frame(uint8_t source, uint32_t id, uint8_t flags, const uint8_t *data, uint8_t len) {
   // No `mounted_` check of its own — push_record() owns that decision, so the "no card" drop is
   // counted exactly once and in one place. It used to return here silently, which made an outage
@@ -2079,9 +2209,21 @@ bool SdLogger::flush_block_(bool all) {
     // Timed because this is where a card's internal stall (write-cache flush / GC) surfaces:
     // sdspi busy-polls it at full CPU with the FATFS volume mutex held, for up to its 5 s
     // timeout, and nothing above the driver sees anything but a write() that took that long.
+    const uint32_t derived_offset =
+        this->file_bytes_ > this->block_.pending() ? this->file_bytes_ - this->block_.pending() : 0;
+    const uint32_t committed_end = this->file_bytes_;
+    const uint32_t spi_begin = g_sdspi_trace.write_index();
+    errno = 0;
+    const off_t pos = lseek(this->fd_, 0, SEEK_CUR);
+    const int lseek_errno = pos == static_cast<off_t>(-1) ? errno : 0;
+    const uint32_t write_offset =
+        (pos >= 0 && static_cast<uint64_t>(pos) <= UINT32_MAX) ? static_cast<uint32_t>(pos) : UINT32_MAX;
     const int64_t t0 = esp_timer_get_time();
+    errno = 0;
     const ssize_t written = write(this->fd_, this->block_.data(), len);
+    const int write_errno = errno;
     const int64_t held_us = esp_timer_get_time() - t0;
+    const uint32_t spi_end = g_sdspi_trace.write_index();
     if (held_us > STALL_WARN_US) {
       ESP_LOGW(TAG, "write() held %" PRId64 " ms (%u B) — card internally busy", held_us / 1000,
                static_cast<unsigned>(len));
@@ -2089,8 +2231,26 @@ bool SdLogger::flush_block_(bool all) {
     if (written <= 0) {
       // A failing card must not take the buses down: drop the file, keep the component alive, and
       // let producers keep counting drops. enter_failed_() decides whether the card gets retried.
-      ESP_LOGE(TAG, "write failed (%d, errno %d)", static_cast<int>(written), errno);
-      this->enter_failed_("write");
+      this->capture_write_failure_(static_cast<int32_t>(written), write_errno, static_cast<uint32_t>(len), write_offset,
+                                   derived_offset, lseek_errno, committed_end, held_us, spi_begin, spi_end);
+      ESP_LOGE(TAG,
+               "write failed (%d, errno %d) at vfs_offset %" PRIu32 " len %u (derived_offset %" PRIu32
+               ", lseek_errno %d, committed_end %" PRIu32 ", write_us %" PRId64 ", spi_seq %" PRIu32
+               "..%" PRIu32 " commands=%" PRIu32
+               " available=%" PRIu32 " missing=%" PRIu32 " worst_err=%" PRId32 ")",
+               static_cast<int>(written), write_errno, write_offset, static_cast<unsigned>(len), derived_offset,
+               lseek_errno, committed_end, held_us, spi_begin, spi_end, this->last_write_failure_.spi.commands,
+               this->last_write_failure_.spi.available, this->last_write_failure_.spi.missing,
+               this->last_write_failure_.spi.worst_err);
+      ESP_LOGE(TAG,
+               "write failure state: action=%s card_sectors=%" PRIu32 " volume_lba=%" PRIu32
+               " volume_sectors=%" PRIu32 " heap_default=%" PRIu32 "/%" PRIu32
+               " heap_dma=%" PRIu32 "/%" PRIu32,
+               write_failure_action_str(this->last_write_failure_.action), this->last_write_failure_.card_sectors,
+               this->last_write_failure_.volume_first_lba, this->last_write_failure_.volume_sectors,
+               this->last_write_failure_.heap_default_free, this->last_write_failure_.heap_default_largest,
+               this->last_write_failure_.heap_dma_free, this->last_write_failure_.heap_dma_largest);
+      this->enter_failed_("write", this->last_write_failure_.action);
       return false;
     }
     this->block_.consume(static_cast<size_t>(written));
@@ -2527,8 +2687,8 @@ bool SdLogger::discard_reserved_chunk_(uint32_t seq, uint64_t bytes, ChunkState 
     ESP_LOGW(TAG, "%s: unlinked %s but the index would not drop it", reason, name);
   } else if (never_collected) {
     if (have_fill) {
-      ESP_LOGW(TAG, "%s: card %u%% full — discarded %s, %" PRIu32 " KB never collected (total %" PRIu32 ")",
-               reason, fill_percent, name, static_cast<uint32_t>(bytes / 1024), discarded_chunks);
+      ESP_LOGW(TAG, "%s: card %u%% full — discarded %s, %" PRIu32 " KB never collected (total %" PRIu32 ")", reason,
+               fill_percent, name, static_cast<uint32_t>(bytes / 1024), discarded_chunks);
     } else {
       ESP_LOGW(TAG, "%s: discarded %s, %" PRIu32 " KB never collected (total %" PRIu32 ")", reason, name,
                static_cast<uint32_t>(bytes / 1024), discarded_chunks);
@@ -3475,6 +3635,9 @@ void SdLogger::loop() {
   if (!this->mounted_ && this->recovery_.armed()) {
     ESP_LOGW(TAG, "  no card: recovery attempt %" PRIu32 " pending, next in <=%" PRIu32 " ms",
              this->recovery_.attempts() + 1, this->recovery_.delay_ms());
+  } else if (!this->mounted_ && this->write_recovery_stopped_) {
+    ESP_LOGE(TAG, "  logging stopped: last write failed without SD commands (write_failures=%" PRIu32 ")",
+             this->write_failures_);
   } else if (!this->mounted_ && this->recovery_.exhausted()) {
     ESP_LOGE(TAG, "  no card: recovery exhausted after %" PRIu32 " attempts", this->recovery_.attempts());
   }
@@ -3545,6 +3708,51 @@ void SdLogger::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  recovery: off (a card failure disables logging for the run)");
   }
+  ESP_LOGCONFIG(TAG, "  recovery_state=%s write_failures=%" PRIu32 " last_write_action=%s",
+                this->get_recovery_state(), this->write_failures_, this->get_last_write_action());
+  if (this->write_failures_ > 0) {
+    ESP_LOGCONFIG(TAG,
+                  "  last_write: vfs_offset=%" PRIu32 " derived_offset=%" PRIu32 " lseek_errno=%" PRId32
+                  " committed_end=%" PRIu32 " len=%" PRIu32 " errno=%" PRId32 " result=%" PRId32
+                  " elapsed=%" PRIu32 " us",
+                  this->last_write_failure_.offset, this->last_write_failure_.derived_offset,
+                  this->last_write_failure_.lseek_errno, this->last_write_failure_.committed_end,
+                  this->last_write_failure_.len, this->last_write_failure_.err_no, this->last_write_failure_.result,
+                  this->last_write_failure_.elapsed_us);
+    ESP_LOGCONFIG(TAG,
+                  "  last_write: spi_seq=%" PRIu32 "..%" PRIu32 " commands=%" PRIu32
+                  " available=%" PRIu32 " missing=%" PRIu32 " worst_err=%" PRId32,
+                  this->last_write_failure_.spi_begin, this->last_write_failure_.spi_end,
+                  this->last_write_failure_.spi.commands, this->last_write_failure_.spi.available,
+                  this->last_write_failure_.spi.missing, this->last_write_failure_.spi.worst_err);
+    ESP_LOGCONFIG(TAG,
+                  "  last_write: card_sectors=%" PRIu32 " volume_lba=%" PRIu32
+                  " volume_sectors=%" PRIu32 " heap_default=%" PRIu32 "/%" PRIu32
+                  " heap_dma=%" PRIu32 "/%" PRIu32,
+                  this->last_write_failure_.card_sectors, this->last_write_failure_.volume_first_lba,
+                  this->last_write_failure_.volume_sectors, this->last_write_failure_.heap_default_free,
+                  this->last_write_failure_.heap_default_largest, this->last_write_failure_.heap_dma_free,
+                  this->last_write_failure_.heap_dma_largest);
+  }
+  const uint32_t fil_size = static_cast<uint32_t>(sizeof(FIL));
+  const uint32_t fil_array_bytes = sd_fat_fil_array_bytes(fil_size, SD_LOGGER_FAT_MAX_FILES);
+  const uint32_t largest_default = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+  const uint32_t largest_internal = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  ESP_LOGCONFIG(TAG,
+                "  fatfs: FF_MAX_SS=%" PRIu32 " B sizeof(FIL)=%" PRIu32 " B max_files=%" PRIu32
+                " -> VFS mount malloc >=%" PRIu32 " B (FIL array; plus private IDF ctx)",
+                SD_FATFS_FF_MAX_SS, fil_size, SD_LOGGER_FAT_MAX_FILES, fil_array_bytes);
+  ESP_LOGCONFIG(TAG,
+                "  fatfs: largest MALLOC_CAP_DEFAULT block=%" PRIu32
+                " B (mount gate), largest MALLOC_CAP_INTERNAL block=%" PRIu32 " B (context only)",
+                largest_default, largest_internal);
+  if (sd_fat_fil_array_is_large(fil_array_bytes, largest_default)) {
+    ESP_LOGW(TAG,
+             "  fatfs: mount allocation is large for the DEFAULT heap; set CONFIG_WL_SECTOR_SIZE_512 when this image "
+             "does not need a 4096-byte wear-levelled FAT partition");
+  }
+  ESP_LOGCONFIG(TAG, "  fatfs: %" PRIu32 " volume slot(s) — a mount can only be registered this many times at once",
+                SD_FATFS_VOLUME_SLOTS);
   if (this->vcc_adc_gpio_ >= 0)
     ESP_LOGCONFIG(TAG, "  vcc_monitor: adc_gpio=%d threshold=%.2fV divider=%.2f (%s)", this->vcc_adc_gpio_,
                   this->vcc_threshold_v_, this->vcc_divider_,

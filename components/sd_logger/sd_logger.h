@@ -304,6 +304,32 @@ class SdLogger : public Component {
   uint32_t get_tap_drained_records() const;
   uint32_t get_tap_record_ring_accepted_records() const;
   uint32_t get_recovery_attempts() const { return recovery_.attempts(); }
+  const char *get_recovery_state() const;
+  uint32_t get_write_failures() const { return this->write_failures_; }
+  const char *get_last_write_action() const {
+    return this->write_failures_ == 0 ? "none" : write_failure_action_str(this->last_write_failure_.action);
+  }
+  int32_t get_last_write_errno() const { return this->last_write_failure_.err_no; }
+  int32_t get_last_write_result() const { return this->last_write_failure_.result; }
+  uint32_t get_last_write_offset() const { return this->last_write_failure_.offset; }
+  uint32_t get_last_write_derived_offset() const { return this->last_write_failure_.derived_offset; }
+  int32_t get_last_write_lseek_errno() const { return this->last_write_failure_.lseek_errno; }
+  uint32_t get_last_write_committed_end() const { return this->last_write_failure_.committed_end; }
+  uint32_t get_last_write_len() const { return this->last_write_failure_.len; }
+  uint32_t get_last_write_elapsed_us() const { return this->last_write_failure_.elapsed_us; }
+  uint32_t get_last_write_spi_begin() const { return this->last_write_failure_.spi_begin; }
+  uint32_t get_last_write_spi_end() const { return this->last_write_failure_.spi_end; }
+  uint32_t get_last_write_spi_commands() const { return this->last_write_failure_.spi.commands; }
+  uint32_t get_last_write_spi_available() const { return this->last_write_failure_.spi.available; }
+  uint32_t get_last_write_spi_missing() const { return this->last_write_failure_.spi.missing; }
+  int32_t get_last_write_spi_worst_err() const { return this->last_write_failure_.spi.worst_err; }
+  uint32_t get_last_write_card_sectors() const { return this->last_write_failure_.card_sectors; }
+  uint32_t get_last_write_volume_first_lba() const { return this->last_write_failure_.volume_first_lba; }
+  uint32_t get_last_write_volume_sectors() const { return this->last_write_failure_.volume_sectors; }
+  uint32_t get_last_write_heap_default_free() const { return this->last_write_failure_.heap_default_free; }
+  uint32_t get_last_write_heap_default_largest() const { return this->last_write_failure_.heap_default_largest; }
+  uint32_t get_last_write_heap_dma_free() const { return this->last_write_failure_.heap_dma_free; }
+  uint32_t get_last_write_heap_dma_largest() const { return this->last_write_failure_.heap_dma_largest; }
   // Retention's lifetime losses (design §7): chunks that were never collected and are now gone, and
   // what they held. Mirrored out of CollectionPolicy by the writer task rather than read from it,
   // because the index belongs to that task (§8) and these are read from the main loop.
@@ -495,7 +521,10 @@ class SdLogger : public Component {
   // The single transition into "no writable file": closes the fd, stops producers, and arms the
   // retry ladder. Everything that can discover a dead card routes through here, so `mounted_` and
   // `fd_` can never disagree about whether the logger is running.
-  void enter_failed_(const char *why);
+  void enter_failed_(const char *why, WriteFailureAction action = WriteFailureAction::RETRY_RECOVERY);
+  void capture_write_failure_(int32_t result, int err_no, uint32_t len, uint32_t offset, uint32_t derived_offset,
+                              int lseek_errno, uint32_t committed_end, int64_t elapsed_us, uint32_t spi_begin,
+                              uint32_t spi_end);
   // One bounded remount attempt: unmount, optionally power-cycle the card, mount, open a file.
   bool try_recover_();
   // Samples uxTaskGetStackHighWaterMark() for the writer task and keeps the running minimum. Called
@@ -649,6 +678,30 @@ class SdLogger : public Component {
   // Card recovery (spec §7 Layer C)
   RecoveryPolicy recovery_;
   bool recovery_power_cycle_{false};
+  bool write_recovery_stopped_{false};
+  uint32_t write_failures_{0};
+  struct LastWriteFailure {
+    int32_t result{0};
+    int32_t err_no{0};
+    uint32_t offset{0};
+    uint32_t derived_offset{0};
+    int32_t lseek_errno{0};
+    uint32_t committed_end{0};
+    uint32_t len{0};
+    uint32_t elapsed_us{0};
+    uint32_t spi_begin{0};
+    uint32_t spi_end{0};
+    SdSpiTraceSummary spi{};
+    uint32_t card_sectors{0};
+    uint32_t volume_first_lba{0};
+    uint32_t volume_sectors{0};
+    uint32_t heap_default_free{0};
+    uint32_t heap_default_largest{0};
+    uint32_t heap_dma_free{0};
+    uint32_t heap_dma_largest{0};
+    WriteFailureAction action{WriteFailureAction::RETRY_RECOVERY};
+  };
+  LastWriteFailure last_write_failure_{};
 
   // Chunk lifecycle, rotation bounds and retention (design §3/§4/§7). The *card* has one mutator,
   // the writer task (§8): the boot scan fills the index, close_file_() seals, retention_pass_()
@@ -731,6 +784,12 @@ class SdLogger : public Component {
 
   // sdmmc / tasks
   sdmmc_card_t *card_{nullptr};
+  // Mount-failure instrument (contract: sd_diagnostics.h MountFailureFacts). Writer-task/setup
+  // only, like the counters above — never read from another task, so no atomics.
+  uint32_t mounts_ok_{0};
+  uint32_t unmounts_ok_{0};
+  int32_t last_unmount_err_{0};
+  bool last_unmount_skipped_{false};
   TaskHandle_t writer_task_{nullptr};
   TaskHandle_t monitor_task_{nullptr};
 #ifdef USE_SWITCH
@@ -750,6 +809,9 @@ class SdLogger : public Component {
   std::atomic<uint32_t> writer_stack_min_free_{0};
   volatile bool mounted_{false};
   bool spi_bus_ok_{false};
+  uint32_t mounted_card_sectors_{0};
+  uint32_t mounted_volume_first_lba_{0};
+  uint32_t mounted_volume_sectors_{0};
   // True while the current mount only exists because the card's latched "in idle state" bit is
   // being masked. Worth surfacing rather than hiding: the card is working but has not completed a
   // real initialisation since it last had power, so the next power cycle is still owed to it.

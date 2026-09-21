@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace esphome {
@@ -17,6 +18,102 @@ static constexpr size_t SD_SPI_TRACE_ENTRIES = 512;
 // SDMMC/SDSPI raw-sector commands always address these physical 512-byte blocks. FAT may expose
 // larger logical sectors, but its BPB itself still resides in the first physical block.
 static constexpr size_t SD_LOGGER_CARD_SECTOR_BYTES = 512;
+/// FAT VFS files sd_logger may hold at once:
+///   1. the writer's append fd (`SdLogger::open_next_file_()`),
+///   2. one collection-server chunk read fd (`CollectionServer::serve_chunk_()`),
+///   3. one spare VFS opener for diagnostics/future read-only tooling.
+/// ESP-IDF's esp_http_server runs one handler task, so the chunk read fd cannot overlap itself even
+/// though the socket limit is higher. If the collection server ever becomes multi-tasked, this
+/// number must grow with the maximum simultaneous chunk handlers.
+/// `opendir()` is not counted either: IDF's FAT VFS allocates a directory object with ff_memalloc()
+/// rather than taking one of the mount context's FIL entries.
+/// `confine_format()` is deliberately absent: it stops the writer, unmounts the VFS, and uses
+/// FatFs directly before remounting, so it is not concurrent with the mounted logger.
+static constexpr uint32_t SD_LOGGER_FAT_MAX_FILES = 3;
+static constexpr uint32_t SD_LOGGER_FAT_ALLOC_WARN_NUMERATOR = 3;
+static constexpr uint32_t SD_LOGGER_FAT_ALLOC_WARN_DENOMINATOR = 1;
+
+inline uint32_t sd_fat_fil_array_bytes(uint32_t fil_size, uint32_t max_files) { return fil_size * max_files; }
+
+inline bool sd_fat_fil_array_is_large(uint32_t fil_array_bytes, uint32_t largest_default_block) {
+  return fil_array_bytes > 0 && largest_default_block > 0 &&
+         static_cast<uint64_t>(fil_array_bytes) * SD_LOGGER_FAT_ALLOC_WARN_NUMERATOR >=
+             static_cast<uint64_t>(largest_default_block) * SD_LOGGER_FAT_ALLOC_WARN_DENOMINATOR;
+}
+
+/// Facts gathered when a mount fails. Deliberately no verdict field: ESP_ERR_NO_MEM
+/// has three different causes in IDF and only these numbers separate them, so the
+/// line reports state and the operator concludes.
+struct MountFailureFacts {
+  int32_t err;                     ///< esp_err_t the mount returned
+  uint32_t free_internal;          ///< heap_caps_get_free_size(MALLOC_CAP_INTERNAL)
+  uint32_t largest_block;          ///< heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+  uint32_t largest_block_default;  ///< heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT) — the pool ff_memalloc()
+                                   ///< actually uses
+  uint32_t vfs_fil_array_bytes;    ///< sizeof(FIL) * max_files, the visible part of the one VFS-context malloc;
+                                   ///< excludes private IDF vfs_fat_ctx_t fixed overhead
+  uint32_t fatfs_volume_slots;     ///< FF_VOLUMES: how many mounts can exist at once
+  int32_t last_unmount_err;        ///< last esp_vfs_fat_sdcard_unmount() result
+  bool last_unmount_skipped;       ///< card_ was null, so no unmount was attempted
+  uint32_t mounts_ok;
+  uint32_t unmounts_ok;
+};
+
+/// Renders the facts in one fixed-order line. Returns snprintf's result.
+inline int format_mount_failure(char *out, size_t len, const MountFailureFacts &f) {
+  return std::snprintf(out, len,
+                       "free=%u B largest_block=%u B largest_block_default=%u B vfs_fil_array=%u B fatfs_slots=%u "
+                       "mounts_ok=%u unmounts_ok=%u last_unmount=0x%04X unmount_skipped=%s",
+                       static_cast<unsigned>(f.free_internal), static_cast<unsigned>(f.largest_block),
+                       static_cast<unsigned>(f.largest_block_default), static_cast<unsigned>(f.vfs_fil_array_bytes),
+                       static_cast<unsigned>(f.fatfs_volume_slots), static_cast<unsigned>(f.mounts_ok),
+                       static_cast<unsigned>(f.unmounts_ok),
+                       // %X wants unsigned int; last_unmount_err is a signed esp_err_t, so this cast is
+                       // a reinterpretation of the same bit pattern, not a truncation. On a negative
+                       // esp_err_t that renders as the full 8 hex digits (e.g. -1 -> 0xFFFFFFFF), because
+                       // %04X is a MINIMUM field width, never a mask — the whole point of the field is to
+                       // carry a real error code legibly.
+                       static_cast<unsigned>(f.last_unmount_err), f.last_unmount_skipped ? "yes" : "no");
+}
+
+/// Worst-case rendered length of format_mount_failure(), excluding the terminating NUL:
+/// every %u at 10 digits, last_unmount at its full 8 hex digits, and "yes" (the longer of the
+/// two unmount_skipped spellings). MEASURED at 217 on 2026-09-21; the host test re-derives it
+/// from the real formatter every run and fails if this drifts, so it cannot go stale silently.
+static constexpr size_t SD_MOUNT_FAILURE_LINE_WORST_CASE = 217;
+
+/// What a caller must provide. Lives here, beside the format string, so adding a field to
+/// MountFailureFacts cannot silently outgrow a literal at a call site in another file — which
+/// is exactly what happened when largest_block_default was added.
+static constexpr size_t SD_MOUNT_FAILURE_LINE_BYTES = 256;
+
+static_assert(SD_MOUNT_FAILURE_LINE_BYTES > SD_MOUNT_FAILURE_LINE_WORST_CASE,
+              "mount-failure line buffer must hold the worst-case render plus its NUL");
+
+enum class WriteFailureAction : uint8_t {
+  RETRY_RECOVERY,
+  STOP_NO_BUS_TRAFFIC,
+};
+
+inline const char *write_failure_action_str(WriteFailureAction action) {
+  switch (action) {
+    case WriteFailureAction::STOP_NO_BUS_TRAFFIC:
+      return "stop_no_bus_traffic";
+    case WriteFailureAction::RETRY_RECOVERY:
+    default:
+      return "retry_recovery";
+  }
+}
+
+/// The recovery ladder can only repair the layers it touches: card state, SPI device state, VFS
+/// registration and a freshly opened FatFs file. If a failed write() did not issue even one SDSPI
+/// transaction, the card and block driver were not involved in that failure; the refusal happened
+/// inside FatFs/VFS before the ladder's remount work can change the outcome. A real card-gone
+/// failure has to be discovered by asking the card something, so it advances the trace and remains
+/// recoverable by the existing ladder.
+inline WriteFailureAction classify_write_failure(uint32_t spi_commands_issued) {
+  return spi_commands_issued == 0 ? WriteFailureAction::STOP_NO_BUS_TRAFFIC : WriteFailureAction::RETRY_RECOVERY;
+}
 
 struct RawSectorRequest {
   uint32_t lba{0};
@@ -162,9 +259,18 @@ struct SdSpiTraceEntry {
   uint32_t blklen{0};
   uint32_t datalen{0};
   uint32_t flags{0};
+  uint32_t response_raw{0};
+  uint32_t response{0};
   int32_t err{0};
   int32_t opcode{0};
   char task[9]{};
+};
+
+struct SdSpiTraceSummary {
+  uint32_t commands{0};
+  uint32_t available{0};
+  uint32_t missing{0};
+  int32_t worst_err{0};
 };
 
 /// A lossy append-only ring. Readers snapshot `write_index()` and may observe
@@ -181,6 +287,8 @@ class SdSpiTraceRing {
     slot.blklen.store(entry.blklen, std::memory_order_relaxed);
     slot.datalen.store(entry.datalen, std::memory_order_relaxed);
     slot.flags.store(entry.flags, std::memory_order_relaxed);
+    slot.response_raw.store(entry.response_raw, std::memory_order_relaxed);
+    slot.response.store(entry.response, std::memory_order_relaxed);
     slot.err.store(entry.err, std::memory_order_relaxed);
     slot.opcode.store(entry.opcode, std::memory_order_relaxed);
     uint32_t task_low = 0;
@@ -213,6 +321,8 @@ class SdSpiTraceRing {
     entry.blklen = slot.blklen.load(std::memory_order_relaxed);
     entry.datalen = slot.datalen.load(std::memory_order_relaxed);
     entry.flags = slot.flags.load(std::memory_order_relaxed);
+    entry.response_raw = slot.response_raw.load(std::memory_order_relaxed);
+    entry.response = slot.response.load(std::memory_order_relaxed);
     entry.err = slot.err.load(std::memory_order_relaxed);
     entry.opcode = slot.opcode.load(std::memory_order_relaxed);
     const uint32_t task_low = slot.task_low.load(std::memory_order_relaxed);
@@ -221,6 +331,26 @@ class SdSpiTraceRing {
     std::memcpy(entry.task + sizeof(task_low), &task_high, sizeof(task_high));
     entry.task[sizeof(entry.task) - 1] = '\0';
     return entry;
+  }
+  SdSpiTraceSummary summarize(uint32_t begin, uint32_t end) const {
+    SdSpiTraceSummary summary{};
+    summary.commands = end - begin;
+    for (uint32_t seq = begin; seq != end; seq++) {
+      const SdSpiTraceEntry entry = this->read(seq);
+      if (entry.seq != seq) {
+        summary.missing++;
+        continue;
+      }
+      summary.available++;
+      if (entry.err != 0) {
+        const int64_t current =
+            summary.worst_err < 0 ? -static_cast<int64_t>(summary.worst_err) : static_cast<int64_t>(summary.worst_err);
+        const int64_t candidate = entry.err < 0 ? -static_cast<int64_t>(entry.err) : static_cast<int64_t>(entry.err);
+        if (summary.worst_err == 0 || candidate > current)
+          summary.worst_err = entry.err;
+      }
+    }
+    return summary;
   }
   void clear() {
     this->write_index_.store(0, std::memory_order_relaxed);
@@ -236,6 +366,8 @@ class SdSpiTraceRing {
     std::atomic<uint32_t> blklen{0};
     std::atomic<uint32_t> datalen{0};
     std::atomic<uint32_t> flags{0};
+    std::atomic<uint32_t> response_raw{0};
+    std::atomic<uint32_t> response{0};
     std::atomic<int32_t> err{0};
     std::atomic<int32_t> opcode{0};
     std::atomic<uint32_t> task_low{0};

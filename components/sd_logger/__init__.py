@@ -23,6 +23,7 @@ import re
 from esphome import automation, core
 import esphome.codegen as cg
 from esphome.components.esp32 import (
+    CONF_SDKCONFIG_OPTIONS,
     include_builtin_idf_component,
     only_on_variant,
     require_vfs_dir,
@@ -37,6 +38,7 @@ from esphome.components import time
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DATA,
+    CONF_FRAMEWORK,
     CONF_ID,
     CONF_LEVEL,
     CONF_LOGGER,
@@ -1005,6 +1007,45 @@ def _validate_collection(config, full_config):
             )
 
 
+def _sdkconfig_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "y", "yes", "true", "on"}
+
+
+def _warn_wl_sector_size(full_config):
+    """Warn when the image is likely to build FF_MAX_SS at 4096.
+
+    This stays a warning, not a hard failure and not an automatic sdkconfig write: an image may
+    legitimately carry a wear-levelling FAT partition on internal flash that needs 4096-byte
+    sectors, and silently forcing 512 would corrupt that filesystem. ESPHome does not expose the
+    fully resolved IDF sdkconfig to an external component during final validation, so the reliable
+    input here is only what the YAML explicitly states. Absence is warned because IDF's default
+    `CONFIG_WL_SECTOR_SIZE` is 4096, which raises `FF_MAX_SS`, inflates every `FIL`, and is exactly
+    the measured sd_logger mount failure.
+    """
+    esp32_config = full_config.get("esp32") or {}
+    framework = esp32_config.get(CONF_FRAMEWORK) or {}
+    options = framework.get(CONF_SDKCONFIG_OPTIONS) or {}
+    numeric = str(options.get("CONFIG_WL_SECTOR_SIZE", "")).strip()
+    explicit_512 = numeric == "512" or _sdkconfig_truthy(
+        options.get("CONFIG_WL_SECTOR_SIZE_512")
+    )
+    explicit_4096 = numeric == "4096" or _sdkconfig_truthy(
+        options.get("CONFIG_WL_SECTOR_SIZE_4096")
+    )
+    if explicit_512 and not explicit_4096:
+        return
+    _LOGGER.warning(
+        "sd_logger: CONFIG_WL_SECTOR_SIZE is not explicitly 512, so IDF may build "
+        "FF_MAX_SS as 4096 and make each FAT FIL about 4 KiB; sd_logger mounts then "
+        "need one large contiguous MALLOC_CAP_DEFAULT allocation. If this image does "
+        "not need a 4096-byte wear-levelled FAT partition on flash, add "
+        "esp32.framework.sdkconfig_options.CONFIG_WL_SECTOR_SIZE_512: y "
+        "(or CONFIG_WL_SECTOR_SIZE: '512')."
+    )
+
+
 def _final_validate(config):
     """V12: a tapped port must have `log_tap: true` on the can_gateway side.
 
@@ -1047,6 +1088,7 @@ def _final_validate(config):
 
     _validate_esphome_logs(config, full_config)
     _validate_collection(config, full_config)
+    _warn_wl_sector_size(full_config)
 
     if (entries := config.get(CONF_CAN_PORTS)) is None:
         return config
