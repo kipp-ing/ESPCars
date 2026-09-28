@@ -93,7 +93,10 @@ CONFLICTS_WITH = ["esp32_can"]
 #                bool default_accept)
 #   void add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flags,
 #                 uint32_t new_id, uint64_t and_mask, uint64_t or_value,
-#                 RulePatch *patch)                   // patch may be nullptr
+#                 RulePatch *patch,                   // patch may be nullptr
+#                 uint64_t declared_mask)             // bits set_signal may touch
+#   void set_last_rule_e2e(uint8_t crc_index, uint8_t first, uint8_t last,
+#                          uint8_t poly)              // modify.e2e of the last rule
 #   // flags: _rule_flags() emits the RULE_FLAG_* constants symbolically, so
 #   // the bit values live only in gateway_core.h (bits 0-4, straight into
 #   // the core RuleEntry) and can_gateway.h (bits 5-6: OUT_EXT, REPLACE_ID,
@@ -106,6 +109,8 @@ CONFLICTS_WITH = ["esp32_can"]
 # RulePatch                                            // A8 double bank
 #   void set_byte(uint8_t index, uint8_t value)        // stages
 #   void set_can_id(uint32_t can_id)                   // stages
+#   bool set_signal(uint8_t start, uint8_t len, bool big_endian,
+#                   uint32_t raw, bool enabled)        // stages, within declared bits
 #   void commit()                                      // atomic bank flip
 #
 # template<typename... Ts> SetPatchAction : Action<Ts...>, Parented<RulePatch>
@@ -151,6 +156,7 @@ CanGatewayFrameTrigger = can_gateway_ns.class_(
 )
 RulePatch = can_gateway_ns.class_("RulePatch")
 SetPatchAction = can_gateway_ns.class_("SetPatchAction", automation.Action)
+SetSignalAction = can_gateway_ns.class_("SetSignalAction", automation.Action)
 InjectAction = can_gateway_ns.class_("InjectAction", automation.Action)
 CyclicSend = can_gateway_ns.class_("CyclicSend")
 SetCyclicDataAction = can_gateway_ns.class_("SetCyclicDataAction", automation.Action)
@@ -188,6 +194,21 @@ CONF_OBSERVE_QUEUE_DEPTH = "observe_queue_depth"
 CONF_LOG_TAP = "log_tap"
 CONF_LOG_TAP_QUEUE_DEPTH = "log_tap_queue_depth"
 CONF_MAX_FRAMES_PER_LOOP = "max_frames_per_loop"
+# Bit-level signal position — shared by the decode platforms and modify.signals.
+CONF_BIT_OFFSET = "bit_offset"
+CONF_BIT_LENGTH = "bit_length"
+CONF_BYTE_ORDER = "byte_order"
+BYTE_ORDER_LITTLE = "little"
+BYTE_ORDER_BIG = "big"
+# modify.signals / modify.e2e and can_gateway.set_signal
+CONF_SIGNALS = "signals"
+CONF_E2E = "e2e"
+CONF_CRC_BYTE = "crc_byte"
+CONF_FIRST_BYTE = "first_byte"
+CONF_LAST_BYTE = "last_byte"
+CONF_POLYNOMIAL = "polynomial"
+CONF_FACTOR = "factor"
+CONF_SIGNED = "signed"
 
 # Fixed bound on the per-port subscribed-ID membership set (spec N7). Must match
 # CAN_GATEWAY_MAX_OBSERVE_IDS in the C++ header default (defines.h).
@@ -204,6 +225,7 @@ LOG_TAP_DEPTH_DEFAULT = 1024
 MAX_ROUTE_FILTERS = 255
 
 ACTION_SET_PATCH = "can_gateway.set_patch"
+ACTION_SET_SIGNAL = "can_gateway.set_signal"
 ACTION_SEND = "can_gateway.send"
 ACTION_INJECT = "can_gateway.inject"  # v0.4/v0.5 name; kept as a can_gateway.send alias
 ACTION_SET_CYCLIC_DATA = "can_gateway.set_cyclic_data"
@@ -271,6 +293,17 @@ def _validate_rule(rule):
     # V5: modifying a dropped frame is contradictory.
     if rule[CONF_ACTION] == ACTION_DROP:
         raise cv.Invalid("modify cannot be combined with action: drop")
+
+    # V36: a signal declared without a value only ever passes through unless
+    # can_gateway.set_signal can reach it — which needs the rule id.
+    if CONF_ID not in rule and any(
+        CONF_VALUE not in sig for sig in modify.get(CONF_SIGNALS, [])
+    ):
+        raise cv.Invalid(
+            "a modify.signals entry without a value is driven at runtime by "
+            "can_gateway.set_signal, which needs the rule's id — add an id, or "
+            "give the signal a fixed value"
+        )
 
     out_extended = modify.get(CONF_USE_EXTENDED_ID, extended)
     if (new_id := modify.get(CONF_CAN_ID)) is not None:
@@ -499,6 +532,103 @@ PATCH_BYTE_SCHEMA = cv.Schema(
     }
 )
 
+def _validate_signal_patch(sig):
+    """V32: a modify.signals field lies inside the frame; its value fits."""
+    big = sig[CONF_BYTE_ORDER] == BYTE_ORDER_BIG
+    _check_signal_fits(sig[CONF_BIT_OFFSET], sig[CONF_BIT_LENGTH], big)
+    if (value := sig.get(CONF_VALUE)) is not None and value >= (1 << sig[CONF_BIT_LENGTH]):
+        raise cv.Invalid(
+            f"value {value} does not fit a {sig[CONF_BIT_LENGTH]}-bit field "
+            f"(this is the RAW value; physical values go through set_signal's factor/offset)"
+        )
+    return sig
+
+
+SIGNAL_PATCH_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_BIT_OFFSET): cv.int_range(min=0, max=63),
+            cv.Required(CONF_BIT_LENGTH): cv.int_range(min=1, max=32),
+            cv.Optional(CONF_BYTE_ORDER, default=BYTE_ORDER_LITTLE): cv.one_of(
+                BYTE_ORDER_LITTLE, BYTE_ORDER_BIG, lower=True
+            ),
+            # Raw field value stamped from boot. Without it the field is declared
+            # but passes the original bits through until can_gateway.set_signal.
+            cv.Optional(CONF_VALUE): cv.int_range(min=0, max=0xFFFFFFFF),
+        }
+    ),
+    _validate_signal_patch,
+)
+
+
+def _validate_e2e(e2e):
+    """V33: the CRC byte lies outside the range it covers."""
+    crc = e2e[CONF_CRC_BYTE]
+    if CONF_LAST_BYTE not in e2e:
+        if crc == 0:
+            raise cv.Invalid("crc_byte 0 needs an explicit first_byte/last_byte range")
+        e2e[CONF_LAST_BYTE] = crc - 1
+    first, last = e2e[CONF_FIRST_BYTE], e2e[CONF_LAST_BYTE]
+    if first > last:
+        raise cv.Invalid(f"first_byte ({first}) is after last_byte ({last})")
+    if first <= crc <= last:
+        raise cv.Invalid(f"crc_byte ({crc}) lies inside the covered range {first}..{last}")
+    return e2e
+
+
+E2E_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_CRC_BYTE): cv.int_range(min=0, max=7),
+            cv.Optional(CONF_FIRST_BYTE, default=0): cv.int_range(min=0, max=7),
+            cv.Optional(CONF_LAST_BYTE): cv.int_range(min=0, max=7),
+            # MSB-first CRC-8. 0x1D = SAE J1850. Init / xor-out / a leading data-ID
+            # are not needed: the CRC is corrected by the delta (gateway_core.h).
+            cv.Optional(CONF_POLYNOMIAL, default=0x1D): cv.int_range(min=1, max=255),
+        }
+    ),
+    _validate_e2e,
+)
+
+
+def _payload_cells(modify) -> dict[tuple[int, int], str]:
+    """(byte, bit) -> which modify entry claims it; raises on overlaps (V34)."""
+    owner: dict[tuple[int, int], str] = {}
+
+    def claim(cell, who):
+        if cell in owner:
+            raise cv.Invalid(
+                f"byte {cell[0]} bit {cell[1]} is patched by both {owner[cell]} and {who}"
+            )
+        owner[cell] = who
+
+    for patch in modify.get(CONF_DATA, []):
+        for bit in range(8):
+            if patch[CONF_MASK] & (1 << bit):
+                claim((patch[CONF_INDEX], bit), f"data[index {patch[CONF_INDEX]}]")
+    for i, sig in enumerate(modify.get(CONF_SIGNALS, [])):
+        big = sig[CONF_BYTE_ORDER] == BYTE_ORDER_BIG
+        for cell in signal_bits(sig[CONF_BIT_OFFSET], sig[CONF_BIT_LENGTH], big):
+            claim(cell, f"signals[{i}]")
+    return owner
+
+
+def _validate_modify(modify):
+    """V34: no payload bit is patched twice. V35: e2e needs a payload patch and
+    its CRC byte must not itself be patched."""
+    owner = _payload_cells(modify)
+    if (e2e := modify.get(CONF_E2E)) is not None:
+        if not owner:
+            raise cv.Invalid("e2e repairs the CRC after a payload patch; add data or signals")
+        crc = e2e[CONF_CRC_BYTE]
+        if any(byte == crc for byte, _ in owner):
+            raise cv.Invalid(
+                f"crc_byte {crc} is also patched; the CRC is maintained by e2e, "
+                f"not written directly"
+            )
+    return modify
+
+
 MODIFY_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -509,9 +639,14 @@ MODIFY_SCHEMA = cv.All(
                 cv.Length(min=1),
                 _validate_patch_bytes,
             ),
+            cv.Optional(CONF_SIGNALS): cv.All(
+                cv.ensure_list(SIGNAL_PATCH_SCHEMA), cv.Length(min=1)
+            ),
+            cv.Optional(CONF_E2E): E2E_SCHEMA,
         }
     ),
-    cv.has_at_least_one_key(CONF_CAN_ID, CONF_USE_EXTENDED_ID, CONF_DATA),
+    cv.has_at_least_one_key(CONF_CAN_ID, CONF_USE_EXTENDED_ID, CONF_DATA, CONF_SIGNALS),
+    _validate_modify,
 )
 
 FILTER_SCHEMA = cv.All(
@@ -618,10 +753,6 @@ STATISTICS_SCHEMA = cv.Schema(
 # Signal decode (v0.6, S9) — shared schema/validation for the entity platforms
 # ---------------------------------------------------------------------------
 
-CONF_BIT_OFFSET = "bit_offset"
-CONF_BIT_LENGTH = "bit_length"
-CONF_BYTE_ORDER = "byte_order"
-CONF_SIGNED = "signed"
 CONF_BIT = "bit"
 CONF_MAP = "map"
 # `sna:` names the raw value a DBC reserves for "signal not available". The key
@@ -629,8 +760,6 @@ CONF_MAP = "map"
 # (byte_order, signed) rather than being a flag plus a second value key.
 CONF_SNA = "sna"
 
-BYTE_ORDER_LITTLE = "little"
-BYTE_ORDER_BIG = "big"
 # The dominant SNA convention: all ones for the signal's own bit width. Measured
 # on a real 165-message HV-battery DBC — 377 of 377 SNA entries in its VAL_
 # tables are all-ones, none is anything else. The integer form is the escape
@@ -688,23 +817,50 @@ def validate_signal_position(config):
                 "supported; >32-bit decode is deferred — use a lambda filter"
             )
     else:
-        bit_offset = config[CONF_BIT_OFFSET]
-        bit_length = config[CONF_BIT_LENGTH]
-        if bit_offset + bit_length > 64:
-            raise cv.Invalid(
-                f"bit_offset ({bit_offset}) + bit_length ({bit_length}) runs past "
-                f"the 64-bit frame"
-            )
-        # Bit-level extraction uses little-endian (Intel) bit numbering. The
-        # Motorola backward-bit-numbering case is deferred (spec), so a
-        # big-endian bit-level field would decode wrong — reject it.
-        if config.get(CONF_BYTE_ORDER, BYTE_ORDER_LITTLE) == BYTE_ORDER_BIG:
-            raise cv.Invalid(
-                "big-endian byte order is not supported for a bit-level field "
-                "(Motorola backward-bit-numbering is deferred); use the "
-                "byte-aligned form, or little-endian"
-            )
+        big = config.get(CONF_BYTE_ORDER, BYTE_ORDER_LITTLE) == BYTE_ORDER_BIG
+        _check_signal_fits(config[CONF_BIT_OFFSET], config[CONF_BIT_LENGTH], big)
     return config
+
+
+def signal_bits(start_bit: int, bit_length: int, big_endian: bool):
+    """The (byte, bit) cells of a bit-level field, LSB first, or None when the
+    field leaves the 8-byte payload. Mirrors for_each_signal_bit() in
+    gateway_core.h: Intel counts up from the LSB at start_bit; Motorola starts at
+    the MSB (DBC sawtooth numbering) and walks down a byte, then on at bit 7 of
+    the next byte."""
+    cells = []
+    if not big_endian:
+        for k in range(bit_length):
+            pos = start_bit + k
+            if pos >= 64:
+                return None
+            cells.append((pos // 8, pos % 8))
+        return cells
+    byte, bit = divmod(start_bit, 8)
+    for _ in range(bit_length):
+        if byte >= 8:
+            return None
+        cells.append((byte, bit))
+        if bit == 0:
+            byte, bit = byte + 1, 7
+        else:
+            bit -= 1
+    cells.reverse()
+    return cells
+
+
+def _check_signal_fits(start_bit: int, bit_length: int, big_endian: bool) -> None:
+    if signal_bits(start_bit, bit_length, big_endian) is None:
+        if big_endian:
+            raise cv.Invalid(
+                f"Motorola field (start/MSB bit {start_bit}, {bit_length} bits) runs "
+                f"past byte 7 — a DBC Motorola start bit is the MSB, and the field "
+                f"continues towards higher bytes"
+            )
+        raise cv.Invalid(
+            f"bit_offset ({start_bit}) + bit_length ({bit_length}) runs past "
+            f"the 64-bit frame"
+        )
 
 
 def validate_sna_value(value):
@@ -798,6 +954,37 @@ CONFIG_SCHEMA = cv.All(
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
+
+
+def _validate_set_signal(config):
+    """V37: the field lies inside the frame; factor is not zero."""
+    big = config[CONF_BYTE_ORDER] == BYTE_ORDER_BIG
+    _check_signal_fits(config[CONF_BIT_OFFSET], config[CONF_BIT_LENGTH], big)
+    if config[CONF_FACTOR] == 0:
+        raise cv.Invalid("factor must not be 0")
+    return config
+
+
+SET_SIGNAL_ACTION_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(RulePatch),
+            cv.Required(CONF_BIT_OFFSET): cv.int_range(min=0, max=63),
+            cv.Required(CONF_BIT_LENGTH): cv.int_range(min=1, max=32),
+            cv.Optional(CONF_BYTE_ORDER, default=BYTE_ORDER_LITTLE): cv.one_of(
+                BYTE_ORDER_LITTLE, BYTE_ORDER_BIG, lower=True
+            ),
+            cv.Optional(CONF_SIGNED, default=False): cv.boolean,
+            # Physical value; raw = round((value - offset) / factor), saturated.
+            # NaN (e.g. a lambda returning NAN) restores pass-through.
+            cv.Required(CONF_VALUE): cv.templatable(cv.float_),
+            cv.Optional(CONF_FACTOR, default=1.0): cv.float_,
+            cv.Optional(CONF_OFFSET, default=0.0): cv.float_,
+            cv.Optional(CONF_ENABLED, default=True): cv.templatable(cv.boolean),
+        }
+    ),
+    _validate_set_signal,
+)
 
 
 SET_PATCH_ACTION_SCHEMA = cv.All(
@@ -903,7 +1090,7 @@ def _collect_actions(node, found: list) -> None:
     """Recursively find gateway actions anywhere in the validated config."""
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in (ACTION_SET_PATCH, ACTION_SEND, ACTION_INJECT):
+            if key in (ACTION_SET_PATCH, ACTION_SET_SIGNAL, ACTION_SEND, ACTION_INJECT):
                 found.append((key, value))
             _collect_actions(value, found)
     elif isinstance(node, list):
@@ -924,6 +1111,20 @@ def _declared_patch_shapes(config) -> dict[str, tuple[set[int], bool, bool]]:
             out_extended = modify.get(CONF_USE_EXTENDED_ID, rule[CONF_USE_EXTENDED_ID])
             shapes[str(rule_id)] = (indices, CONF_CAN_ID in modify, out_extended)
     return shapes
+
+
+def _declared_signals(config) -> dict[str, set[tuple[int, int, str]]]:
+    """Map rule-id name -> {(bit_offset, bit_length, byte_order)} of its modify.signals."""
+    signals: dict[str, set[tuple[int, int, str]]] = {}
+    for route in config.get(CONF_ROUTES, []):
+        for rule in route.get(CONF_FILTERS, []):
+            if (rule_id := rule.get(CONF_ID)) is None:
+                continue
+            signals[str(rule_id)] = {
+                (sig[CONF_BIT_OFFSET], sig[CONF_BIT_LENGTH], sig[CONF_BYTE_ORDER])
+                for sig in rule.get(CONF_MODIFY, {}).get(CONF_SIGNALS, [])
+            }
+    return signals
 
 
 def _final_validate(config):
@@ -949,6 +1150,7 @@ def _final_validate(config):
         )
 
     shapes = _declared_patch_shapes(config)
+    declared_signals = _declared_signals(config)
     listen_only_ports = {
         str(port[CONF_ID]) for port in config[CONF_PORTS] if port[CONF_LISTEN_ONLY]
     }
@@ -979,6 +1181,25 @@ def _final_validate(config):
                         f"rule '{rule_name}' does not declare byte index "
                         f"{patch[CONF_INDEX]} in its modify.data"
                     )
+        elif action_name == ACTION_SET_SIGNAL:
+            # V38: set_signal drives exactly one declared modify.signals field.
+            rule_name = str(action[CONF_ID])
+            if rule_name not in declared_signals:
+                raise cv.Invalid(
+                    f"'{rule_name}' is not an updatable filter rule "
+                    f"(give the rule an id and a modify block)"
+                )
+            field = (
+                action[CONF_BIT_OFFSET],
+                action[CONF_BIT_LENGTH],
+                action[CONF_BYTE_ORDER],
+            )
+            if field not in declared_signals[rule_name]:
+                raise cv.Invalid(
+                    f"rule '{rule_name}' does not declare the signal "
+                    f"bit_offset {field[0]}, bit_length {field[1]}, byte_order "
+                    f"{field[2]} in its modify.signals"
+                )
         elif action_name in (ACTION_SEND, ACTION_INJECT):
             # V22: `port` may be omitted only when exactly one port is declared;
             # resolve it to that port so codegen always has one.
@@ -1094,7 +1315,31 @@ def _packed_patch_masks(modify) -> tuple[int, int]:
         shift = 8 * index
         and_mask &= ~(mask << shift) & 0xFFFF_FFFF_FFFF_FFFF
         or_value |= (patch[CONF_VALUE] & mask) << shift
+    # modify.signals with a boot value are stamped from the start; the others
+    # stay pass-through (identity) until can_gateway.set_signal enables them.
+    for sig in modify.get(CONF_SIGNALS, []):
+        if (value := sig.get(CONF_VALUE)) is None:
+            continue
+        big = sig[CONF_BYTE_ORDER] == BYTE_ORDER_BIG
+        for k, (byte, bit) in enumerate(
+            signal_bits(sig[CONF_BIT_OFFSET], sig[CONF_BIT_LENGTH], big)
+        ):
+            pos = 8 * byte + bit
+            and_mask &= ~(1 << pos) & 0xFFFF_FFFF_FFFF_FFFF
+            if (value >> k) & 1:
+                or_value |= 1 << pos
     return and_mask, or_value
+
+
+def _declared_mask(modify) -> int:
+    """Every payload bit the rule may touch (data masks + signal fields), byte i
+    at bits 8*i — the fence RulePatch::set_signal() cannot cross."""
+    if modify is None:
+        return 0
+    declared = 0
+    for byte, bit in _payload_cells(modify):
+        declared |= 1 << (8 * byte + bit)
+    return declared
 
 
 async def to_code(config):
@@ -1227,8 +1472,18 @@ async def to_code(config):
                     and_mask,
                     or_value,
                     patch,
+                    _declared_mask(modify),
                 )
             )
+            if modify is not None and (e2e := modify.get(CONF_E2E)) is not None:
+                cg.add(
+                    route.set_last_rule_e2e(
+                        e2e[CONF_CRC_BYTE],
+                        e2e[CONF_FIRST_BYTE],
+                        e2e[CONF_LAST_BYTE],
+                        e2e[CONF_POLYNOMIAL],
+                    )
+                )
         cg.add(var.add_route(route))
 
     cyclic_sends = config.get(CONF_CYCLIC_SENDS, [])
@@ -1288,6 +1543,29 @@ async def set_patch_action_to_code(config, action_id, template_arg, args):
             cg.add(var.add_templated_byte(patch[CONF_INDEX], template_))
         else:
             cg.add(var.add_static_byte(patch[CONF_INDEX], value))
+    return var
+
+
+@automation.register_action(
+    ACTION_SET_SIGNAL, SetSignalAction, SET_SIGNAL_ACTION_SCHEMA, synchronous=True
+)
+async def set_signal_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(
+        var.set_field(
+            config[CONF_BIT_OFFSET],
+            config[CONF_BIT_LENGTH],
+            config[CONF_BYTE_ORDER] == BYTE_ORDER_BIG,
+            config[CONF_SIGNED],
+            config[CONF_FACTOR],
+            config[CONF_OFFSET],
+        )
+    )
+    value = await cg.templatable(config[CONF_VALUE], args, cg.float_)
+    cg.add(var.set_value(value))
+    enabled = await cg.templatable(config[CONF_ENABLED], args, cg.bool_)
+    cg.add(var.set_enabled(enabled))
     return var
 
 

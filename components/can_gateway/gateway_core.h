@@ -109,6 +109,64 @@ class PatchBanks {
 };
 
 // ---------------------------------------------------------------------------------------------
+// E2E: keep a frame's CRC byte valid across a patch
+// ---------------------------------------------------------------------------------------------
+//
+// Many vehicle frames end in a CRC-8 over some payload bytes plus a message counter. A gateway
+// that patches such a frame must fix the CRC or the receiver discards the frame. We do NOT
+// recompute the CRC from scratch — that needs init, xor-out and any data-ID folded into it,
+// which are often undocumented. A CRC is affine over GF(2): for a fixed length n,
+// crc(x) = L(x) ^ K, where L is the plain CRC (init 0, xor-out 0) and K depends only on
+// init / xor-out / a *leading* data-ID. So for the original payload a and the patched payload b:
+//     crc(b) = crc(a) ^ L(a ^ b)
+// We correct the received CRC by L of what we changed. Only the polynomial and the covered byte
+// range must be known; an unpatched frame keeps its CRC bit-for-bit, and a frame that arrived
+// with a wrong CRC stays wrong (a corrupt frame is never laundered). Limits: MSB-first
+// (non-reflected) CRC-8 only (e.g. SAE J1850, poly 0x1D), and a data-ID appended AFTER the data
+// breaks the identity. The message counter is untouched: it is the sender's, forwarded as received.
+
+/// Plain CRC-8, MSB-first, init 0, no xor-out — the linear part L(x). Runs in the ISR.
+CAN_GATEWAY_CORE_INLINE uint8_t crc8_linear(const uint8_t *data, uint8_t len, uint8_t poly) {
+  uint8_t crc = 0;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (uint8_t b = 0; b < 8; b++)
+      crc = (crc & 0x80u) ? static_cast<uint8_t>((crc << 1) ^ poly) : static_cast<uint8_t>(crc << 1);
+  }
+  return crc;
+}
+
+/// crc_index value that means "this rule has no E2E protection".
+static constexpr uint8_t E2E_NONE = 0xFF;
+
+/// Per-rule E2E description, fixed at codegen.
+struct E2eCrc {
+  uint8_t crc_index{E2E_NONE};  ///< payload byte holding the CRC
+  uint8_t first{0};             ///< first covered payload byte
+  uint8_t last{0};              ///< last covered payload byte (inclusive); crc_index lies outside [first, last]
+  uint8_t poly{0x1D};
+
+  CAN_GATEWAY_CORE_INLINE bool enabled() const { return this->crc_index != E2E_NONE; }
+};
+
+/// After a patch: fold the change (before ^ after over [first, last]) into the CRC byte. Needs the
+/// whole covered range and the CRC byte below dlc; a shorter frame is left as it is. Runs in the ISR.
+CAN_GATEWAY_CORE_INLINE void e2e_fix_crc(const E2eCrc &e2e, const uint8_t *before, uint8_t *data, uint8_t dlc) {
+  if (!e2e.enabled() || e2e.last >= dlc || e2e.crc_index >= dlc || e2e.first > e2e.last)
+    return;
+  uint8_t delta[MAX_FRAME_DATA_LEN];
+  uint8_t n = static_cast<uint8_t>(e2e.last - e2e.first + 1);
+  uint8_t any = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    delta[i] = static_cast<uint8_t>(before[e2e.first + i] ^ data[e2e.first + i]);
+    any |= delta[i];
+  }
+  if (any == 0)
+    return;  // nothing covered changed: the received CRC is already right
+  data[e2e.crc_index] ^= crc8_linear(delta, n, e2e.poly);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Rule table and matching
 // ---------------------------------------------------------------------------------------------
 
@@ -129,6 +187,8 @@ struct RuleEntry {
   /// Non-null for rules with an `id` (runtime-updatable); points at the RulePatch
   /// handle's banks. Null for plain rules.
   const PatchBanks *banks{nullptr};
+  /// CRC repair after the patch (modify.e2e); disabled by default.
+  E2eCrc e2e{};
 
   CAN_GATEWAY_CORE_INLINE bool matches(uint32_t can_id, bool extended, bool rtr) const {
     if (extended != ((this->flags & RULE_FLAG_EXTENDED) != 0))
@@ -200,8 +260,18 @@ CAN_GATEWAY_CORE_INLINE FrameAction process_frame(const RouteTable &table, uint3
     return table.default_drop ? FrameAction::DROP_FILTERED : FrameAction::FORWARD;
   if (rule->is_drop())
     return FrameAction::DROP_FILTERED;
-  if (rule->has_patch())
-    apply_patch(rule->effective_patch(), can_id, extended, rtr, data, dlc);
+  if (rule->has_patch()) {
+    if (rule->e2e.enabled() && !rtr) {
+      uint8_t before[MAX_FRAME_DATA_LEN];
+      uint8_t limit = dlc < MAX_FRAME_DATA_LEN ? dlc : MAX_FRAME_DATA_LEN;
+      for (uint8_t i = 0; i < limit; i++)
+        before[i] = data[i];
+      apply_patch(rule->effective_patch(), can_id, extended, rtr, data, dlc);
+      e2e_fix_crc(rule->e2e, before, data, limit);
+    } else {
+      apply_patch(rule->effective_patch(), can_id, extended, rtr, data, dlc);
+    }
+  }
   return FrameAction::FORWARD;
 }
 
@@ -842,9 +912,9 @@ CAN_GATEWAY_CORE_INLINE RxReceiveMode select_rx_mode(bool has_route, bool observ
 // Signal decode (v0.6) — extract a raw integer from a CAN payload
 // ---------------------------------------------------------------------------------------------
 //
-// Byte-aligned and bit-level forms, both bounded to 32 bits (either byte order). The exotic
-// Motorola backward-bit-numbering case and signals wider than 32 bits are deferred (spec). Pure
-// and branch-poor; the decode sensor calls these from loop context, not the ISR.
+// Byte-aligned and bit-level forms, both bounded to 32 bits (either byte order; the Motorola
+// bit-level form is extract_bits_be() below). Signals wider than 32 bits are deferred (spec).
+// Pure and branch-poor; the decode sensor calls these from loop context, not the ISR.
 
 /// Byte-aligned extraction: `byte_len` bytes (1-4) starting at `byte_offset`, assembled either
 /// little-endian (Intel, LSB first) or big-endian (Motorola, MSB first). Reads only within the
@@ -866,8 +936,8 @@ CAN_GATEWAY_CORE_INLINE uint32_t extract_bytes(const uint8_t *data, uint8_t dlc,
 
 /// Bit-level extraction: `bit_len` bits (1-32) starting at `bit_offset`, using little-endian
 /// (Intel) bit numbering — the 8 payload bytes form a 64-bit little-endian word and the field is
-/// the bits [bit_offset, bit_offset + bit_len). Motorola backward-bit-numbering is deferred, so
-/// only this ordering is offered. Bytes beyond dlc contribute 0.
+/// the bits [bit_offset, bit_offset + bit_len). The Motorola ordering is extract_bits_be().
+/// Bytes beyond dlc contribute 0.
 CAN_GATEWAY_CORE_INLINE uint32_t extract_bits(const uint8_t *data, uint8_t dlc, uint8_t bit_offset, uint8_t bit_len) {
   uint64_t word = 0;
   uint8_t limit = dlc < MAX_FRAME_DATA_LEN ? dlc : MAX_FRAME_DATA_LEN;
@@ -875,6 +945,110 @@ CAN_GATEWAY_CORE_INLINE uint32_t extract_bits(const uint8_t *data, uint8_t dlc, 
     word |= static_cast<uint64_t>(data[i]) << (8 * i);
   uint64_t mask = bit_len >= 64 ? ~0ull : ((1ull << bit_len) - 1);
   return static_cast<uint32_t>((word >> bit_offset) & mask);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bit-level signal geometry — Intel and Motorola, shared by decode and the signal patch
+// ---------------------------------------------------------------------------------------------
+//
+// A bit-level signal is (start_bit, bit_len, big_endian) exactly as a DBC writes it:
+//   - Intel (`@1`, little-endian): start_bit is the LSB; the field is the bits
+//     [start_bit, start_bit + bit_len) of the payload read as a 64-bit little-endian word.
+//   - Motorola (`@0`, big-endian): start_bit is the MSB in DBC "sawtooth" numbering (bit b of
+//     byte B is 8*B + b). Walking from the MSB towards the LSB goes down within a byte and then
+//     continues at bit 7 of the NEXT byte — so a 13-bit signal with start_bit 4 occupies byte 0
+//     bits 4..0 and byte 1 bits 7..0, LSB at byte 1 bit 0.
+// Both are bounded to 32 bits. A field that would leave the 8-byte payload is rejected at config
+// time (validate_signal_position); at runtime such bits are skipped, never read or written.
+// Loop context only (decode sensors, set_signal) — not on the ISR path.
+
+/// Call fn(byte, bit, k) for every bit of the field, k = significance (0 = LSB). Intel visits
+/// LSB→MSB, Motorola MSB→LSB; callers must not depend on the order. Bits past byte 7 are skipped.
+template<typename F> inline void for_each_signal_bit(uint8_t start_bit, uint8_t bit_len, bool big_endian, F &&fn) {
+  if (bit_len == 0 || bit_len > 32)
+    return;
+  if (!big_endian) {
+    for (uint8_t k = 0; k < bit_len; k++) {
+      uint16_t pos = static_cast<uint16_t>(start_bit + k);
+      if (pos >= 64)
+        return;
+      fn(static_cast<uint8_t>(pos >> 3), static_cast<uint8_t>(pos & 7), k);
+    }
+    return;
+  }
+  uint8_t byte = start_bit >> 3;
+  uint8_t bit = start_bit & 7;
+  for (uint8_t step = 0; step < bit_len; step++) {
+    if (byte >= MAX_FRAME_DATA_LEN)
+      return;
+    fn(byte, bit, static_cast<uint8_t>(bit_len - 1 - step));
+    if (bit == 0) {
+      bit = 7;
+      byte++;
+    } else {
+      bit--;
+    }
+  }
+}
+
+/// Does the field lie entirely inside an 8-byte payload? (Mirrors the config-time check.)
+inline bool signal_fits_frame(uint8_t start_bit, uint8_t bit_len, bool big_endian) {
+  if (bit_len == 0 || bit_len > 32 || start_bit >= 64)
+    return false;
+  uint8_t visited = 0;
+  for_each_signal_bit(start_bit, bit_len, big_endian, [&visited](uint8_t, uint8_t, uint8_t) { visited++; });
+  return visited == bit_len;
+}
+
+/// Motorola bit-level extraction (see the geometry note above). Bytes at or beyond dlc read as 0,
+/// like extract_bits().
+inline uint32_t extract_bits_be(const uint8_t *data, uint8_t dlc, uint8_t start_bit, uint8_t bit_len) {
+  uint32_t value = 0;
+  for_each_signal_bit(start_bit, bit_len, true, [&](uint8_t byte, uint8_t bit, uint8_t k) {
+    if (byte < dlc && ((data[byte] >> bit) & 1u))
+      value |= 1u << k;
+  });
+  return value;
+}
+
+/// The payload bits the field covers (mask[i] bit b set = byte i bit b belongs to it) and the
+/// field's bits for `raw` (raw truncated to bit_len). OR-accumulates into both 8-byte arrays, so
+/// several fields can be collected into one pair.
+inline void signal_encode(uint8_t start_bit, uint8_t bit_len, bool big_endian, uint32_t raw, uint8_t *mask,
+                          uint8_t *bits) {
+  for_each_signal_bit(start_bit, bit_len, big_endian, [&](uint8_t byte, uint8_t bit, uint8_t k) {
+    uint8_t b = static_cast<uint8_t>(1u << bit);
+    mask[byte] |= b;
+    if ((raw >> k) & 1u)
+      bits[byte] |= b;
+  });
+}
+
+/// Physical value -> raw field bits for a `bit_len`-bit field (1-32): raw = round((value -
+/// offset) / factor), saturated to the field's range (two's complement when is_signed) and
+/// masked to bit_len. factor 0 is treated as 1 (config rejects it). Loop context (set_signal).
+inline uint32_t physical_to_raw(double value, double factor, double offset, uint8_t bit_len, bool is_signed) {
+  if (bit_len == 0)
+    return 0;
+  if (bit_len > 32)
+    bit_len = 32;
+  double scaled = (value - offset) / (factor != 0.0 ? factor : 1.0);
+  double span = static_cast<double>(1ull << bit_len);
+  double lo = is_signed ? -span / 2 : 0.0;
+  double hi = is_signed ? span / 2 - 1 : span - 1;
+  // Saturate first (also maps NaN to lo), so the rounding cast below stays in range.
+  if (!(scaled >= lo))
+    scaled = lo;
+  if (scaled > hi)
+    scaled = hi;
+  // Round half away from zero.
+  int64_t rounded = scaled < 0 ? -static_cast<int64_t>(-scaled + 0.5) : static_cast<int64_t>(scaled + 0.5);
+  if (rounded > static_cast<int64_t>(hi))
+    rounded = static_cast<int64_t>(hi);
+  if (rounded < static_cast<int64_t>(lo))
+    rounded = static_cast<int64_t>(lo);
+  uint64_t width_mask = (1ull << bit_len) - 1ull;
+  return static_cast<uint32_t>(static_cast<uint64_t>(rounded) & width_mask);
 }
 
 /// Sign-extend a `width`-bit raw value (1-32 bits) to a signed 32-bit integer. Unsigned callers
