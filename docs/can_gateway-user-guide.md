@@ -120,12 +120,29 @@ sensor:
   - platform: can_gateway
     port_id: car
     can_id: 0x2A0
-    bit_offset: 24      # bit-level form: 0-63, little-endian only
+    bit_offset: 24      # bit-level form: 0-63
     bit_length: 4        # 1-32 bits
     name: "Selected gear"
     throttle: 200ms
     sna: all_ones        # raw 0xF here means "not available" -> NAN, not gear 15
+  - platform: can_gateway
+    port_id: car
+    can_id: 0x2A0
+    bit_offset: 36      # Motorola: the DBC start bit verbatim = the MSB
+    bit_length: 13
+    byte_order: big
+    name: "Pack voltage"
+    filters: [{multiply: 0.1}]
 ```
+
+The bit-level form takes a DBC position as written. `byte_order: little`
+(Intel, `@1`): `bit_offset` is the LSB and the field is bits
+`[bit_offset, bit_offset + bit_length)` of the payload read as one 64-bit
+little-endian word. `byte_order: big` (Motorola, `@0`): `bit_offset` is the
+**MSB** in DBC "sawtooth" numbering (bit b of byte B = 8·B + b); from there
+the field runs down within the byte and continues at bit 7 of the **next**
+byte — `bit_offset: 4, bit_length: 13` is byte 0 bits 4..0 plus all of byte 1.
+A Motorola field that would leave byte 7 is rejected at config time.
 
 `sna:` is tested against the **raw extracted value**, before sign extension
 and before ESPHome `filters:` — give the unsigned raw bit pattern a DBC
@@ -218,7 +235,70 @@ deliberately stripped of every diagnostic surface (no `statistics:`, no
 decode entity, no switch) to prove the plain forwarding path compiles clean
 on its own.
 
-### 3.4 Send frames — one-shot and cyclic
+### 3.3a Rewrite signals in flight — `modify.signals`, `set_signal`, `e2e`
+
+`modify.data` patches whole bytes (with a mask). `modify.signals` patches a
+field by its DBC position — Intel or Motorola, any width up to 32 bits — and
+`can_gateway.set_signal` changes it at runtime in physical units:
+
+```yaml
+can_gateway:
+  routes:
+    - id: to_ecu
+      from: car
+      to: ecu
+      filters:
+        - id: current_limit           # needed for set_signal
+          can_id: 0x1D0
+          modify:
+            signals:
+              - bit_offset: 4           # Motorola 13-bit field, DBC start bit
+                bit_length: 13
+                byte_order: big         # no value: passes through until set_signal
+              - bit_offset: 24          # Intel 8-bit field, stamped from boot
+                bit_length: 8
+                value: 0x3C             # RAW value
+            e2e:
+              crc_byte: 7               # keep the frame's CRC valid (see below)
+
+number:
+  - platform: template
+    name: "Current limit"
+    min_value: 0
+    max_value: 400
+    step: 0.5
+    optimistic: true
+    set_action:
+      - can_gateway.set_signal:
+          id: current_limit
+          bit_offset: 4
+          bit_length: 13
+          byte_order: big
+          value: !lambda "return x;"    # physical; NAN = pass-through again
+          factor: 0.1                    # raw = round((value - offset) / factor)
+          offset: 0
+          enabled: true                  # templatable; false = pass-through
+```
+
+The ISR path is unchanged — the value is converted once in loop context and
+published into the rule's double-buffered AND/OR mask, which the ISR stamps
+onto every forwarded frame. `set_signal` can only reach a field the rule
+declared (checked at config time, and fenced again at runtime); signals and
+`data` entries must not share a bit. The value saturates at the field's
+range (two's complement with `signed: true`).
+
+**`e2e` — CRC repair.** Many frames end in a CRC-8 plus a message counter;
+change one bit and the receiver drops the frame. With `e2e:` the gateway
+corrects the CRC byte by the CRC of *what it changed*:
+`crc(new) = crc(old) ^ L(old ^ new)`, where `L` is the plain CRC (init 0,
+no xor-out). A CRC is affine for a fixed length, so this is exact **without
+knowing init, xor-out or a leading data-ID** — only the polynomial
+(`polynomial`, default `0x1D` = SAE J1850, MSB-first) and the covered bytes
+(`first_byte` default 0, `last_byte` default `crc_byte - 1`). An unpatched
+frame keeps its CRC bit for bit; a frame that arrived with a bad CRC keeps
+exactly that error. The message counter is forwarded untouched. Not covered:
+reflected CRCs, CRCs wider than 8 bits, and a data-ID appended after the data.
+
 
 One-shot, from an automation:
 
@@ -498,7 +578,7 @@ source.
 | `use_extended_id` | default `false` |
 | `remote_transmission_request` | unset = don't check RTR; `true`/`false` to match on it |
 | `action` | default `accept`; `accept`/`drop` |
-| `modify` | optional — `can_id`, `use_extended_id`, `data: [{index: 0-7, value: 0-255, mask: 0xFF}]`; needs at least one of the three; a byte index can only appear once; incompatible with `action: drop` |
+| `modify` | optional — `can_id`, `use_extended_id`, `data: [{index: 0-7, value: 0-255, mask: 0xFF}]`, `signals: [{bit_offset, bit_length, byte_order, value}]` (§3.3a; no `value` = pass-through until `set_signal`, needs the rule `id`), `e2e: {crc_byte, first_byte, last_byte, polynomial}`; needs at least one of `can_id`/`use_extended_id`/`data`/`signals`; no payload bit may be patched twice; `e2e` needs a payload patch and an unpatched CRC byte; incompatible with `action: drop` |
 
 ### `cyclic_sends:` entries
 
@@ -519,6 +599,7 @@ source.
 | `can_gateway.send: {port, can_id, use_extended_id, remote_transmission_request, data}` | — | one-shot TX; `port` omittable with exactly one declared port; `data` accepts a hex list, an ASCII string, or a `!lambda` |
 | `can_gateway.inject` | — | pre-v0.6 name for `can_gateway.send`, identical options, deprecated |
 | `can_gateway.set_patch: {id, can_id, data}` | the target filter rule declared `id:` + `modify:` | runtime-update a rule's `modify` values; only the fields the rule's `modify:` already declared |
+| `can_gateway.set_signal: {id, bit_offset, bit_length, byte_order, value, factor, offset, signed, enabled}` | the rule declares that exact field in `modify.signals` | stamp a physical value into the field, or (`enabled: false` / NaN) restore pass-through |
 | `can_gateway.set_cyclic_data: {id, data}` | — | update a cyclic sender's staged payload |
 | `can_gateway.start_cyclic: <id>` / `can_gateway.stop_cyclic: <id>` | — | start/stop a cyclic sender |
 
@@ -530,8 +611,8 @@ A **decode sensor** names a signal:
 |---|---|
 | `port_id`, `can_id`, `use_extended_id` | which frame |
 | `offset` + `length` | byte-aligned form: `offset` `0`–`7`, `length` `1`–`4` (≤32-bit) |
-| `bit_offset` + `bit_length` | bit-level form: `0`–`63` / `1`–`32`, little-endian only |
-| `byte_order` | default `little`; `big` only valid for the byte-aligned form |
+| `bit_offset` + `bit_length` | bit-level form: `0`–`63` / `1`–`32`; with `byte_order: big` the DBC Motorola start bit (MSB), §3.2 |
+| `byte_order` | default `little`; `big` = big-endian bytes (byte form) or Motorola bit numbering (bit form) |
 | `signed` | default `false` |
 | `throttle` | optional — rate-limit publish of a fast-changing signal |
 | `sna` | optional — `all_ones`, or a raw value that must fit the signal's own bit width; tested before sign extension and before `filters:` |
@@ -593,6 +674,13 @@ declare:
   turning it on.
 - **A `cyclic_sends:` entry runs from boot** unless you set `enabled:
   false` explicitly.
+- **`modify.signals` with a `value`, and `data` patches, rewrite frames from
+  boot.** A signal declared without a value passes through until
+  `can_gateway.set_signal` enables it — the safer default for a rule that is
+  meant to be switched on deliberately. `e2e` makes a patched frame valid for
+  the receiver; that is the point, and also why a wrong field position is
+  no longer caught by the receiver's CRC check. Verify positions against a
+  log before enabling.
 - **`self_test`/`open_drain_tx`** are bench aids for sharing an
   transceiver-less wire between two controllers with an external pull-up —
   never set either on hardware wired to a real vehicle bus.
@@ -637,10 +725,10 @@ and the log.
   rule engine, slot pools, `RecoveryBackoff`, decode primitives. This is
   what `tests/host/` exercises under ASan/UBSan — read it before touching
   anything ISR-side.
-- `script/dbc2yaml.py` — DBC → decode-sensor YAML generator; refuses a
-  Motorola (`@0`) signal unless it's byte-aligned rather than silently
-  mistranslating it. `tests/can_gateway/test_dbc2yaml.py` pins the SNA and
-  Motorola-refusal cases.
+- `script/dbc2yaml.py` — DBC → decode-sensor YAML generator; Motorola (`@0`)
+  signals come out in the byte form when byte-aligned and in the bit-level
+  `byte_order: big` form otherwise; only >32-bit and out-of-frame signals are
+  refused. `tests/can_gateway/test_dbc2yaml.py` pins the SNA and Motorola cases.
 - `tests/build/can_gateway/common.yaml` — full-feature worked example:
   routes, cyclic sends, all four decode platforms, statistics, `log_tap`,
   runtime patch, the switch.
