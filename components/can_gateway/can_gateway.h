@@ -26,6 +26,8 @@
 #include <esp_twai_onchip.h>
 #include <esp_twai_types.h>
 #include <freertos/FreeRTOS.h>
+
+#include <cmath>
 #if defined(USE_CAN_GATEWAY_ID_STATS) || defined(USE_CAN_GATEWAY_LOG_TAP)
 #include <esp_timer.h>
 #endif
@@ -71,10 +73,16 @@ struct TxSlot {
 };
 
 /// Runtime-updatable patch handle for rules with an `id`.
-/// set_byte()/set_can_id() stage into the inactive bank; commit() publishes
-/// atomically. Loop context only; config validation guarantees only declared
-/// entries are touched, and the byte's codegen-fixed mask is re-applied on
-/// every stage.
+/// set_byte()/set_can_id()/set_signal() stage into the inactive bank; commit()
+/// publishes atomically. Loop context only; config validation guarantees only
+/// declared entries are touched, and the byte's codegen-fixed mask is
+/// re-applied on every stage.
+///
+/// set_signal() is the one writer that changes the mask at runtime: a declared
+/// `modify.signals` field can be switched between "stamp this value" and
+/// "pass the original bits through". It can never reach beyond the bits the
+/// rule declared at codegen (declared_), so a runtime value cannot widen what
+/// the rule may touch.
 class RulePatch {
  public:
   void set_byte(uint8_t index, uint8_t value) {
@@ -82,6 +90,29 @@ class RulePatch {
       return;
     PatchData &staged = this->banks_.stage();
     staged.or_value[index] = value & static_cast<uint8_t>(~staged.and_mask[index]);
+  }
+  /// Stamp `raw` into a declared signal field (enabled) or restore pass-through
+  /// for it (!enabled). Returns false when part of the field was not declared by
+  /// the rule; those bits are left alone.
+  bool set_signal(uint8_t start_bit, uint8_t bit_len, bool big_endian, uint32_t raw, bool enabled) {
+    uint8_t field[MAX_FRAME_DATA_LEN]{};
+    uint8_t bits[MAX_FRAME_DATA_LEN]{};
+    signal_encode(start_bit, bit_len, big_endian, raw, field, bits);
+    PatchData &staged = this->banks_.stage();
+    bool inside = true;
+    for (uint8_t i = 0; i < MAX_FRAME_DATA_LEN; i++) {
+      uint8_t m = static_cast<uint8_t>(field[i] & this->declared_[i]);
+      if (m != field[i])
+        inside = false;
+      if (enabled) {
+        staged.and_mask[i] = static_cast<uint8_t>(staged.and_mask[i] & ~m);
+        staged.or_value[i] = static_cast<uint8_t>((staged.or_value[i] & ~m) | (bits[i] & m));
+      } else {
+        staged.and_mask[i] = static_cast<uint8_t>(staged.and_mask[i] | m);
+        staged.or_value[i] = static_cast<uint8_t>(staged.or_value[i] & ~m);
+      }
+    }
+    return inside;
   }
   void set_can_id(uint32_t can_id) {
     PatchData &staged = this->banks_.stage();
@@ -95,11 +126,18 @@ class RulePatch {
 
  protected:
   friend class GatewayRoute;
-  void init_(const PatchData &initial) { this->banks_.init(initial); }
+  /// `declared` = every payload bit the rule may ever touch (modify.data masks
+  /// plus modify.signals fields, byte i at bits 8*i); set_signal() is confined to it.
+  void init_(const PatchData &initial, uint64_t declared = 0) {
+    this->banks_.init(initial);
+    for (uint8_t i = 0; i < MAX_FRAME_DATA_LEN; i++)
+      this->declared_[i] = static_cast<uint8_t>(declared >> (8 * i));
+  }
   const PatchBanks *banks_ptr_() const { return &this->banks_; }
 
  private:
   PatchBanks banks_;
+  uint8_t declared_[MAX_FRAME_DATA_LEN]{};
 };
 
 /// One directed route. Owns its compiled rule table, its counters, and the
@@ -111,7 +149,9 @@ class GatewayRoute {
   /// Codegen: append one compiled rule (see the symbol contract in __init__.py
   /// for the argument encoding). Runs at construction time, before setup().
   void add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flags, uint32_t new_id, uint64_t and_mask,
-                uint64_t or_value, RulePatch *patch);
+                uint64_t or_value, RulePatch *patch, uint64_t declared_mask = 0);
+  /// Codegen: attach modify.e2e to the rule added last.
+  void set_last_rule_e2e(uint8_t crc_index, uint8_t first, uint8_t last, uint8_t poly);
 
   const RouteCounters &counters() const { return this->counters_; }
   /// A diagnostics consumer (sensor hub) reads this route's counters; the
@@ -911,6 +951,47 @@ template<typename... Ts> class SetPatchAction : public Action<Ts...>, public Par
   };
   FixedVector<ByteEntry> bytes_;
   optional<TemplatableValue<uint32_t, Ts...>> can_id_{};
+};
+
+/// can_gateway.set_signal: stamp a value into one declared modify.signals field
+/// of a rule, or hand the field back to pass-through. `value` is physical:
+/// raw = round((value - offset) / factor), saturated to the field's range
+/// (two's complement when signed). NaN or enabled == false restores
+/// pass-through. Loop context; publishes with one atomic bank flip.
+template<typename... Ts> class SetSignalAction : public Action<Ts...>, public Parented<RulePatch> {
+ public:
+  TEMPLATABLE_VALUE(float, value)
+  TEMPLATABLE_VALUE(bool, enabled)
+
+  void set_field(uint8_t start_bit, uint8_t bit_len, bool big_endian, bool is_signed, float factor, float offset) {
+    this->start_bit_ = start_bit;
+    this->bit_len_ = bit_len;
+    this->big_endian_ = big_endian;
+    this->signed_ = is_signed;
+    this->factor_ = factor;
+    this->offset_ = offset;
+  }
+
+  void play(const Ts &...x) override {
+    bool enabled = this->enabled_.has_value() ? this->enabled_.value(x...) : true;
+    float value = this->value_.has_value() ? this->value_.value(x...) : NAN;
+    uint32_t raw = 0;
+    if (std::isnan(value)) {
+      enabled = false;
+    } else if (enabled) {
+      raw = physical_to_raw(value, this->factor_, this->offset_, this->bit_len_, this->signed_);
+    }
+    this->parent_->set_signal(this->start_bit_, this->bit_len_, this->big_endian_, raw, enabled);
+    this->parent_->commit();
+  }
+
+ protected:
+  uint8_t start_bit_{0};
+  uint8_t bit_len_{1};
+  bool big_endian_{false};
+  bool signed_{false};
+  float factor_{1.0f};
+  float offset_{0.0f};
 };
 
 /// can_gateway.send (v0.6; can_gateway.inject alias). Sends a frame on a port

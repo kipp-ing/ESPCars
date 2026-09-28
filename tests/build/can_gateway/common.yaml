@@ -29,6 +29,17 @@ esphome:
           data:
             - index: 2
               value: !lambda "return (uint8_t) 0x42;"
+      # Signal patch (runtime): physical value -> raw via factor/offset, into a
+      # declared Motorola field; `enabled` false (or a NaN value) hands the
+      # field back to pass-through.
+      - can_gateway.set_signal:
+          id: current_limit
+          bit_offset: 4
+          bit_length: 13
+          byte_order: big
+          value: !lambda "return 12.5f;"
+          factor: 0.1
+          enabled: !lambda "return millis() > 1000;"
       # Cyclic (timed) send: update the staged payload, then start/stop.
       - can_gateway.set_cyclic_data:
           id: heartbeat
@@ -97,6 +108,20 @@ can_gateway:
             data:
               - index: 2
                 value: 0x64
+        # Bit-level signal patch: a runtime-driven Motorola field plus a fixed
+        # Intel field, with the CRC byte repaired after every patch (e2e).
+        - id: current_limit
+          can_id: 0x1D0
+          modify:
+            signals:
+              - bit_offset: 4
+                bit_length: 13
+                byte_order: big
+              - bit_offset: 24
+                bit_length: 8
+                value: 0x3C
+            e2e:
+              crc_byte: 7
         - can_id: 0x700
           can_id_mask: 0x780
           action: drop
@@ -185,6 +210,15 @@ sensor:
     # SNA (V29): raw 0xF here is "not available", published as unknown rather
     # than as gear 15.
     sna: all_ones
+  # Motorola bit-level decode: start bit = MSB (DBC sawtooth numbering).
+  - platform: can_gateway
+    port_id: port_a
+    can_id: 0x2A0
+    bit_offset: 36
+    bit_length: 13
+    byte_order: big
+    name: "Pack voltage"
+    filters: [{multiply: 0.1}]
   - platform: can_gateway
     port_id: port_a
     can_id: 0x1B0

@@ -100,7 +100,7 @@ GatewayRoute::GatewayRoute(GatewayPort *from, GatewayPort *to, uint8_t rule_coun
 }
 
 void GatewayRoute::add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flags, uint32_t new_id, uint64_t and_mask,
-                            uint64_t or_value, RulePatch *patch) {
+                            uint64_t or_value, RulePatch *patch, uint64_t declared_mask) {
   RuleEntry entry{};
   entry.match_id = match_id;
   entry.match_mask = match_mask;
@@ -118,7 +118,7 @@ void GatewayRoute::add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flag
   }
 
   if (patch != nullptr) {
-    patch->init_(data);
+    patch->init_(data, declared_mask);
     entry.banks = patch->banks_ptr_();
   } else {
     entry.static_patch = data;
@@ -127,6 +127,16 @@ void GatewayRoute::add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flag
   this->rules_.push_back(entry);
   this->table_.rules = &this->rules_[0];
   this->table_.rule_count = static_cast<uint8_t>(this->rules_.size());
+}
+
+void GatewayRoute::set_last_rule_e2e(uint8_t crc_index, uint8_t first, uint8_t last, uint8_t poly) {
+  if (this->rules_.empty())
+    return;
+  E2eCrc &e2e = this->rules_.back().e2e;
+  e2e.crc_index = crc_index;
+  e2e.first = first;
+  e2e.last = last;
+  e2e.poly = poly;
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,13 +1048,30 @@ void CanGatewaySensorHub::dump_config() {
 #ifdef USE_CAN_GATEWAY_OBSERVE
 #ifdef USE_SENSOR
 void CanGatewayDecodeSensor::on_frame(const FrameView &view) {
-  // Presence: the signal's highest byte must lie within this frame's DLC.
-  uint8_t last_byte = this->bit_mode_ ? static_cast<uint8_t>((this->offset_ + this->length_ - 1) / 8)
-                                      : static_cast<uint8_t>(this->offset_ + this->length_ - 1);
+  // Presence: every byte the signal touches must lie within this frame's DLC.
+  // (A Motorola bit-level field runs from its start byte towards HIGHER bytes.)
+  uint8_t last_byte;
+  if (!this->bit_mode_) {
+    last_byte = static_cast<uint8_t>(this->offset_ + this->length_ - 1);
+  } else if (this->big_endian_) {
+    last_byte = 0;
+    for_each_signal_bit(this->offset_, this->length_, true, [&last_byte](uint8_t byte, uint8_t, uint8_t) {
+      if (byte > last_byte)
+        last_byte = byte;
+    });
+  } else {
+    last_byte = static_cast<uint8_t>((this->offset_ + this->length_ - 1) / 8);
+  }
   if (last_byte >= view.dlc)
     return;
-  uint32_t raw = this->bit_mode_ ? extract_bits(view.data, view.dlc, this->offset_, this->length_)
-                                 : extract_bytes(view.data, view.dlc, this->offset_, this->length_, this->big_endian_);
+  uint32_t raw;
+  if (!this->bit_mode_) {
+    raw = extract_bytes(view.data, view.dlc, this->offset_, this->length_, this->big_endian_);
+  } else if (this->big_endian_) {
+    raw = extract_bits_be(view.data, view.dlc, this->offset_, this->length_);
+  } else {
+    raw = extract_bits(view.data, view.dlc, this->offset_, this->length_);
+  }
   if (this->have_last_ && raw == this->last_raw_)
     return;  // publish on change
   uint32_t now = millis();
