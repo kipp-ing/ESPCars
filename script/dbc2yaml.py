@@ -18,14 +18,13 @@ latin-1 explicitly rather than letting a stray 0xB0 ('°') abort the parse.
 word and takes bits `[bit_offset, bit_offset + bit_length)` — which is exactly
 the DBC Intel (`@1`) start-bit convention, so those map across unchanged.
 
-Motorola (`@0`) signals do not: their bits run the other way through the frame.
-The component offers no bit-level big-endian form (see `validate_signal_position`
-in components/can_gateway/__init__.py), only a *byte-aligned* one via
-`byte_order: big`. So a Motorola signal is emitted only when it is byte-aligned
-and a whole number of bytes wide; anything else is reported as unsupported
-rather than silently mistranslated. A 10-bit Motorola SOC signal is a real
-example seen in a vehicle DBC in the wild — it needs a component change to
-decode, not a cleverer generator.
+Motorola (`@0`) signals run the other way through the frame. A byte-aligned,
+byte-multiple one is emitted in the byte form (`offset`/`length`,
+`byte_order: big`); every other Motorola signal in the bit-level form with
+`byte_order: big`, where `bit_offset` is the DBC start bit verbatim (the MSB in
+sawtooth numbering — see `validate_signal_position` in
+components/can_gateway/__init__.py). Still refused: signals wider than 32 bits,
+and fields that would leave the 8-byte frame.
 """
 
 import argparse
@@ -132,11 +131,21 @@ def position(sig):
     # this was checked against obeys this; testing for 0 instead silently
     # refuses all of them, which looks like conservatism and is really a bug.
     if sig["length"] % 8 or sig["start"] % 8 != 7:
+        # Not byte-aligned: the bit-level Motorola form. bit_offset takes the DBC
+        # start bit verbatim (the MSB); from there the field walks down a byte
+        # and continues at bit 7 of the next — it must not leave byte 7.
+        byte, bit = divmod(sig["start"], 8)
+        for _ in range(sig["length"] - 1):
+            if bit == 0:
+                byte, bit = byte + 1, 7
+            else:
+                bit -= 1
+        if byte > 7:
+            return None, {}, "Motorola field runs past byte 7"
         return (
-            None,
-            {},
-            f"Motorola and not byte-aligned (start {sig['start']}, "
-            f"{sig['length']} bits) — no bit-level big-endian decode exists",
+            "bit",
+            {"bit_offset": sig["start"], "bit_length": sig["length"], "byte_order": "big"},
+            "",
         )
     byte_offset = sig["start"] // 8
     n = sig["length"] // 8

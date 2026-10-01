@@ -108,19 +108,18 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
       ",\"capacity\":\"%s\""
       ",\"records\":%" PRIu32 ",\"dropped\":%" PRIu32 ",\"card_dropped\":%" PRIu32 ",\"write_lost\":%" PRIu32
       ",\"tap_shutdown_lost\":%" PRIu32 ",\"tap_accepted\":%" PRIu32 ",\"tap_drained\":%" PRIu32
-      ",\"tap_record_ring_accepted\":%" PRIu32
-      ",\"recovery_state\":\"%s\",\"write_failures\":%" PRIu32 ",\"last_write_action\":\"%s\""
-      ",\"last_write_errno\":%" PRId32 ",\"last_write_result\":%" PRId32
-      ",\"last_write_offset\":%" PRIu32 ",\"last_write_derived_offset\":%" PRIu32
-      ",\"last_write_lseek_errno\":%" PRId32 ",\"last_write_committed_end\":%" PRIu32
-      ",\"last_write_len\":%" PRIu32 ",\"last_write_elapsed_us\":%" PRIu32
-      ",\"last_write_spi_begin\":%" PRIu32 ",\"last_write_spi_end\":%" PRIu32
-      ",\"last_write_spi_commands\":%" PRIu32 ",\"last_write_spi_available\":%" PRIu32
-      ",\"last_write_spi_missing\":%" PRIu32 ",\"last_write_spi_worst_err\":%" PRId32
-      ",\"last_write_card_sectors\":%" PRIu32 ",\"last_write_volume_first_lba\":%" PRIu32
-      ",\"last_write_volume_sectors\":%" PRIu32 ",\"last_write_heap_default_free\":%" PRIu32
-      ",\"last_write_heap_default_largest\":%" PRIu32 ",\"last_write_heap_dma_free\":%" PRIu32
-      ",\"last_write_heap_dma_largest\":%" PRIu32 ",\"writer_stack_free\":%" PRIu32 "}",
+      ",\"tap_record_ring_accepted\":%" PRIu32 ",\"recovery_state\":\"%s\",\"write_failures\":%" PRIu32
+      ",\"last_write_action\":\"%s\""
+      ",\"last_write_errno\":%" PRId32 ",\"last_write_result\":%" PRId32 ",\"last_write_offset\":%" PRIu32
+      ",\"last_write_derived_offset\":%" PRIu32 ",\"last_write_lseek_errno\":%" PRId32
+      ",\"last_write_committed_end\":%" PRIu32 ",\"last_write_len\":%" PRIu32 ",\"last_write_elapsed_us\":%" PRIu32
+      ",\"last_write_spi_begin\":%" PRIu32 ",\"last_write_spi_end\":%" PRIu32 ",\"last_write_spi_commands\":%" PRIu32
+      ",\"last_write_spi_available\":%" PRIu32 ",\"last_write_spi_missing\":%" PRIu32
+      ",\"last_write_spi_worst_err\":%" PRId32 ",\"last_write_card_sectors\":%" PRIu32
+      ",\"last_write_volume_first_lba\":%" PRIu32 ",\"last_write_volume_sectors\":%" PRIu32
+      ",\"last_write_heap_default_free\":%" PRIu32 ",\"last_write_heap_default_largest\":%" PRIu32
+      ",\"last_write_heap_dma_free\":%" PRIu32 ",\"last_write_heap_dma_largest\":%" PRIu32
+      ",\"writer_stack_free\":%" PRIu32 "}",
       fields.device, fields.sealed, fields.confirmed, fill_text, fields.discarded_chunks, fields.discarded_bytes,
       oldest_text, fields.index_refused, fields.mounted ? "true" : "false", fields.degraded ? "true" : "false",
       fields.capacity, fields.records, fields.dropped, fields.card_dropped, fields.write_lost, fields.tap_shutdown_lost,
