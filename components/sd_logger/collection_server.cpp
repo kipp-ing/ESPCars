@@ -920,11 +920,10 @@ esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
   const uint32_t write_start = trace.write_index();
   const uint32_t oldest = trace.oldest(write_start);
   httpd_resp_set_type(req, "text/csv");
-  int n =
-      snprintf(this->block_, SD_LOG_SERVE_BLOCK,
-               "#write_index_start,%" PRIu32 ",dropped,%" PRIu32
-               "\nseq,us,task,opcode,arg,blklen,datalen,flags,response_raw,response,err\n",
-               write_start, trace.dropped());
+  int n = snprintf(this->block_, SD_LOG_SERVE_BLOCK,
+                   "#write_index_start,%" PRIu32 ",dropped,%" PRIu32
+                   "\nseq,us,task,opcode,arg,blklen,datalen,flags,response_raw,response,err\n",
+                   write_start, trace.dropped());
   if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)
     return ESP_FAIL;
 
@@ -938,8 +937,8 @@ esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
         task[i] = '_';
     }
     n = snprintf(this->block_, SD_LOG_SERVE_BLOCK,
-                 "%" PRIu32 ",%" PRId64 ",%s,%" PRId32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
-                 ",%" PRIu32 ",%" PRIu32 ",%" PRId32 "\n",
+                 "%" PRIu32 ",%" PRId64 ",%s,%" PRId32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+                 ",%" PRIu32 ",%" PRId32 "\n",
                  entry.seq, entry.us, task, entry.opcode, entry.arg, entry.blklen, entry.datalen, entry.flags,
                  entry.response_raw, entry.response, entry.err);
     if (n < 0 || static_cast<size_t>(n) >= SD_LOG_SERVE_BLOCK || httpd_resp_send_chunk(req, this->block_, n) != ESP_OK)

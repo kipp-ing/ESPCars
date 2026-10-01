@@ -2235,17 +2235,15 @@ bool SdLogger::flush_block_(bool all) {
                                    derived_offset, lseek_errno, committed_end, held_us, spi_begin, spi_end);
       ESP_LOGE(TAG,
                "write failed (%d, errno %d) at vfs_offset %" PRIu32 " len %u (derived_offset %" PRIu32
-               ", lseek_errno %d, committed_end %" PRIu32 ", write_us %" PRId64 ", spi_seq %" PRIu32
-               "..%" PRIu32 " commands=%" PRIu32
-               " available=%" PRIu32 " missing=%" PRIu32 " worst_err=%" PRId32 ")",
+               ", lseek_errno %d, committed_end %" PRIu32 ", write_us %" PRId64 ", spi_seq %" PRIu32 "..%" PRIu32
+               " commands=%" PRIu32 " available=%" PRIu32 " missing=%" PRIu32 " worst_err=%" PRId32 ")",
                static_cast<int>(written), write_errno, write_offset, static_cast<unsigned>(len), derived_offset,
                lseek_errno, committed_end, held_us, spi_begin, spi_end, this->last_write_failure_.spi.commands,
                this->last_write_failure_.spi.available, this->last_write_failure_.spi.missing,
                this->last_write_failure_.spi.worst_err);
       ESP_LOGE(TAG,
-               "write failure state: action=%s card_sectors=%" PRIu32 " volume_lba=%" PRIu32
-               " volume_sectors=%" PRIu32 " heap_default=%" PRIu32 "/%" PRIu32
-               " heap_dma=%" PRIu32 "/%" PRIu32,
+               "write failure state: action=%s card_sectors=%" PRIu32 " volume_lba=%" PRIu32 " volume_sectors=%" PRIu32
+               " heap_default=%" PRIu32 "/%" PRIu32 " heap_dma=%" PRIu32 "/%" PRIu32,
                write_failure_action_str(this->last_write_failure_.action), this->last_write_failure_.card_sectors,
                this->last_write_failure_.volume_first_lba, this->last_write_failure_.volume_sectors,
                this->last_write_failure_.heap_default_free, this->last_write_failure_.heap_default_largest,
@@ -3708,27 +3706,25 @@ void SdLogger::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  recovery: off (a card failure disables logging for the run)");
   }
-  ESP_LOGCONFIG(TAG, "  recovery_state=%s write_failures=%" PRIu32 " last_write_action=%s",
-                this->get_recovery_state(), this->write_failures_, this->get_last_write_action());
+  ESP_LOGCONFIG(TAG, "  recovery_state=%s write_failures=%" PRIu32 " last_write_action=%s", this->get_recovery_state(),
+                this->write_failures_, this->get_last_write_action());
   if (this->write_failures_ > 0) {
+    ESP_LOGCONFIG(
+        TAG,
+        "  last_write: vfs_offset=%" PRIu32 " derived_offset=%" PRIu32 " lseek_errno=%" PRId32 " committed_end=%" PRIu32
+        " len=%" PRIu32 " errno=%" PRId32 " result=%" PRId32 " elapsed=%" PRIu32 " us",
+        this->last_write_failure_.offset, this->last_write_failure_.derived_offset,
+        this->last_write_failure_.lseek_errno, this->last_write_failure_.committed_end, this->last_write_failure_.len,
+        this->last_write_failure_.err_no, this->last_write_failure_.result, this->last_write_failure_.elapsed_us);
     ESP_LOGCONFIG(TAG,
-                  "  last_write: vfs_offset=%" PRIu32 " derived_offset=%" PRIu32 " lseek_errno=%" PRId32
-                  " committed_end=%" PRIu32 " len=%" PRIu32 " errno=%" PRId32 " result=%" PRId32
-                  " elapsed=%" PRIu32 " us",
-                  this->last_write_failure_.offset, this->last_write_failure_.derived_offset,
-                  this->last_write_failure_.lseek_errno, this->last_write_failure_.committed_end,
-                  this->last_write_failure_.len, this->last_write_failure_.err_no, this->last_write_failure_.result,
-                  this->last_write_failure_.elapsed_us);
-    ESP_LOGCONFIG(TAG,
-                  "  last_write: spi_seq=%" PRIu32 "..%" PRIu32 " commands=%" PRIu32
-                  " available=%" PRIu32 " missing=%" PRIu32 " worst_err=%" PRId32,
+                  "  last_write: spi_seq=%" PRIu32 "..%" PRIu32 " commands=%" PRIu32 " available=%" PRIu32
+                  " missing=%" PRIu32 " worst_err=%" PRId32,
                   this->last_write_failure_.spi_begin, this->last_write_failure_.spi_end,
                   this->last_write_failure_.spi.commands, this->last_write_failure_.spi.available,
                   this->last_write_failure_.spi.missing, this->last_write_failure_.spi.worst_err);
     ESP_LOGCONFIG(TAG,
-                  "  last_write: card_sectors=%" PRIu32 " volume_lba=%" PRIu32
-                  " volume_sectors=%" PRIu32 " heap_default=%" PRIu32 "/%" PRIu32
-                  " heap_dma=%" PRIu32 "/%" PRIu32,
+                  "  last_write: card_sectors=%" PRIu32 " volume_lba=%" PRIu32 " volume_sectors=%" PRIu32
+                  " heap_default=%" PRIu32 "/%" PRIu32 " heap_dma=%" PRIu32 "/%" PRIu32,
                   this->last_write_failure_.card_sectors, this->last_write_failure_.volume_first_lba,
                   this->last_write_failure_.volume_sectors, this->last_write_failure_.heap_default_free,
                   this->last_write_failure_.heap_default_largest, this->last_write_failure_.heap_dma_free,
