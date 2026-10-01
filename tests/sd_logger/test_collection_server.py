@@ -95,6 +95,42 @@ def test_the_status_route_is_served_even_though_no_client_calls_it() -> None:
     )
 
 
+def test_fsync_failure_enters_the_single_failure_path_and_counts_buffered_records() -> None:
+    """An fsync error must not leave a writable-looking logger with an erased RAM tail."""
+    source = _logger_source()
+    for signature in ("bool SdLogger::close_file_", "void SdLogger::sync_file_"):
+        body = _function_body(source, signature)
+        assert "if (fsync(this->fd_) != 0)" in body
+        assert 'this->enter_failed_("fsync")' in body
+    failed = _function_body(source, "void SdLogger::enter_failed_")
+    assert "this->write_lost_.fetch_add(this->unflushed_records_.count()" in failed
+    assert failed.index("write_lost_.fetch_add") < failed.index("this->block_.reset()")
+
+
+def test_outage_marker_baselines_are_not_reset_by_a_new_file_header() -> None:
+    """A recovered file must publish ring/tap losses accrued while no prior file could."""
+    header = _function_body(_logger_source(), "void SdLogger::write_file_header_")
+    assert "marked_dropped_ =" not in header
+    assert "marked_dropped =" not in header
+
+
+def test_static_tap_drain_stack_passes_freertos_a_word_depth_not_a_byte_count() -> None:
+    """A static FreeRTOS task must advertise the length of its actual backing array.
+
+    `xTaskCreateStatic` takes a count of `StackType_t` entries.  Passing the 3072-byte budget
+    there while allocating only `3072 / sizeof(StackType_t)` entries makes FreeRTOS write up to
+    12 KiB into a 3 KiB array on the C6.  The resulting overrun is load-sensitive and can scribble
+    a logger buffer without a malformed input record, so keep the allocation and call tied to one
+    words constant.
+    """
+    source = _logger_source()
+    assert "TAP_DRAIN_STACK_WORDS = TAP_DRAIN_STACK_BYTES / sizeof(StackType_t)" in source
+    assert "static StackType_t tap_drain_stack[TAP_DRAIN_STACK_WORDS]" in source
+    call = _function_body(source, "void SdLogger::setup")
+    assert '"sdlog_tap", TAP_DRAIN_STACK_WORDS, this' in call
+    assert '"sdlog_tap", TAP_DRAIN_STACK_BYTES, this' not in call
+
+
 # --------------------------------------------------------------- the build gate
 
 

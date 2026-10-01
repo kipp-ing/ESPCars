@@ -282,6 +282,128 @@ inline CardResetResult card_reset(CardResetIo &io, const CardResetConfig &cfg) {
   return result;
 }
 
+/// What a card said when asked to prove it works, rather than asked to introduce itself.
+struct CardReadyResult {
+  bool idle{false};           ///< CMD0 answered 0x01
+  bool cmd8_echoed{false};    ///< CMD8 came back with the 0x01AA check pattern: a v2 card
+  bool ocr_valid{false};      ///< CMD58 answered at all
+  uint32_t ocr{0};            ///< the OCR register as read
+  bool powered_up{false};     ///< OCR bit 31: the card's own "initialisation finished" flag
+  bool high_capacity{false};  ///< OCR bit 30 (CCS): block addressing
+  bool block_read{false};     ///< CMD17 of LBA 0 delivered a full 512-byte block
+  bool signature{false};      ///< that block ended in 0x55AA
+  uint8_t r1{0xFF};           ///< last R1 seen
+};
+
+/// Ask the card to prove it works, ignoring what it claims about its own state.
+///
+/// THE WEDGE THIS EXISTS FOR (measured on Mr. Orange, 2026-08-28). After any soft reset the card
+/// answers CMD0 with 0x01 and then keeps the R1 "in idle state" bit set forever: 5455 ACMD41 polls
+/// over 60 s, with HCS=1 and HCS=0, with and without the voltage window, after a 1 s settle, after
+/// twenty CMD0s, and CMD1 too. Not one of them cleared it. Only removing the card's power did.
+///
+/// And yet, through all of that, the card reported `OCR=0xC0FF8000` -- bit 31 "power-up complete"
+/// SET, bit 30 CCS set -- handed over its CSD and CID, served a full CMD17 read of block 0 with a
+/// valid 0x55AA signature, and ACCEPTED a CMD24 single-block write (data response 0x05, one
+/// millisecond of busy, clean CMD13 after) at both 400 kHz and 10 MHz. It is a working card with a
+/// latched handshake, not a broken card.
+///
+/// ESP-IDF has no way to be told that. `sdmmc_send_cmd_send_op_cond()` polls the idle bit 300
+/// times and gives up, so the mount never happens. So the driver has to be told -- but only on
+/// evidence, which is what this function collects. `powered_up && block_read` is the bar: the card
+/// says its initialisation is done AND it proves it by returning real data. A missing, unpowered
+/// or genuinely dead card clears neither, and the caller must leave the driver's verdict alone.
+///
+/// Read-only by construction: CMD0, CMD8, CMD58, CMD17. Nothing here can modify the card.
+inline bool card_probe_ready(CardResetIo &io, CardReadyResult *out) {
+  CardReadyResult r;
+
+  // CMD0, with the clock-out each attempt, same as the reset path.
+  for (uint8_t attempt = 0; attempt < 10; attempt++) {
+    io.cs(false);
+    for (uint8_t i = 0; i < 10; i++)
+      io.xfer(SD_SPI_IDLE_BYTE);
+    io.cs(true);
+    r.r1 = sd_send_command(io, 0, 0);
+    if (r.r1 == SD_SPI_R1_IDLE) {
+      r.idle = true;
+      break;
+    }
+    io.cs(false);
+    io.delay_ms(20);
+    if (io.aborted())
+      break;
+  }
+  if (!r.idle) {
+    io.cs(false);
+    io.xfer(SD_SPI_IDLE_BYTE);
+    if (out != nullptr)
+      *out = r;
+    return false;
+  }
+
+  // CMD8. Its echo is the only evidence that the card is a v2 card at all, and ESP-IDF's own
+  // decision to send HCS depends on the same answer.
+  {
+    uint8_t echo[4] = {0, 0, 0, 0};
+    const uint8_t r1 = sd_send_command(io, 8, 0x000001AAUL);
+    if (r1 != 0xFF && (r1 & 0x04) == 0) {
+      for (uint8_t i = 0; i < 4; i++)
+        echo[i] = io.xfer(SD_SPI_IDLE_BYTE);
+      r.cmd8_echoed = (echo[2] == 0x01 && echo[3] == 0xAA);
+    }
+  }
+
+  // CMD58. Bit 31 is the card's own account of whether it finished initialising -- the one number
+  // that separates "still working on it" from "done, and the handshake is lying".
+  {
+    const uint8_t r1 = sd_send_command(io, 58, 0);
+    if (r1 != 0xFF) {
+      uint32_t ocr = 0;
+      for (uint8_t i = 0; i < 4; i++)
+        ocr = (ocr << 8) | io.xfer(SD_SPI_IDLE_BYTE);
+      r.ocr_valid = true;
+      r.ocr = ocr;
+      r.powered_up = ((ocr >> 31) & 1) != 0;
+      r.high_capacity = ((ocr >> 30) & 1) != 0;
+    }
+  }
+
+  // CMD17 of LBA 0. Streamed, never buffered: 512 bytes of stack inside the writer task is not
+  // worth spending to look at two of them, and only the last two and the signature matter.
+  if (r.powered_up && !io.aborted()) {
+    const uint8_t r1 = sd_send_command(io, 17, 0);
+    if (r1 != 0xFF && (r1 & 0xFE) == 0) {
+      uint8_t token = SD_SPI_IDLE_BYTE;
+      for (uint16_t i = 0; i < 4000; i++) {
+        token = io.xfer(SD_SPI_IDLE_BYTE);
+        if (token != SD_SPI_IDLE_BYTE)
+          break;
+      }
+      if (token == 0xFE) {
+        uint8_t last_two[2] = {0, 0};
+        for (uint16_t i = 0; i < 512; i++) {
+          const uint8_t b = io.xfer(SD_SPI_IDLE_BYTE);
+          last_two[0] = last_two[1];
+          last_two[1] = b;
+        }
+        io.xfer(SD_SPI_IDLE_BYTE);  // CRC16, discarded: the card checks it, we do not need it
+        io.xfer(SD_SPI_IDLE_BYTE);
+        r.block_read = true;
+        r.signature = (last_two[0] == 0x55 && last_two[1] == 0xAA);
+      }
+    }
+  }
+
+  io.cs(false);
+  io.xfer(SD_SPI_IDLE_BYTE);
+  if (out != nullptr)
+    *out = r;
+  // The signature is logged, never required: a card can be perfectly healthy and hold something
+  // other than an MBR in sector 0, and refusing to recover it for that would be a bug of our own.
+  return r.powered_up && r.block_read;
+}
+
 /// For the one log line that has to say what happened.
 inline const char *card_reset_outcome_str(CardResetOutcome outcome) {
   switch (outcome) {

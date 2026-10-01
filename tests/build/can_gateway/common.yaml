@@ -42,6 +42,8 @@ can_gateway:
   # Datalogger tap ring depth (S2). Armed per port below; this sizes the one
   # static ring type every armed port instantiates.
   log_tap_queue_depth: 256
+  # Separate SPSC queue for TX completion; only ports with log_tap_tx consume it.
+  log_tap_tx_queue_depth: 128
   ports:
     # Reference board wiring: TWAI0 TX GPIO2 / RX GPIO3,
     # TWAI1 TX GPIO10 / RX GPIO11.
@@ -68,6 +70,8 @@ can_gateway:
       # the branch: an armed port allocates a ring and pushes from the RX ISR,
       # an unarmed one must stay byte-identical to a build without the tap.
       log_tap: true
+      # Record successful local transmissions alongside received frames.
+      log_tap_tx: true
       # Raw sniffer (A14) on the port that has no decode entities: the only
       # subscriber that names no id, so it forces observe_all here (hardware
       # filter offload off, every frame through the observation ring). What

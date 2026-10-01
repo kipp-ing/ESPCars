@@ -175,8 +175,9 @@ is a captured log line finding the text ring full (raise
 `esphome_logs.buffer_depth`), `card_dropped` is everything lost because
 there was no writable file at all — the card is gone, not merely slow, and
 `mounted=0` is why. `index_refused` is not a drop: it counts chunks the
-collection index couldn't track (§3.5), which is a `collection.max_chunks`
-sizing question, never a throughput one.
+collection index couldn't track even after trying to reclaim a confirmed
+chunk (§3.5), which is a `collection.max_chunks` / collection cadence
+question, never a throughput one.
 
 ### 3.4 Read the file back
 
@@ -259,17 +260,17 @@ task's priority, and the effect on bus timing is unmeasured (see
 bus-critical board casually.
 
 **Watch the card, not just the logs, once retention is armed.** Above
-`retention_percent`, the oldest un-collected chunk is deleted — CONFIRMED
-chunks first, then never-collected SEALED ones — and the deletion is stated
+`retention_percent`, retention deletes CONFIRMED chunks first. If none are
+available, it deletes never-collected SEALED chunks and states that loss
 in-band as a `#gap,<t_us>,<chunks>,<bytes>,<first_seq>,<last_seq>` line so a
 card found later doesn't read as a quiet period. `script/sdlog.py check
---verbose` reports it; a card that never sees `#gap` and never gets emptied
-by a puller will instead hit `collection.max_chunks` — every chunk beyond
-the index's capacity is `index_refused`, untracked, unservable and
-unreclaimable forever (a real failure mode on the bench's own long-lived
-soak card — see `docs/HANDOVER.md` §1.3). Size `max_chunks` for the longest
-stretch the device will run **without being collected or wiped**, not for a
-single drive.
+--verbose` reports it. Separately, if the index fills below the card-fill
+threshold, confirmed `.UPL` chunks are also the free list: the oldest
+non-serving confirmed file is deleted and the new chunk is tracked. A card
+that produces chunks faster than they are confirmed will still hit
+`collection.max_chunks`; those refused chunks are untracked and unservable
+until a remount can see them. Size `max_chunks` for the longest stretch the
+device will run **without confirmations**, not for a single drive.
 
 ## 4. `packages:` — splitting "this board" from "this logging setup"
 
@@ -372,7 +373,7 @@ this is a bonus (Layer B).
 | `serve` | default `true`; the **network** half — whether the `esp_http_server` runs at all. `false` is a real config: chunks collected by pulling the card, or a bench soak that must not add WiFi's effect on bus timing to what it's measuring |
 | `port` | default `8080`; must not collide with `web_server`'s port (V25) |
 | `retention_percent` | default `80`, strictly 1–99; card fill that arms "drop oldest un-collected" |
-| `max_chunks` | default `256`, 16–2048; in-RAM index capacity, 12 bytes/entry. Size for the longest run between collections/wipes — a chunk the index never held is never listed, served, or reclaimed (see §3.5's warning) |
+| `max_chunks` | default `256`, 16–2048; in-RAM index capacity, 12 bytes/entry. Confirmed chunks act as the free list when the index is full: the oldest non-serving `.UPL` is deleted and the new chunk is tracked. Size this for the longest unconfirmed stretch; if the index fills with only `.LOG` chunks, new chunks are still refused rather than forgetting files that remain on the card |
 
 `collection.enabled: true` with `serve: true` (the default) requires a
 `wifi:` block (V22) — otherwise the server binds an interface that never
@@ -425,7 +426,7 @@ being deliberate about anyway:
 | `tap_dropped` climbing | the `can_gateway` tap ring is full — raise that port's `log_tap_queue_depth`, a `can_gateway` key |
 | `text_dropped` climbing | the captured-log ring is full — raise `esphome_logs.buffer_depth`, or the board is logging faster than the writer can drain |
 | `card_dropped` climbing | there was no writable file at all for that stretch — the card is gone, not merely slow; look at `mounted` for why |
-| `index_refused` climbing (or nonzero) | chunks exist on the card but the in-RAM index is full — raise `collection.max_chunks`; those chunks are never listed, served or reclaimed by retention until then |
+| `index_refused` climbing (or nonzero) | the in-RAM index filled and had no confirmed, non-serving chunk to reclaim for at least one rotation — raise `collection.max_chunks`, collect more often, or shorten the unconfirmed stretch. Refused chunks are not listed, served or reclaimed until a remount can see them |
 | a `.LOG` file has no trailing `#close` | the power-cut signature — expected after pulling the power, harmless if it's the very last line (one torn line is recoverable by design). `check --strict` is what turns this into a bench-gate failure when it shouldn't be there |
 | `script/sdlog.py check` reports a malformed line mid-file | a real defect — a formatter bug, or the card returned garbage; not the torn-trailing-line case above |
 | `#drop,<t_us>,ring\|tap:<label>\|text,<delta>,<total>` in the file | the in-band version of the counters above — read together with which counter moved to find the bottleneck |

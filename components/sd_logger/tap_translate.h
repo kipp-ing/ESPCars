@@ -1,6 +1,6 @@
 #pragma once
 
-/// TapRecord (can_gateway, written in the RX ISR) -> LogRecord (sd_logger, written to the card).
+/// TapRecord (can_gateway, written in an RX or TX ISR) -> LogRecord (sd_logger, written to the card).
 ///
 /// This lives in its own ESPHome-free, IDF-free header for the same reason `gateway_core.h` does:
 /// so the host harness in `tests/host/` can run it. The bench cannot reach this translation
@@ -54,7 +54,8 @@ inline void tap_to_log_record(const can_gateway::TapRecord &tap, uint8_t source,
     out.flags |= REC_FLAG_RTR;
   if (tap.flags & can_gateway::TAP_FLAG_SHED)
     out.flags |= REC_FLAG_SHED;
-  // REC_FLAG_TX is never set here: a tap record is by definition something this node received.
+  if (tap.flags & can_gateway::TAP_FLAG_TX)
+    out.flags |= REC_FLAG_TX;
   out.len = tap.dlc > 8 ? 8 : tap.dlc;
   std::memcpy(out.data, tap.data, sizeof(out.data));
 }

@@ -186,7 +186,9 @@ CONF_ID_TIMINGS = "id_timings"
 CONF_ID_TIMINGS_MAX = "id_timings_max"
 CONF_OBSERVE_QUEUE_DEPTH = "observe_queue_depth"
 CONF_LOG_TAP = "log_tap"
+CONF_LOG_TAP_TX = "log_tap_tx"
 CONF_LOG_TAP_QUEUE_DEPTH = "log_tap_queue_depth"
+CONF_LOG_TAP_TX_QUEUE_DEPTH = "log_tap_tx_queue_depth"
 CONF_MAX_FRAMES_PER_LOOP = "max_frames_per_loop"
 
 # Fixed bound on the per-port subscribed-ID membership set (spec N7). Must match
@@ -197,6 +199,9 @@ OBSERVE_QUEUE_DEPTH_DEFAULT = 32
 # write-latency spike: at 90% of 500 kbps a segment delivers ~3600 frames/s,
 # so 1024 records absorbs ~280 ms of stall before the tap sheds.
 LOG_TAP_DEPTH_DEFAULT = 1024
+# TX has its own SPSC producer ring. At the observed 357 TX frames/s, 128 compact records absorb
+# about 350 ms while costing only 2.5 KiB on ports that explicitly enable log_tap_tx.
+LOG_TAP_TX_DEPTH_DEFAULT = 128
 
 # Upper bound on `routes[].filters`. The rule count is carried to C++ as the
 # `uint8_t rule_count` argument of GatewayRoute (can_gateway.h), so 256 rules
@@ -306,6 +311,8 @@ def _validate_port(port):
     """V12: bench aids that contradict each other. V23: drain cap vs ring depth."""
     if port[CONF_SELF_TEST] and port[CONF_LISTEN_ONLY]:
         raise cv.Invalid("self_test and listen_only are mutually exclusive")
+    if port[CONF_LOG_TAP_TX] and not port[CONF_LOG_TAP]:
+        raise cv.Invalid("log_tap_tx: true requires log_tap: true; without log_tap the TX tap has no ring")
     # V23: max_frames_per_loop defaults to the ring depth and may not exceed it
     # (you cannot drain more records per loop than the ring can hold).
     depth = port[CONF_OBSERVE_QUEUE_DEPTH]
@@ -547,6 +554,8 @@ PORT_SCHEMA = cv.All(
             # V28: arm the datalogger tap on this port. Off by default — a tap
             # allocates a ring and adds an ISR push per frame, so it is opt-in.
             cv.Optional(CONF_LOG_TAP, default=False): cv.boolean,
+            # Include this node's successful transmissions in the same ring.
+            cv.Optional(CONF_LOG_TAP_TX, default=False): cv.boolean,
             cv.Optional(CONF_MAX_FRAMES_PER_LOOP): cv.int_range(min=1, max=128),
             cv.Optional(CONF_SELF_TEST, default=False): cv.boolean,
             cv.Optional(CONF_OPEN_DRAIN_TX, default=False): cv.boolean,
@@ -778,6 +787,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_LOG_TAP_QUEUE_DEPTH, default=LOG_TAP_DEPTH_DEFAULT
             ): cv.int_range(min=64, max=8192),
+            cv.Optional(
+                CONF_LOG_TAP_TX_QUEUE_DEPTH, default=LOG_TAP_TX_DEPTH_DEFAULT
+            ): cv.int_range(min=16, max=8192),
             cv.Optional(CONF_STATISTICS): STATISTICS_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -1146,6 +1158,7 @@ async def to_code(config):
     if any(port[CONF_LOG_TAP] for port in config[CONF_PORTS]):
         cg.add_define("USE_CAN_GATEWAY_LOG_TAP")
     cg.add_define("CAN_GATEWAY_LOG_TAP_DEPTH", config[CONF_LOG_TAP_QUEUE_DEPTH])
+    cg.add_define("CAN_GATEWAY_LOG_TAP_TX_DEPTH", config[CONF_LOG_TAP_TX_QUEUE_DEPTH])
 
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_INTERRUPT_PRIORITY])
     await cg.register_component(var, config)
@@ -1167,6 +1180,8 @@ async def to_code(config):
         cg.add(port.set_tx_queue_depth(port_config[CONF_TX_QUEUE_DEPTH]))
         if port_config[CONF_LOG_TAP]:
             cg.add(port.set_log_tap(True))
+        if port_config[CONF_LOG_TAP_TX]:
+            cg.add(port.set_log_tap_tx(True))
         cg.add(port.set_max_frames_per_loop(port_config[CONF_MAX_FRAMES_PER_LOOP]))
         cg.add(var.add_port(port))
         for conf in port_config.get(CONF_ON_BUS_OFF, []):

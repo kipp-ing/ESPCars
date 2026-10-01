@@ -1,0 +1,29 @@
+esphome:
+  name: can-gateway-isr-hook-c6
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+  - source:
+      type: local
+      path: .
+    components: [isr_hook_compile]
+
+can_gateway:
+  id: gateway
+  ports:
+    - id: wire
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 500kbps
+
+isr_hook_compile:
+  port: wire

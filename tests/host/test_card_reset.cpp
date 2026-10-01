@@ -28,6 +28,8 @@ using esphome::sd_logger::CardResetConfig;
 using esphome::sd_logger::CardResetIo;
 using esphome::sd_logger::CardResetOutcome;
 using esphome::sd_logger::CardResetStep;
+using esphome::sd_logger::card_probe_ready;
+using esphome::sd_logger::CardReadyResult;
 using esphome::sd_logger::sd_crc7;
 using esphome::sd_logger::SD_SPI_STOP_TRAN_TOKEN;
 
@@ -52,6 +54,16 @@ class FakeCard : public CardResetIo {
     uint8_t status_byte{0};          ///< CMD13 R2 second byte
     uint32_t glitch_at_ms{0};        ///< if non-zero, one stray 0xFF at this time while busy
     uint32_t abort_at_ms{0};         ///< if non-zero, aborted() turns true at this time
+
+    // --- the latched-handshake wedge (see card_probe_ready) ---------------------------------
+    /// OR'd into every R1 except CMD0's. 0x01 models the real fault: a card that keeps saying
+    /// "in idle state" to everything while answering all of it correctly.
+    uint8_t r1_extra{0};
+    bool answers_cmd8{true};       ///< false: CMD8 is rejected as an illegal command
+    bool answers_cmd58{true};      ///< false: no OCR at all
+    uint32_t ocr{0xC0FF8000};      ///< bit 31 power-up done, bit 30 CCS, 2.7-3.6 V window
+    bool block_readable{true};     ///< false: CMD17 is refused
+    bool block_signature{true};    ///< false: the block is real but does not end in 0x55AA
   };
 
   explicit FakeCard(Config cfg) : cfg_(cfg), open_write_(cfg.open_write), busy_until_(cfg.busy_ms) {}
@@ -124,8 +136,46 @@ class FakeCard : public CardResetIo {
         resp_.push_back(0x00);
         break;
       case 13:
-        resp_.push_back(0x00);
+        resp_.push_back(static_cast<uint8_t>(0x00 | cfg_.r1_extra));
         resp_.push_back(cfg_.status_byte);
+        break;
+      case 8:
+        // R7: R1 then the four-byte echo. The check pattern in the low two bytes is the card
+        // agreeing it is a v2 card and that it understood the voltage range.
+        if (!cfg_.answers_cmd8) {
+          resp_.push_back(static_cast<uint8_t>(0x04 | cfg_.r1_extra));
+          break;
+        }
+        resp_.push_back(static_cast<uint8_t>(0x00 | cfg_.r1_extra));
+        resp_.push_back(0x00);
+        resp_.push_back(0x00);
+        resp_.push_back(frame_[3]);
+        resp_.push_back(frame_[4]);
+        break;
+      case 58:
+        // R3: R1 then the OCR, most significant byte first.
+        if (!cfg_.answers_cmd58) {
+          resp_.push_back(static_cast<uint8_t>(0x04 | cfg_.r1_extra));
+          break;
+        }
+        resp_.push_back(static_cast<uint8_t>(0x00 | cfg_.r1_extra));
+        for (int shift = 24; shift >= 0; shift -= 8)
+          resp_.push_back(static_cast<uint8_t>((cfg_.ocr >> shift) & 0xFF));
+        break;
+      case 17:
+        // R1, then the 0xFE start token, 512 bytes, and a CRC16 the reader discards.
+        if (!cfg_.block_readable) {
+          resp_.push_back(static_cast<uint8_t>(0x04 | cfg_.r1_extra));
+          break;
+        }
+        resp_.push_back(static_cast<uint8_t>(0x00 | cfg_.r1_extra));
+        resp_.push_back(0xFE);
+        for (int i = 0; i < 510; i++)
+          resp_.push_back(static_cast<uint8_t>(i & 0xFF));
+        resp_.push_back(cfg_.block_signature ? 0x55 : 0x00);
+        resp_.push_back(cfg_.block_signature ? 0xAA : 0x00);
+        resp_.push_back(0x12);
+        resp_.push_back(0x34);
         break;
       default:
         resp_.push_back(0x04);  // illegal command
@@ -327,4 +377,102 @@ TEST(card_reset_aborts_mid_busy_wait) {
 
   CHECK_EQ(static_cast<int>(result.outcome), static_cast<int>(CardResetOutcome::ABORTED));
   CHECK(card.bytes() < 400u);  // it stopped when asked, not when the budget ran out
+}
+
+// ------------------------------------------------------- the latched handshake (card_probe_ready)
+//
+// Measured on Mr. Orange, 2026-08-28. After a soft reset the card kept R1's "in idle state" bit set
+// through 5455 ACMD41 polls over 60 s — HCS set and clear, the full voltage window, a 1 s settle,
+// twenty CMD0s, CMD1 — while reporting OCR=0xC0FF8000 with its own power-up-complete flag SET,
+// serving CMD17 block reads, handing over CSD and CID, and accepting CMD24 writes. Only removing
+// its power cleared the bit.
+//
+// ESP-IDF cannot be told that, so `card_probe_ready()` decides it instead, and the whole safety of
+// the override rests on this function saying no when it should. These cases are that bar: a card
+// that has not finished initialising, a card that is not there, and a card that answers but will
+// not read must all be refused, because masking the idle bit for any of them would turn a clean
+// "no card" into a mount over nothing.
+
+TEST(card_probe_ready_accepts_a_latched_but_working_card) {
+  FakeCard::Config cfg;
+  cfg.r1_extra = 0x01;  // the wedge: everything answers, everything still says "idle"
+  FakeCard card(cfg);
+  CardReadyResult r;
+  CHECK(card_probe_ready(card, &r));
+  CHECK(r.idle);
+  CHECK(r.cmd8_echoed);
+  CHECK(r.ocr_valid);
+  CHECK_EQ(r.ocr, 0xC0FF8000u);
+  CHECK(r.powered_up);
+  CHECK(r.high_capacity);
+  CHECK(r.block_read);
+  CHECK(r.signature);
+}
+
+TEST(card_probe_ready_refuses_a_card_still_powering_up) {
+  // OCR bit 31 clear is the card saying its initialisation genuinely has not finished. That is the
+  // one case where ACMD41 timing out is the truth and patience is the right answer, so the
+  // override must stay disarmed — and the block read must not even be attempted.
+  FakeCard::Config cfg;
+  cfg.r1_extra = 0x01;
+  cfg.ocr = 0x00FF8000;  // same card, bit 31 clear
+  FakeCard card(cfg);
+  CardReadyResult r;
+  CHECK(!card_probe_ready(card, &r));
+  CHECK(r.ocr_valid);
+  CHECK(!r.powered_up);
+  CHECK(!r.block_read);
+}
+
+TEST(card_probe_ready_refuses_an_absent_card) {
+  FakeCard::Config cfg;
+  cfg.present = false;
+  FakeCard card(cfg);
+  CardReadyResult r;
+  CHECK(!card_probe_ready(card, &r));
+  CHECK(!r.idle);
+  CHECK(!r.powered_up);
+  CHECK(!r.block_read);
+}
+
+TEST(card_probe_ready_refuses_a_card_that_answers_but_will_not_read) {
+  // The dangerous middle case: a card healthy enough to hold a conversation and report a good OCR,
+  // but unable to deliver data. Mounting it would corrupt a filesystem rather than fail cleanly.
+  FakeCard::Config cfg;
+  cfg.r1_extra = 0x01;
+  cfg.block_readable = false;
+  FakeCard card(cfg);
+  CardReadyResult r;
+  CHECK(!card_probe_ready(card, &r));
+  CHECK(r.powered_up);
+  CHECK(!r.block_read);
+}
+
+TEST(card_probe_ready_accepts_a_card_whose_sector_zero_is_not_a_boot_record) {
+  // A card can be perfectly healthy and hold something other than an MBR in sector 0. The
+  // signature is evidence, never a requirement — refusing to recover a working card over it would
+  // be a fault of our own making.
+  FakeCard::Config cfg;
+  cfg.r1_extra = 0x01;
+  cfg.block_signature = false;
+  FakeCard card(cfg);
+  CardReadyResult r;
+  CHECK(card_probe_ready(card, &r));
+  CHECK(r.block_read);
+  CHECK(!r.signature);
+}
+
+TEST(card_probe_ready_does_not_need_cmd8_to_recover_a_v1_card) {
+  // CMD8 is how ESP-IDF decides whether to send HCS, and a v1 card rejects it. That is a fact
+  // about the card's generation, not about whether it works, so it must not gate the override.
+  FakeCard::Config cfg;
+  cfg.r1_extra = 0x01;
+  cfg.answers_cmd8 = false;
+  cfg.ocr = 0x80FF8000;  // powered up, but no CCS: an SDSC card
+  FakeCard card(cfg);
+  CardReadyResult r;
+  CHECK(card_probe_ready(card, &r));
+  CHECK(!r.cmd8_echoed);
+  CHECK(!r.high_capacity);
+  CHECK(r.block_read);
 }

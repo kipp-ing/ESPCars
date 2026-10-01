@@ -26,7 +26,7 @@
 #include <esp_twai_onchip.h>
 #include <esp_twai_types.h>
 #include <freertos/FreeRTOS.h>
-#if defined(USE_CAN_GATEWAY_ID_STATS) || defined(USE_CAN_GATEWAY_LOG_TAP)
+#if defined(USE_CAN_GATEWAY_ID_STATS) || defined(USE_CAN_GATEWAY_LOG_TAP) || defined(USE_CAN_GATEWAY_ISR_HOOK)
 #include <esp_timer.h>
 #endif
 
@@ -40,7 +40,7 @@
 // none of them built in, a shed frame has nowhere to go and is left to the
 // driver, exactly as before.
 #if defined(USE_CAN_GATEWAY_STATS) || defined(USE_CAN_GATEWAY_SNAPSHOT) || defined(USE_CAN_GATEWAY_OBSERVE) || \
-    defined(USE_CAN_GATEWAY_LOG_TAP)
+    defined(USE_CAN_GATEWAY_LOG_TAP) || defined(USE_CAN_GATEWAY_ISR_HOOK)
 #define CAN_GATEWAY_HAS_RX_TAPS
 #endif
 
@@ -49,6 +49,14 @@ namespace esphome::can_gateway {
 class CanGateway;
 class GatewayPort;
 class GatewayRoute;
+
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+/// Direct RX-ISR frame sink. The consumer's Python emits
+/// USE_CAN_GATEWAY_ISR_HOOK with cg.add_define(); this is intentionally not an
+/// ESPHome-core define or a YAML option.
+using IsrFrameHook = void (*)(void *ctx, uint32_t t_us, uint32_t can_id, bool extended, bool rtr, uint8_t dlc,
+                              const uint8_t *data);
+#endif
 
 // Contract-level rule flag bits emitted by codegen (see the symbol contract in
 // __init__.py). Bits 0-4 are identical to the core RULE_FLAG_* bits and pass
@@ -173,10 +181,25 @@ class GatewayPort {
     this->recovered_callback_.add(std::forward<F>(callback));
   }
 
-  /// Frame injection. Loop context only, never blocks.
+  /// Frame injection. Safe from ESPHome loop context or a FreeRTOS task, never
+  /// blocks; it must not be called from an ISR. SlotPool uses atomic claims and
+  /// the task-safe critical section serializes the driver hand-off and
+  /// OutstandingTracker against both TWAI ISRs. `node_` is immutable after
+  /// setup, and each caller owns `data` only until this function returns.
   /// Returns false (with a throttled warning) when the port cannot transmit
   /// (listen-only, bus-off), no inject slot is free, or the TX queue is full.
   bool inject(uint32_t can_id, bool extended, bool rtr, const uint8_t *data, uint8_t len);
+
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+  /// Register the optional direct RX hook before this port's setup() starts.
+  /// The hook runs first in the RX ISR with a non-owning payload view valid
+  /// only for the call. It must be IRAM-resident, bounded, allocation-free and
+  /// log-free; anything else stalls the gateway fast path for every port.
+  void set_isr_frame_hook(IsrFrameHook fn, void *ctx) {
+    this->isr_frame_hook_ = fn;
+    this->isr_frame_hook_ctx_ = ctx;
+  }
+#endif
 
 #ifdef USE_CAN_GATEWAY_OBSERVE
   /// Observation registration (A14). Must run before the component's setup()
@@ -233,13 +256,22 @@ class GatewayPort {
   /// inlined push instead of an indirect call through a registered sink.
   /// Null on a port with `log_tap: false`. Drained by the consumer's task.
   ObserveRing<CAN_GATEWAY_LOG_TAP_DEPTH, TapRecord> *log_tap_ring() { return this->log_tap_ring_; }
+  /// TX completion has its own ring: ObserveRing is SPSC and RX is already the producer of the
+  /// primary ring. Null unless `log_tap_tx: true` was armed before setup.
+  ObserveRing<CAN_GATEWAY_LOG_TAP_TX_DEPTH, TapRecord> *log_tap_tx_ring() { return this->log_tap_tx_ring_; }
   /// Arm the tap on this port (codegen, before setup). Allocating the ring is
   /// what makes the ISR push live; a port left unarmed pays one null test.
   void set_log_tap(bool enable) { this->log_tap_enabled_ = enable; }
+  /// Include this port's successful transmissions in the datalogger tap.
+  void set_log_tap_tx(bool enable) { this->log_tap_tx_ = enable; }
   /// Frames the tap had to drop because the consumer fell behind and the ring
   /// was full (D4: drop-newest, never block the producer). A logger reports this
   /// as its own dropped count — a stalled SD write must never stall the ISR.
   uint32_t log_tap_dropped() const { return this->log_tap_dropped_.load(std::memory_order_relaxed); }
+  /// Accepted is deliberately per ring. RX and TX have independent producers and capacities;
+  /// callers that need one port total add these two monotonic counters.
+  uint32_t log_tap_rx_accepted() const { return this->log_tap_rx_accepted_.load(std::memory_order_relaxed); }
+  uint32_t log_tap_tx_accepted() const { return this->log_tap_tx_accepted_.load(std::memory_order_relaxed); }
 #endif
 
   // Fast path, ISR context (definitions in can_gateway.cpp, IRAM_ATTR).
@@ -284,17 +316,27 @@ class GatewayPort {
 
 #ifdef CAN_GATEWAY_HAS_RX_TAPS
   /// Every non-forwarding consumer of a frame this port took off the wire, in
-  /// one place: bus-load bits, per-ID timing, the snapshot ring, the
-  /// observation ring. Runs for every frame retrieved — forwarded, filtered or
-  /// shed — and always before process_frame(), so observation sees the wire
-  /// pre-patch. always_inline like release_slot(): it dissolves into its ISR
-  /// callers, so it needs no flash symbol of its own and the forwarding fast
-  /// path keeps the straight line it had when this block was written out inline.
+  /// one place: the optional direct RX-ISR hook, bus-load bits, per-ID timing,
+  /// the snapshot ring and the observation ring. Runs for every frame
+  /// retrieved — forwarded, filtered or shed — and always before
+  /// process_frame(), so observation sees the wire pre-patch. always_inline
+  /// like release_slot(): it dissolves into its ISR callers, so it needs no
+  /// flash symbol of its own and the forwarding fast path keeps the straight
+  /// line it had when this block was written out inline.
   /// `shed` marks a frame that was on this port's wire but was not forwarded.
   /// It is a compile-time constant at every call site and this function is
   /// always_inline, so the forwarding fast path folds it away to nothing.
   CAN_GATEWAY_CORE_INLINE void run_rx_taps_(uint32_t can_id, bool extended, bool rtr, uint8_t dlc, const uint8_t *data,
                                             bool shed = false) {
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+    // This is deliberately the first tap: its consumer is on the response
+    // deadline, whereas the remaining taps are diagnostic. Take the timestamp
+    // once in the ISR immediately before the direct call.
+    if (this->isr_frame_hook_ != nullptr) {
+      const uint32_t t_us = static_cast<uint32_t>(esp_timer_get_time());
+      this->isr_frame_hook_(this->isr_frame_hook_ctx_, t_us, can_id, extended, rtr, dlc, data);
+    }
+#endif
 #ifdef USE_CAN_GATEWAY_STATS
     this->rx_bits_.fetch_add(estimate_frame_bits(extended, rtr, dlc), std::memory_order_relaxed);
 #ifdef USE_CAN_GATEWAY_ID_STATS
@@ -330,7 +372,9 @@ class GatewayPort {
       record.source = this->index_;
       for (uint8_t i = 0; i < dlc; i++)
         record.data[i] = data[i];
-      if (!this->log_tap_ring_->push(record))
+      if (this->log_tap_ring_->push(record))
+        this->log_tap_rx_accepted_.fetch_add(1, std::memory_order_relaxed);
+      else
         this->log_tap_dropped_.fetch_add(1, std::memory_order_relaxed);
     }
 #endif
@@ -355,13 +399,16 @@ class GatewayPort {
     // and a shed frame is exactly the one a log must not silently lose.
     active = active || this->log_tap_ring_ != nullptr;
 #endif
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+    active = active || this->isr_frame_hook_ != nullptr;
+#endif
     return active;
 #endif
   }
   /// RX-ISR receive for every frame that is not forwarded into a TX slot:
   /// retrieve into the static staging frame, then tap it. Used by a route-less
-  /// port with an RX consumer — an observation ring (A12) or the datalogger
-  /// tap ring — and by the shed path.
+  /// port with an RX consumer — a direct ISR hook, observation ring (A12), or
+  /// datalogger tap ring — and by the shed path.
   void receive_into_staging_(bool shed = false);
   /// RX-ISR shed path: forwarding was declined (disabled / destination bus-off
   /// / no slot), but the frame was on this port's wire all the same, so its
@@ -401,7 +448,7 @@ class GatewayPort {
   const std::atomic<bool> *gateway_enabled_{nullptr};
   SlotPool<CAN_GATEWAY_INJECT_SLOTS> inject_pool_{};
   TxSlot inject_slots_[CAN_GATEWAY_INJECT_SLOTS]{};
-  uint32_t last_inject_warn_ms_{0};
+  std::atomic<uint32_t> last_inject_warn_ms_{0};
   /// Previous TEC/REC read, for deriving bus_err from their upward movement in
   /// loop_() (loop context only; see the bus_err comment there).
   static constexpr uint32_t ERR_POLL_INTERVAL_MS = 500;
@@ -432,6 +479,14 @@ class GatewayPort {
   void reclaim_orphan_(TxSlot *orphan);
   LazyCallbackManager<void()> bus_off_callback_{};
   LazyCallbackManager<void()> recovered_callback_{};
+
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+  // Set once before setup, then read-only from the RX ISR. Plain pointer +
+  // context keeps the call direct: std::function would allocate and can route
+  // through flash-resident code.
+  IsrFrameHook isr_frame_hook_{nullptr};
+  void *isr_frame_hook_ctx_{nullptr};
+#endif
 
 #ifdef USE_CAN_GATEWAY_STATS
   /// Estimated on-wire bits, accumulated in the RX ISR (rx) and the tx_done ISR
@@ -506,8 +561,12 @@ class GatewayPort {
 
 #ifdef USE_CAN_GATEWAY_LOG_TAP
   ObserveRing<CAN_GATEWAY_LOG_TAP_DEPTH, TapRecord> *log_tap_ring_{nullptr};
+  ObserveRing<CAN_GATEWAY_LOG_TAP_TX_DEPTH, TapRecord> *log_tap_tx_ring_{nullptr};
   std::atomic<uint32_t> log_tap_dropped_{0};
+  std::atomic<uint32_t> log_tap_rx_accepted_{0};
+  std::atomic<uint32_t> log_tap_tx_accepted_{0};
   bool log_tap_enabled_{false};
+  bool log_tap_tx_{false};
 #endif
 
 #ifdef CAN_GATEWAY_HAS_RX_TAPS

@@ -77,8 +77,10 @@ THE LINE (spec §6 F1a/F1h)
     Every number on a stream line is **uppercase hex**. `t` is the stamp column:
     `@<hex>` is an absolute µs anchor, a bare `<hex>` is the step from the
     previous stream line of the same file. The chain runs over every record and
-    text line in file order; the `#` meta lines carry `@<hex>` absolutes and stay
-    outside it, so a reader that skips `#drop` still decodes the records after it.
+    text line in file order; timed `#` meta lines carry `@<hex>` absolutes and
+    stay outside it, so a reader that skips `#drop` still decodes the records
+    after it. `#utc` is the exception by design: its two bare 64-bit hex values
+    are a boot-time/UTC correspondence pair, not stamp-column encodings.
     Every chunk anchors its own first stream line, so a chunk pulled off the
     collection server decodes without the chunks around it.
 
@@ -86,9 +88,9 @@ THE LINE (spec §6 F1a/F1h)
     from. Meta lines keep decimal counts and seqs, because those match the decimal
     in a filename and in a stats line.
 
-    Everything this reader *reports* — spans, `#gap` and `#drop` times, extracted
-    CSV — is in absolute decimal µs. The encoding is a byte budget on the card, not
-    something a caller should have to know about.
+    Everything this reader reports on the boot-time axis — spans, `#gap` and
+    `#drop` times, extracted CSV — is in absolute decimal µs. When present,
+    `#utc` adds a second UTC axis rather than replacing that one.
 
 Usage:
     script/sdlog.py check   L0000007.LOG [...]      # verdict per file, exit 1 on a defect
@@ -110,6 +112,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Type letters and their field counts, from spec §6 F1a/F1c. A record line is one
@@ -166,6 +169,37 @@ class Drop:
     total: int
 
 
+class UtcAnchor:
+    """The most recent boot-time/UTC correspondence, independent of `Chain`.
+
+    `#utc` lines are metadata, not stamp-column anchors: they do not alter the
+    boot-time delta chain.  They only let the reader project each subsequently
+    decoded boot-relative timestamp onto a second, UTC axis.
+    """
+
+    def __init__(self) -> None:
+        self.boot_us: int | None = None
+        self.utc_us: int | None = None
+
+    @property
+    def valid(self) -> bool:
+        return self.boot_us is not None and self.utc_us is not None
+
+    def set(self, boot_us: int, utc_us: int) -> None:
+        self.boot_us = boot_us
+        self.utc_us = utc_us
+
+    def resolve(self, record_boot_us: int) -> int | None:
+        """Match utc_anchor.h's saturating correspondence arithmetic."""
+        if not self.valid:
+            return None
+        assert self.boot_us is not None and self.utc_us is not None
+        if record_boot_us >= self.boot_us:
+            delta = record_boot_us - self.boot_us
+            return min((1 << 64) - 1, self.utc_us + delta)
+        return max(0, self.utc_us - (self.boot_us - record_boot_us))
+
+
 @dataclass
 class Gap:
     """One `#gap` line: the window retention emptied, and what it cost.
@@ -217,6 +251,10 @@ class Report:
     bad_lines: list[tuple[int, str]] = field(default_factory=list)
     first_t_us: int | None = None
     last_t_us: int | None = None
+    first_utc_us: int | None = None
+    last_utc_us: int | None = None
+    origin: str | None = None
+    utc_anchor_count: int = 0
     total_lines: int = 0
     legacy: bool = False
 
@@ -279,6 +317,13 @@ def _parse_x(text: str) -> int:
     if not text or not set(text) <= HEX_DIGITS:
         raise ValueError(f"not an uppercase hex number: {text!r}")
     return int(text, 16)
+
+
+def _parse_u64_x(text: str) -> int:
+    """A bare 64-bit hex value, as used by `#utc` (not a stamp column)."""
+    if len(text) > 16:
+        raise ValueError(f"hex value exceeds 64 bits: {text!r}")
+    return _parse_x(text)
 
 
 def _parse_abs_stamp(text: str) -> int:
@@ -378,6 +423,7 @@ def parse_file(path: Path) -> Report:
     # Absolute until the `#sdlog` header says otherwise, which it does on the very
     # first line: a file with no header at all is pre-v1 and was never delta-coded.
     chain = Chain()
+    utc_anchor = UtcAnchor()
     raw = path.read_bytes()
     # Latin-1 never fails, and the format only ever escapes below 0x20 — bytes
     # >= 0x80 pass through so UTF-8 survives, and re-encoding it here would be
@@ -411,7 +457,7 @@ def parse_file(path: Path) -> Report:
             return report
         try:
             if line.startswith("#"):
-                _parse_meta(report, line)
+                _parse_meta(report, line, utc_anchor)
                 if report.unsupported_version:
                     # Named, never parsed. Walking another format with this parser
                     # calls every record line malformed, and a wall of malformed
@@ -434,6 +480,7 @@ def parse_file(path: Path) -> Report:
                 _, tag, _flags = split_token(fields[0])
                 _check_record(fields)
                 _note_time(report, t_us)
+                _note_utc(report, utc_anchor.resolve(t_us))
                 report.counts[kind] = report.counts.get(kind, 0) + 1
                 # Counted under the name `#src` gives the tag, which is where the
                 # label lives now: it is stated once per file instead of on every
@@ -444,6 +491,7 @@ def parse_file(path: Path) -> Report:
             elif kind == "X":
                 _check_text(fields)
                 _note_time(report, t_us)
+                _note_utc(report, utc_anchor.resolve(t_us))
                 report.counts["X"] = report.counts.get("X", 0) + 1
             else:
                 raise ValueError(f"unknown type letter {kind!r}")
@@ -463,7 +511,16 @@ def _note_time(report: Report, t_us: int) -> None:
     report.last_t_us = t_us
 
 
-def _parse_meta(report: Report, line: str) -> None:
+def _note_utc(report: Report, utc_us: int | None) -> None:
+    """Record the UTC extent only for records after an anchor is in scope."""
+    if utc_us is None:
+        return
+    if report.first_utc_us is None:
+        report.first_utc_us = utc_us
+    report.last_utc_us = utc_us
+
+
+def _parse_meta(report: Report, line: str, utc_anchor: UtcAnchor) -> None:
     fields = line.split(",")
     head = fields[0]
     if head == "#sdlog":
@@ -525,10 +582,23 @@ def _parse_meta(report: Report, line: str) -> None:
         if len(fields) < 3:
             raise ValueError("truncated #close line")
         report.close_reason = fields[2]
+    elif head == "#utc":
+        if len(fields) != 3:
+            raise ValueError("#utc needs boot_us_anchor and utc_us")
+        # Both are plain 64-bit values. In particular, do not pass these through
+        # `_parse_abs_stamp()`: `@` belongs exclusively to the stamp column.
+        utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
+        report.utc_anchor_count += 1
+    elif head == "#origin":
+        if len(fields) != 2:
+            raise ValueError("#origin needs one string field")
+        report.origin = fields[1]
     elif head in ("#types", "#flags", "#layout"):
         pass  # the legend; self-describing by construction
     else:
-        raise ValueError(f"unknown meta line {head!r}")
+        # Meta lines are deliberately extensible. Older readers must continue to
+        # parse a file after a newer writer adds information they do not use.
+        pass
 
 
 def _plural(count: int, noun: str) -> str:
@@ -566,6 +636,17 @@ def _duration(report: Report) -> str:
     return f"{(report.last_t_us - report.first_t_us) / 1e6:.1f}s"
 
 
+def _utc_iso8601(utc_us: int) -> str:
+    """An operator-facing UTC value; retain microsecond precision when present."""
+    try:
+        value = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=utc_us)
+    except OverflowError:
+        # Saturation is intentional in the correspondence arithmetic. This is not
+        # a realistic wall-clock date, but retain the exact evidence if it occurs.
+        return f"{utc_us}us"
+    return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def print_report(report: Report, verbose: bool) -> None:
     name = report.path.name
     if report.legacy:
@@ -582,7 +663,21 @@ def print_report(report: Report, verbose: bool) -> None:
         )
         return
     kinds = " ".join(f"{k}={v}" for k, v in sorted(report.counts.items())) or "no records"
-    print(f"{name}: v{report.format_version} seq={report.seq} {kinds} span={_duration(report)}")
+    summary = f"{name}: v{report.format_version} seq={report.seq} {kinds} span={_duration(report)}"
+    if report.utc_anchor_count:
+        utc_span = "-"
+        if report.first_utc_us is not None and report.last_utc_us is not None:
+            utc_span = f"{_utc_iso8601(report.first_utc_us)}..{_utc_iso8601(report.last_utc_us)}"
+        summary += f" utc={utc_span}"
+        if report.origin is not None:
+            summary += f" origin={report.origin}"
+    print(summary)
+
+    # `origin` is useful even when the board was configured without a time source.
+    # Keep the no-UTC summary byte-for-byte compatible, but do not discard that
+    # identity in the less common origin-only configuration.
+    if report.origin is not None and not report.utc_anchor_count:
+        print(f"  origin {report.origin}")
 
     if verbose and report.sources:
         for src in report.sources:
@@ -682,26 +777,29 @@ def cmd_extract(args) -> int:
     """One type as a plain single-schema CSV — what a spreadsheet or pandas wants,
     without the typed-line dispatch getting in the way.
 
-    The `t_us` column is **absolute decimal µs**, and `dlc` is put back: the saving
-    is in the file, not in what a caller gets out of it. Resolving the chain is the
-    whole reason this reads every stream line rather than only the wanted one —
-    skipping the other types would drop their steps on the floor and put every later
-    timestamp out by however much they came to.
+    The `t_us` column is **absolute decimal boot-time µs**; the appended `utc_us`
+    column is decimal epoch µs when a preceding `#utc` anchor resolves it, else
+    blank. `dlc` is put back: the saving is in the file, not in what a caller gets
+    out of it. Resolving the chain is the whole reason this reads every stream line
+    rather than only the wanted one — skipping the other types would drop their
+    steps on the floor and put every later timestamp out by however much they came
+    to.
     """
     path = Path(args.file)
     wanted = args.type.upper()
-    record_header = "t_us,label,id_hex,flags,dlc,data_hex"
+    record_header = "t_us,label,id_hex,flags,dlc,data_hex,utc_us"
     header = {
         "C": record_header,
         "L": record_header,
         "U": record_header,
         "I": record_header,
-        "X": "t_us,level,tag,message",
+        "X": "t_us,level,tag,message,utc_us",
     }.get(wanted)
     if header is None:
         print(f"unknown type {args.type!r} (use C, L, U, I or X)", file=sys.stderr)
         return 2
     chain = Chain()
+    utc_anchor = UtcAnchor()
     printed_header = False
     # tag -> label, filled in from `#src` as the header streams past. The record
     # lines carry the tag; the name lives in the header now.
@@ -730,6 +828,16 @@ def cmd_extract(args) -> int:
                     src = line.split(",")
                     if len(src) >= 4 and set(src[3]) <= HEX_DIGITS and src[3]:
                         labels[int(src[3], 16)] = src[2]
+                elif line.startswith("#utc,") or line == "#utc":
+                    fields = line.split(",")
+                    if len(fields) != 3:
+                        print(f"{path.name}: unreadable #utc line, extract stops here", file=sys.stderr)
+                        return 2
+                    try:
+                        utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
+                    except ValueError:
+                        print(f"{path.name}: unreadable #utc line, extract stops here", file=sys.stderr)
+                        return 2
                 continue
             fields = line.split(",")
             kind = fields[0][0] if fields[0] else ""
@@ -747,6 +855,8 @@ def cmd_extract(args) -> int:
                 return 2
             if t_us is None or kind != wanted:
                 continue
+            utc_us = utc_anchor.resolve(t_us)
+            utc_column = "" if utc_us is None else str(utc_us)
             label = None
             if wanted in RECORD_KINDS:
                 if len(fields) != RECORD_FIELDS:
@@ -775,13 +885,13 @@ def cmd_extract(args) -> int:
                 # lines a second on the card and nothing at all in a CSV, and a
                 # spreadsheet wants them as columns.
                 data = fields[3]
-                print(f"{t_us},{label},{fields[2]},{flags or '-'},{len(data) // 2},{data}")
+                print(f"{t_us},{label},{fields[2]},{flags or '-'},{len(data) // 2},{data},{utc_column}")
                 continue
             # An `X` line goes out as the level letter off the token, then everything
             # after the stamp verbatim: the message is the last field and may hold
             # commas, so it is never re-split.
             _, _, tail = line.partition(",")[2].partition(",")
-            print(f"{t_us},{fields[0][1:]},{tail}")
+            print(f"{t_us},{fields[0][1:]},{tail},{utc_column}")
     if not printed_header and not args.no_header:
         print(header)
     return 0
