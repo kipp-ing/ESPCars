@@ -30,9 +30,13 @@ shown:
 - **After that, `pull_request` works too.** Opening PR #6 thirteen minutes after
   PR #5 created run 38061602853. Opening #5 had created nothing, with the same
   account and the same event type.
-- **Still open:** did the first manual run wake the repo, or does only #6's
-  edited `ci.yml` trigger? The push carrying this paragraph to #5 (old `ci.yml`)
-  answers that; see the outcome below.
+- **The first manual run woke the repo.** The push carrying this paragraph to
+  #5 still had the old `ci.yml`, and it created run 38061664107. So the content
+  of `ci.yml` did not matter. Why GitHub left push/PR triggers dormant in a
+  recreated repo until the first manual run is not visible from outside, so it
+  stays an observation, not a cause. `workflow_dispatch:` stays in `ci.yml`.
+- **§2 is done** (2026-10-10 17:28): the ruleset requires `Required checks`,
+  pinned to the GitHub Actions app (integration id 15368).
 
 **The original plan for narrowing it down:**
 
