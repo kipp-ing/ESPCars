@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,6 +21,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements_test.txt
+      # The data-hygiene hard rule (CLAUDE.md): check.sh runs it locally, but
+      # only this step holds it for a push from a machine that never did.
+      - name: No private data
+        run: python script/check_no_private_data.py
       - name: Run component schema tests
         run: python -m pytest tests/ -q
       - name: Validate build configs
