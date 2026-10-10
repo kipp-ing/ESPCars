@@ -110,8 +110,19 @@ Archive layout: ``<into>/<device>/L0000433.LOG``, with an in-flight transfer at
 ``<into>/<device>/L0000433.LOG.part`` — a partial is never given the final name,
 so anything without ``.part`` is complete and verified.
 
-Exit status: 0 everything listed was collected and confirmed, 1 at least one
-chunk was not, 2 the device could not be reached at all.
+Exit status (docs/sdlog-fleet-spec.md §2 — an unattended caller acts on it):
+
+    0   everything listed was collected and confirmed (an empty index too)
+    1   a defect: a chunk failed verification, an archived copy is a different
+        file, an index entry is broken, or the device refused a request
+    2   usage error (argparse's, never this tool's own)
+    3   wrong target: something answered at the URL, but not the sd_logger
+        device asked for (a 4xx or non-JSON index, or a name other than --expect)
+    74  the local archive could not be written (EX_IOERR); the pass stopped
+    75  only the network failed (EX_TEMPFAIL): the device is not there, or the
+        pass was cut short by transport alone. Partials stay; run again later.
+
+The most severe applies: 74 > 3 > 1 > 75 > 0.
 """
 
 from __future__ import annotations
@@ -120,6 +131,7 @@ import argparse
 import http.client
 import importlib.util
 import json
+import os
 import re
 import sys
 import time
@@ -171,6 +183,16 @@ _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 _RETRYABLE_STATUS = frozenset({408, 429})
 
+# A fetch answered with one of these lost a race the next run resolves by itself:
+# 404 is a chunk confirmed between index and fetch, 409 the open file named by a
+# stale index. Any other 4xx is the device refusing, and that wants a human.
+_RACE_STATUS = frozenset({404, 409})
+
+EX_DEFECT = 1
+EX_WRONG_TARGET = 3
+EX_IOERR = os.EX_IOERR  # 74
+EX_TEMPFAIL = os.EX_TEMPFAIL  # 75
+
 
 def _retryable(status: int) -> bool:
     """A status worth asking again about. 5xx on this device usually means the
@@ -203,20 +225,46 @@ class Outcome:
     confirmed: list[str] = field(default_factory=list)  # the device acknowledged
     skipped: list[str] = field(default_factory=list)  # already archived (dedup)
     failed: list[tuple[str, str]] = field(default_factory=list)  # (name, reason)
+    # The subset of ``failed`` lost to the network alone (or to a race the next
+    # run resolves). Everything else in ``failed`` is a defect.
+    transient: list[str] = field(default_factory=list)
+    # The local archive refused a write; the pass stopped there.
+    archive_error: str | None = None
     # Written into the archive this run — a restarted partial counts what it
     # wrote before it was discarded, because that is what the run cost.
     bytes_fetched: int = 0
     bytes_wire: int = 0  # everything read off the socket, incl. identity windows
 
+    @property
+    def defects(self) -> int:
+        return len(self.failed) - len(self.transient)
+
 
 class _Unreachable(Exception):
-    """The device did not answer at all. Distinguished from a chunk-level failure
-    because it is a different message to a bench operator, and a different exit
-    status: 'the car is not on the WiFi', not 'a chunk failed to verify'."""
+    """No usable index. ``offline`` says which kind: nothing answered at all (the
+    car is not on the WiFi), or something answered that is not the device asked
+    for (a wrong port, a DHCP lease now held by another host). The first is
+    waited out in silence, the second is a config error."""
+
+    def __init__(self, reason: str, *, offline: bool) -> None:
+        super().__init__(reason)
+        self.offline = offline
 
 
 class _ChunkFailed(Exception):
-    """This chunk was not collected. The run continues with the next one."""
+    """This chunk was not collected. The run continues with the next one.
+    ``transient`` when only the network (or a self-resolving race) is to blame."""
+
+    def __init__(self, reason: str, *, transient: bool = False) -> None:
+        super().__init__(reason)
+        self.transient = transient
+
+
+class _ArchiveError(Exception):
+    """The local disk refused a write. Not a chunk's problem and not the
+    network's: every later chunk would meet the same disk, so the pass stops.
+    Kept apart from ``OSError`` on purpose — the socket raises that too, and a
+    full disk retried as a WiFi stumble downloads the chunk again to nowhere."""
 
 
 class _Interrupted(Exception):
@@ -368,6 +416,7 @@ class Collector:
         dest: Path | str,
         *,
         device: str | None = None,
+        expect: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         retries: int = DEFAULT_RETRIES,
         backoff: float = DEFAULT_BACKOFF,
@@ -380,13 +429,18 @@ class Collector:
         # stable across runs — which is why guessing it is the last resort.
         self.device = device or ""
         self._device_pinned = bool(device)
+        # The name the device must give in its index, or nothing is collected.
+        # An unattended caller pins each URL to a device this way, so a lease
+        # that moved to another host cannot credit the wrong device's heartbeat.
+        self.expect = expect
         self.timeout = timeout
         self.retries = retries
         self.backoff = backoff
         self.sleeper = sleeper
         # Set by collect(): the device never answered, as opposed to answering
-        # and refusing. Only main() reads it, and only to pick exit 2 over 1.
+        # and refusing; ``offline`` narrows it to "nothing answered at all".
         self.unreachable = False
+        self.offline = False
         # Entries the index offered that could not be understood. Kept rather
         # than raised: one broken entry costs one chunk, not the run.
         self.index_problems: list[tuple[str, str]] = []
@@ -433,30 +487,39 @@ class Collector:
         for _ in self._attempts():
             try:
                 with self._open("/sdlog/index") as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                    body = response.read()
             except urllib.error.HTTPError as err:
                 reason = f"HTTP {err.code} {err.reason}"
                 if _retryable(err.code):
                     # A busy httpd, not a wrong request (§5a: ~10 KB of heap).
-                    payload = None
                     continue
                 # Any other status is an answer; asking again will not change it.
-                raise _Unreachable(f"index: {reason}") from err
-            except (OSError, http.client.HTTPException, ValueError) as err:
+                raise _Unreachable(f"index: {reason}", offline=False) from err
+            except (OSError, http.client.HTTPException) as err:
                 reason = _why(err)
                 continue
-            if isinstance(payload, dict):
-                break
-            # It answered, and with JSON, but not with an index. Asking again
-            # will not change the shape, so say what arrived instead of leaving
-            # the operator with the last transport error (or with none at all).
-            reason = f"the index is not a JSON object but a {type(payload).__name__}"
-            payload = None
+            # A whole reply arrived. Whatever it is, asking again will not change
+            # its shape, so say what arrived instead of leaving the operator with
+            # the last transport error (or with none at all).
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except ValueError as err:
+                raise _Unreachable(f"index: the reply is not JSON ({err})", offline=False) from err
+            if not isinstance(payload, dict):
+                raise _Unreachable(
+                    f"index: the index is not a JSON object but a {type(payload).__name__}",
+                    offline=False,
+                )
             break
         if not isinstance(payload, dict):
-            raise _Unreachable(f"index: {reason}")
+            raise _Unreachable(f"index: {reason}", offline=True)
 
         named = payload.get("device")
+        if self.expect is not None and named != self.expect:
+            raise _Unreachable(
+                f"index: the device here calls itself {named!r}, expected {self.expect!r}",
+                offline=False,
+            )
         if named and not self._device_pinned:
             self.device = str(named)
 
@@ -546,7 +609,7 @@ class Collector:
         if head != _read_head(path, len(head)):
             raise _Mismatch("the local copy's first bytes are not this chunk's first bytes")
 
-    def _already_have(self, chunk: Chunk, transfer: _Transfer) -> str | None:
+    def _already_have(self, chunk: Chunk, transfer: _Transfer) -> None:
         """``None`` when the archived file under this name really is this chunk.
 
         This is the gate in front of the dedup skip, and the skip ends in a
@@ -554,22 +617,30 @@ class Collector:
         filename is how a chunk that was never collected becomes deletable, so
         the archived copy has to answer for itself: right length, still parses,
         right seq inside, and the same head the device is serving right now.
+
+        Raises :class:`_ChunkFailed` otherwise: a disagreement is a defect (two
+        files under one name — a human decides which to keep), a re-check the
+        network ate is transient.
         """
+
+        def defect(problem: str) -> _ChunkFailed:
+            return _ChunkFailed(f"{problem} — nothing was confirmed")
+
         path = self.archive_path(chunk.name)
         local = _size(path)
         if chunk.size and local != chunk.size:
-            return f"archived copy is {local} B, the device offers {chunk.size} B"
+            raise defect(f"archived copy is {local} B, the device offers {chunk.size} B")
         report, problem = _read_report(path)
         if problem is not None:
-            return f"archived copy does not verify ({problem})"
+            raise defect(f"archived copy does not verify ({problem})")
         if chunk.seq and report.seq is not None and report.seq != chunk.seq:
-            return f"archived copy carries seq {report.seq}, the index says {chunk.seq}"
+            raise defect(f"archived copy carries seq {report.seq}, the index says {chunk.seq}")
         reason = "no attempt was made"
         for _ in self._attempts():
             try:
                 self._prove_local(chunk, path, transfer)
             except _Mismatch as err:
-                return str(err)
+                raise defect(str(err)) from err
             except _Interrupted as err:
                 reason = str(err)
                 continue
@@ -577,13 +648,19 @@ class Collector:
                 reason = f"HTTP {err.code} {err.reason}"
                 if _retryable(err.code):
                     continue
-                return f"could not re-check against the device: {reason}"
+                raise _ChunkFailed(
+                    f"could not re-check against the device: {reason} — nothing was confirmed",
+                    transient=err.code in _RACE_STATUS,
+                ) from err
             except (OSError, http.client.HTTPException) as err:
                 reason = _why(err)
                 continue
             else:
-                return None
-        return f"could not re-check against the device: {reason}"
+                return
+        raise _ChunkFailed(
+            f"could not re-check against the device: {reason} — nothing was confirmed",
+            transient=True,
+        )
 
     # --------------------------------------------------------------------- fetch
 
@@ -592,9 +669,9 @@ class Collector:
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as err:
-            # A full disk or an archive root that is not a directory. One chunk's
-            # problem as far as this pass is concerned; the report says which.
-            raise _ChunkFailed(f"cannot open the archive directory: {err}") from err
+            # A full disk or an archive root that is not a directory. Every
+            # chunk after this one would meet the same, so the pass stops.
+            raise _ArchiveError(f"cannot open the archive directory: {err}") from err
         partial = self.partial_path(chunk.name)
         final = self.archive_path(chunk.name)
 
@@ -633,7 +710,10 @@ class Collector:
                     # 409 is the open file out of a stale index and 404 is a chunk
                     # already confirmed. Both are answers, not stumbles: this run
                     # is done with the chunk, and the next ones still get theirs.
-                    raise _ChunkFailed(f"HTTP {err.code} {err.reason}") from err
+                    # Those two resolve by themselves; any other 4xx is a refusal.
+                    raise _ChunkFailed(
+                        f"HTTP {err.code} {err.reason}", transient=err.code in _RACE_STATUS
+                    ) from err
                 reason = f"HTTP {err.code} {err.reason}"
             except _Interrupted as err:
                 reason = str(err)
@@ -644,7 +724,10 @@ class Collector:
                 break
 
         if not complete:
-            raise _ChunkFailed(reason)
+            # Every attempt ended in the network (or in a partial dropped for a
+            # whole refetch the attempts ran out before). The partial, if any,
+            # is where the next run resumes.
+            raise _ChunkFailed(reason, transient=True)
 
         problem = verify_chunk(partial)
         if problem is not None:
@@ -655,10 +738,15 @@ class Collector:
             raise _ChunkFailed(problem)
         # Only now does the chunk get its final name. Anything without `.part` is
         # complete and verified — that is the whole on-disk state machine.
+        if final.exists():
+            # The archive is append-only: a file that appeared under this name
+            # while we fetched (a second collector without the fleet's lock) is
+            # never replaced. The bytes stay in the partial for a human.
+            raise _ChunkFailed(f"{final.name} appeared in the archive meanwhile — not replaced")
         try:
             partial.replace(final)
         except OSError as err:
-            raise _ChunkFailed(f"cannot store as {final.name}: {err}") from err
+            raise _ArchiveError(f"cannot store as {final.name}: {err}") from err
         return final
 
     def _download(self, chunk: Chunk, partial: Path, offset: int, transfer: _Transfer) -> None:
@@ -713,13 +801,22 @@ class Collector:
                             )
                     if not block:
                         continue
-                    if handle is None:
-                        handle = partial.open(mode)
-                    handle.write(block)
+                    # The disk's errors are not the socket's. Both are OSError,
+                    # and the attempt loop retries OSError as a WiFi stumble.
+                    try:
+                        if handle is None:
+                            handle = partial.open(mode)
+                        handle.write(block)
+                    except OSError as err:
+                        raise _ArchiveError(f"cannot write {partial.name}: {err}") from err
                     transfer.stored += len(block)
             finally:
                 if handle is not None:
-                    handle.close()
+                    try:
+                        handle.close()
+                    except OSError as err:
+                        # A buffered write that only fails at the flush.
+                        raise _ArchiveError(f"cannot write {partial.name}: {err}") from err
         if overlap and len(seen) < overlap:
             # Cut inside the overlap window: nothing was appended and nothing was
             # proved, which is a failed attempt like any other short body.
@@ -733,7 +830,10 @@ class Collector:
         already archived, verified and re-proved against the device."""
         return self._confirm(name) is None
 
-    def _confirm(self, name: str) -> str | None:
+    def _confirm(self, name: str) -> _ChunkFailed | None:
+        """``None`` once the device acknowledged, else why not. A confirm the
+        network ate is transient (the dedup path resends it next run); a refusal
+        is the device telling us something, and is a defect."""
         reason = "no attempt was made"
         for _ in self._attempts():
             try:
@@ -743,7 +843,7 @@ class Collector:
                     if _retryable(response.status):
                         reason = f"HTTP {response.status}"
                         continue
-                    return f"confirm: HTTP {response.status}"
+                    return _ChunkFailed(f"confirm: HTTP {response.status}")
             except urllib.error.HTTPError as err:
                 reason = f"HTTP {err.code} {err.reason}"
                 if _retryable(err.code):
@@ -751,11 +851,11 @@ class Collector:
                 # The device answered and refused. Treating that as sent is the
                 # mistake that deletes a chunk nobody ever acknowledged, so the
                 # chunk simply comes back next run.
-                return f"confirm: {reason}"
+                return _ChunkFailed(f"confirm: {reason}")
             except (OSError, http.client.HTTPException) as err:
                 reason = _why(err)
                 continue
-        return f"confirm: {reason}"
+        return _ChunkFailed(f"confirm: {reason}", transient=True)
 
     # ----------------------------------------------------------------- the pass
 
@@ -768,10 +868,12 @@ class Collector:
         """
         outcome = Outcome()
         self.unreachable = False
+        self.offline = False
         try:
             chunks = self.index()
         except _Unreachable as err:
             self.unreachable = True
+            self.offline = err.offline
             outcome.device = self._name()
             outcome.failed.append(("<index>", str(err)))
             return outcome
@@ -788,9 +890,7 @@ class Collector:
                     # is not paying for them twice — but only once the copy on
                     # disk has answered for being this chunk, because what follows
                     # is a confirm.
-                    problem = self._already_have(chunk, transfer)
-                    if problem is not None:
-                        raise _ChunkFailed(f"{problem} — nothing was confirmed")
+                    self._already_have(chunk, transfer)
                     outcome.skipped.append(chunk.name)
                 else:
                     self._fetch(chunk, transfer)
@@ -800,8 +900,12 @@ class Collector:
                     if transfer.restarted:
                         outcome.restarted.append(chunk.name)
             except _ChunkFailed as err:
-                outcome.failed.append((chunk.name, str(err)))
+                _record_failure(outcome, chunk.name, err)
                 continue
+            except _ArchiveError as err:
+                outcome.archive_error = str(err)
+                outcome.failed.append((chunk.name, str(err)))
+                break
             finally:
                 outcome.bytes_fetched += transfer.stored
                 outcome.bytes_wire += transfer.wire
@@ -810,8 +914,27 @@ class Collector:
             if problem is None:
                 outcome.confirmed.append(chunk.name)
             else:
-                outcome.failed.append((chunk.name, problem))
+                _record_failure(outcome, chunk.name, problem)
         return outcome
+
+
+def _record_failure(outcome: Outcome, name: str, err: _ChunkFailed) -> None:
+    outcome.failed.append((name, str(err)))
+    if err.transient:
+        outcome.transient.append(name)
+
+
+def exit_status(pull: Collector, outcome: Outcome) -> int:
+    """The pass as one code, most severe first (sdlog-fleet-spec §2)."""
+    if outcome.archive_error is not None:
+        return EX_IOERR
+    if pull.unreachable:
+        return EX_TEMPFAIL if pull.offline else EX_WRONG_TARGET
+    if outcome.defects:
+        return EX_DEFECT
+    if outcome.failed:
+        return EX_TEMPFAIL
+    return 0
 
 
 def _entry_label(entry) -> str:
@@ -877,6 +1000,7 @@ def cmd_pull(args) -> int:
         args.url,
         args.into,
         device=args.device,
+        expect=args.expect,
         timeout=args.timeout,
         retries=args.retries,
         backoff=args.backoff,
@@ -886,10 +1010,13 @@ def cmd_pull(args) -> int:
         # Not a chunk report: nothing was listed, so counting zeroes would read
         # like a clean run against a parked car with nothing to give.
         why = outcome.failed[0][1] if outcome.failed else "no answer"
-        print(f"{args.url}: unreachable — {why}", file=sys.stderr)
-        return 2
+        what = "unreachable" if pull.offline else "not the device asked for"
+        print(f"{args.url}: {what} — {why}", file=sys.stderr)
+        return exit_status(pull, outcome)
     print_outcome(outcome)
-    return 1 if outcome.failed else 0
+    if outcome.archive_error is not None:
+        print(f"  STOPPED: the archive cannot be written — {outcome.archive_error}", file=sys.stderr)
+    return exit_status(pull, outcome)
 
 
 def cmd_index(args) -> int:
@@ -900,7 +1027,7 @@ def cmd_index(args) -> int:
         chunks = pull.index()
     except _Unreachable as err:
         print(f"{args.url}: {err}", file=sys.stderr)
-        return 2
+        return EX_TEMPFAIL if err.offline else EX_WRONG_TARGET
     total = sum(chunk.size for chunk in chunks)
     print(f"{pull._name()}: {len(chunks)} sealed chunk(s), {_human(total)}")
     for chunk in chunks:
@@ -925,6 +1052,11 @@ def main(argv: list[str] | None = None) -> int:
     pull.add_argument("url", help="device base url, e.g. http://mr-orange.local:8080")
     pull.add_argument("--into", required=True, help="archive root; chunks land in <into>/<device>/")
     pull.add_argument("--device", help="archive under this name instead of the one the index gives")
+    pull.add_argument(
+        "--expect",
+        metavar="NAME",
+        help="collect nothing (exit 3) unless the index names this device",
+    )
     pull.add_argument(
         "--retries",
         type=int,

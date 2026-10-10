@@ -39,9 +39,11 @@ green for the wrong reason.
 
 from __future__ import annotations
 
+import errno
 import http.client
 import importlib.util
 import json
+import os
 import re
 import sys
 import threading
@@ -1555,22 +1557,6 @@ def test_pull_exits_zero_when_everything_was_collected(device: FakeDevice, dest:
     assert stored(dest, "mr-orange") == ["L0000431.LOG"]
 
 
-def test_pull_exits_one_when_a_chunk_was_left_behind(device: FakeDevice, dest: Path) -> None:
-    name = device.add(431)
-    device.confirm_status[name] = 500
-    argv = ["pull", device.url, "--into", str(dest), "--retries", "1", "--backoff", "0"]
-    assert sdlog_collect.main(argv) == 1
-
-
-def test_pull_exits_two_when_the_device_is_unreachable(device: FakeDevice, dest: Path) -> None:
-    """Distinguished from 1 on purpose: 'the car is not on the WiFi' is a
-    different message to a bench operator than 'a chunk failed to verify'."""
-    url = device.url
-    device.stop()
-    argv = ["pull", url, "--into", str(dest), "--retries", "1", "--backoff", "0"]
-    assert sdlog_collect.main(argv) == 2
-
-
 def test_index_lists_and_confirms_nothing(device: FakeDevice, dest: Path, capsys) -> None:
     """The read-only subcommand: the one that is safe to point at a car that is
     still driving."""
@@ -1601,8 +1587,241 @@ def test_index_reports_an_entry_it_could_not_read(device: FakeDevice, capsys) ->
     assert "../oops.LOG" in err
 
 
-def test_index_exits_two_when_the_device_is_unreachable(device: FakeDevice, capsys) -> None:
+# --------------------------------------------- the exit contract (sdlog-fleet-spec §2)
+#
+# An unattended caller judges a pass by its exit status alone: 75 is "only the
+# network failed, try later" and stays silent, everything else non-zero raises
+# an alarm. So each code must mean one thing, and 75 must never be produced by
+# a defect — nor a defect's code by a car that simply drove away.
+
+EX_WRONG_TARGET = 3
+
+
+def pull_argv(device: FakeDevice, dest: Path, *extra: str) -> list[str]:
+    return ["pull", device.url, "--into", str(dest), "--retries", "2", "--backoff", "0", *extra]
+
+
+def test_pull_exits_tempfail_when_the_device_is_unreachable(device: FakeDevice, dest: Path) -> None:
+    """C1. Not 2: argparse and `python missing.py` both exit 2, so a broken deploy
+    would read as 'car away' forever."""
     url = device.url
     device.stop()
-    assert sdlog_collect.main(["index", url, "--retries", "1"]) == 2
+    argv = ["pull", url, "--into", str(dest), "--retries", "1", "--backoff", "0"]
+    assert sdlog_collect.main(argv) == os.EX_TEMPFAIL
+
+
+def test_index_exits_tempfail_when_the_device_is_unreachable(device: FakeDevice, capsys) -> None:
+    """C1, for the read-only subcommand."""
+    url = device.url
+    device.stop()
+    assert sdlog_collect.main(["index", url, "--retries", "1"]) == os.EX_TEMPFAIL
     assert "index:" in capsys.readouterr().err
+
+
+def test_an_index_that_keeps_stumbling_exits_tempfail(device: FakeDevice, dest: Path) -> None:
+    """C2. A heap-bound httpd answering 500 is busy, not broken (§5a)."""
+    device.add(431)
+    device.index_faults = [500] * 10
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_TEMPFAIL
+    assert device.confirms() == []
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["status-404", "html", "json-list"],
+)
+def test_an_index_from_something_else_exits_wrong_target(
+    device: FakeDevice, dest: Path, fault: str
+) -> None:
+    """C3. Something answered, and it is not an sd_logger: a wrong port, or a
+    DHCP lease that now belongs to another host. That is a config error to be
+    told about, not a car to wait for — and asking again changes nothing."""
+    device.add(431)
+    if fault == "status-404":
+        device.index_faults = [404] * 10
+    elif fault == "html":
+        device.index_raw = b"<html><body>router login</body></html>"
+    else:
+        device.index_raw = json.dumps([{"name": "L0000431.LOG"}]).encode()
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == EX_WRONG_TARGET
+    assert len([r for r in device.requests if r.path == "/sdlog/index"]) == 1
+    assert device.confirms() == []
+
+
+def test_index_exits_wrong_target_for_something_else(device: FakeDevice) -> None:
+    """C3, for the read-only subcommand."""
+    device.index_raw = b"<html></html>"
+    assert sdlog_collect.main(["index", device.url, "--retries", "2"]) == EX_WRONG_TARGET
+
+
+def test_expect_refuses_a_different_device(devices, dest: Path) -> None:
+    """C4. The fleet pins each URL to a name. A different device at that URL is
+    refused before a single chunk is fetched — collecting it would credit the
+    wrong device's heartbeat."""
+    other = devices("mr-blue")
+    other.add(431)
+
+    assert sdlog_collect.main(pull_argv(other, dest, "--expect", "mr-orange")) == EX_WRONG_TARGET
+    assert other.gets("L0000431.LOG") == []
+    assert other.confirms() == []
+    assert not dest.exists() or list(dest.rglob("*")) == []
+
+
+def test_expect_refuses_a_device_that_does_not_say_who_it_is(
+    device: FakeDevice, dest: Path
+) -> None:
+    """C4. No name in the index is not a match."""
+    device.add(431)
+    device.index_override = {"chunks": device.index_entries()}
+
+    assert sdlog_collect.main(pull_argv(device, dest, "--expect", "mr-orange")) == EX_WRONG_TARGET
+    assert device.confirms() == []
+
+
+def test_expect_accepts_the_right_device(device: FakeDevice, dest: Path) -> None:
+    """C4."""
+    device.add(431)
+    assert sdlog_collect.main(pull_argv(device, dest, "--expect", "mr-orange")) == 0
+    assert stored(dest, "mr-orange") == ["L0000431.LOG"]
+
+
+def test_a_pass_cut_short_by_the_network_exits_tempfail(device: FakeDevice, dest: Path) -> None:
+    """C5 — E3's 'WiFi gone mid-transfer'. The partial stays for the next run,
+    and the pass is silent: nothing here needs a human."""
+    name = device.add(431)
+    device.cut(name, 200, once=False)
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_TEMPFAIL
+    assert (dest / "mr-orange" / f"{name}.part").is_file()
+    assert device.confirms() == []
+
+
+def test_a_defect_outranks_a_network_cut(device: FakeDevice, dest: Path) -> None:
+    """C6. One chunk fails verification, another was only cut short: the defect
+    must not be hidden behind the quiet code."""
+    device.add(431, corrupt_chunk(431))
+    cut = device.add(432)
+    device.cut(cut, 200, once=False)
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == 1
+
+
+def test_a_corrupt_chunk_exits_defect(device: FakeDevice, dest: Path) -> None:
+    """C6, alone."""
+    device.add(431, corrupt_chunk(431))
+    assert sdlog_collect.main(pull_argv(device, dest)) == 1
+
+
+def test_a_broken_index_entry_exits_defect(device: FakeDevice, dest: Path) -> None:
+    """An index problem is a defect, even if every readable chunk was collected."""
+    device.add(431)
+    device.index_override = {
+        "device": "mr-orange",
+        "chunks": [{"name": "../oops.LOG", "seq": 1, "bytes": 3}, *device.index_entries()],
+    }
+    assert sdlog_collect.main(pull_argv(device, dest)) == 1
+
+
+def test_a_confirm_lost_to_the_network_exits_tempfail(device: FakeDevice, dest: Path) -> None:
+    """C7. The bytes are safe on disk; the confirm will be resent next run (the
+    dedup path re-proves the archived copy first)."""
+    name = device.add(431)
+    device.confirm_status[name] = 500
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_TEMPFAIL
+    assert stored(dest, "mr-orange") == [name]
+
+
+def test_a_refused_confirm_exits_defect(device: FakeDevice, dest: Path) -> None:
+    """C7. A device that answers and refuses is telling us something."""
+    name = device.add(431)
+    device.confirm_status[name] = 403
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == 1
+
+
+def test_an_unwritable_archive_exits_ioerr_and_confirms_nothing(
+    device: FakeDevice, tmp_path: Path
+) -> None:
+    """C8. A file where the archive root should be: no chunk can be stored, so
+    the pass stops at the first one instead of fetching every chunk to nowhere."""
+    device.add(431)
+    device.add(432)
+    blocked = tmp_path / "archive"
+    blocked.write_text("not a directory")
+
+    assert sdlog_collect.main(pull_argv(device, blocked)) == os.EX_IOERR
+    assert device.confirms() == []
+    assert device.gets("L0000432.LOG") == []
+
+
+def test_a_write_error_mid_chunk_is_archive_io_not_network(
+    device: FakeDevice, dest: Path, monkeypatch
+) -> None:
+    """C9. A full disk used to be caught as a socket error and retried — every
+    attempt re-downloading a chunk onto a disk that cannot hold it."""
+    name = device.add(431)
+    device.add(432)
+    real_open = Path.open
+
+    class _Full:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, _data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def close(self):
+            self._handle.close()
+
+    def fake_open(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        if self.name.endswith(".part") and ("a" in mode or "w" in mode):
+            return _Full(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_IOERR
+    assert len(device.bodies(name)) == 1
+    assert device.gets("L0000432.LOG") == []
+    assert device.confirms() == []
+
+
+@pytest.mark.parametrize("race", ["404-already-gone", "409-open-file"])
+def test_a_fetch_race_is_transient(device: FakeDevice, dest: Path, race: str) -> None:
+    """C10. A stale index naming the open file, or a chunk confirmed between
+    index and fetch: both converge next run by themselves."""
+    name = device.add(431)
+    if race == "409-open-file":
+        device.open_file = name
+        device.list_open = True
+    else:
+        device.index_override = {
+            "device": "mr-orange",
+            "chunks": [{"name": "L0000999.LOG", "seq": 999, "bytes": 100}],
+        }
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_TEMPFAIL
+
+
+def test_a_file_that_appeared_under_the_final_name_is_never_replaced(
+    device: FakeDevice, dest: Path, monkeypatch
+) -> None:
+    """The archive is append-only (fleet spec F6). A second collector without the
+    fleet's lock can store the same name while this one verifies; the rename
+    must not clobber it."""
+    name = device.add(431)
+    final = dest / "mr-orange" / name
+    real_verify = sdlog_collect.verify_chunk
+
+    def racing_verify(path: Path):
+        final.write_bytes(b"someone else's bytes")
+        return real_verify(path)
+
+    monkeypatch.setattr(sdlog_collect, "verify_chunk", racing_verify)
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == 1
+    assert final.read_bytes() == b"someone else's bytes"
+    assert device.confirms() == []
