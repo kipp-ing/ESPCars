@@ -53,7 +53,7 @@ PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 # Extensions worth scanning as text; skip binaries entirely.
-TEXT_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".h", ".hpp", ".cpp", ".cc", ".json", ".txt", ".sh", ".cfg", ".ini"}
+TEXT_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".h", ".hpp", ".cpp", ".cc", ".json", ".txt", ".sh", ".cfg", ".ini", ".toml", ".service", ".timer"}
 
 
 def tracked_files() -> list[Path]:
