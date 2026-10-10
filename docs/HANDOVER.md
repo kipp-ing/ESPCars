@@ -94,7 +94,6 @@ has no exception → TEC to 256 → bus-off → recovery → flap ~1/s. Unblocks
 
 | document | what it carries |
 |---|---|
-| [`HANDOVER-main-ci.md`](HANDOVER-main-ci.md) | **do first:** CI has never run in this repo and `main` is not gated; the merge queue (#4, #5) and branch cleanup that follow once it does |
 | [`../tests/hil/HIL.md`](../tests/hil/HIL.md) | the bench: cast, gates, topology, wiring, and the hygiene traps that have each cost a session |
 | [`../private/notes/HANDOVER-uds.md`](../private/notes/HANDOVER-uds.md) (gitignored, bench-specific) | the `uds` milestone — what is proven at which tier, what the factory database settled against an independently reverse-engineered reference, and the hazards that would have wedged the client |
 | [`HANDOVER-m6-headroom.md`](HANDOVER-m6-headroom.md) | M6 headroom: the tap-loss mechanism and its fix, where the heap goes, the ranked catalog of unpulled levers, and §7a's heap floor — read before planning the in-car config |
