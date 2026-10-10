@@ -468,3 +468,108 @@ TEST(decode_frame_bit_estimate) {
   CHECK_EQ(estimate_frame_bits(false, true, 8), 47u);
   CHECK_EQ(estimate_frame_bits(true, true, 8), 67u);
 }
+
+// ---------------------------------------------------------------------------
+// Motorola bit-level: extract_bits_be / signal_encode / signal_fits_frame
+// ---------------------------------------------------------------------------
+//
+// Model (DBC `@0`): start_bit is the MSB in sawtooth numbering (bit b of byte B
+// = 8*B + b); from the MSB the field walks down within the byte, then continues
+// at bit 7 of the next byte. Vectors hand-computed on PAYLOAD
+// {01 23 45 67 89 AB CD EF}:
+//   start 4,  13 bits: byte0 bits4..0 = 0x01, byte1 = 0x23      -> 0x0123
+//   start 11, 12 bits: byte1 bits3..0 = 0x3,  byte2 = 0x45      -> 0x345
+//   start 7,  16 bits: bytes 0..1                               -> 0x0123
+//   start 7,  32 bits: bytes 0..3                               -> 0x01234567
+//   start 63,  8 bits: byte 7                                   -> 0xEF
+//   start 62,  3 bits: byte7 bits6..4 = 0xEF>>4 & 7 = 0b110      -> 6
+
+TEST(decode_bits_motorola_vectors) {
+  struct Row {
+    uint8_t start, length;
+    uint32_t expected;
+  };
+  const Row rows[] = {{4, 13, 0x0123}, {11, 12, 0x345}, {7, 16, 0x0123}, {7, 32, 0x01234567}, {63, 8, 0xEF}, {62, 3, 6}};
+  for (const Row &row : rows) {
+    uint32_t got = extract_bits_be(PAYLOAD, 8, row.start, row.length);
+    CHECK_EQ_MSG(got, row.expected, tag("extract_bits_be", 8, row.start, row.length));
+  }
+}
+
+TEST(decode_bits_motorola_byte_aligned_matches_extract_bytes) {
+  // A byte-aligned Motorola field (start = MSB of its first byte) is exactly the
+  // big-endian byte form — the two decoders must agree everywhere.
+  for (uint8_t off = 0; off < 8; off++) {
+    for (uint8_t len = 1; len <= 4 && off + len <= 8; len++) {
+      uint32_t be_bytes = extract_bytes(PAYLOAD, 8, off, len, true);
+      uint32_t be_bits = extract_bits_be(PAYLOAD, 8, static_cast<uint8_t>(off * 8 + 7), static_cast<uint8_t>(len * 8));
+      CHECK_EQ_MSG(be_bits, be_bytes, tag("be bits vs bytes", 8, off, len));
+    }
+  }
+}
+
+TEST(decode_bits_motorola_bytes_past_dlc_read_zero) {
+  // start 4, 13 bits spans bytes 0..1; with dlc 1 byte 1 contributes 0.
+  CHECK_EQ(extract_bits_be(PAYLOAD, 1, 4, 13), 0x0100u);
+}
+
+TEST(signal_fits_frame_bounds) {
+  CHECK(signal_fits_frame(4, 13, true));
+  CHECK(signal_fits_frame(63, 8, true));
+  CHECK(signal_fits_frame(7, 32, true));
+  CHECK(!signal_fits_frame(56, 2, true));  // byte 7 bit 0, then byte 8
+  CHECK(!signal_fits_frame(60, 6, true));
+  CHECK(signal_fits_frame(56, 8, false));
+  CHECK(!signal_fits_frame(60, 8, false));
+  CHECK(!signal_fits_frame(0, 0, false));
+  CHECK(!signal_fits_frame(0, 33, false));
+}
+
+TEST(signal_encode_extract_round_trip_sweep) {
+  // Every field that fits, both orders: encoding a value into an empty frame
+  // sets exactly bit_len bits of mask, and decoding gives the value back.
+  uint32_t seed = 0x2468ACE1u;
+  for (int order = 0; order < 2; order++) {
+    bool be = order == 1;
+    for (uint8_t start = 0; start < 64; start++) {
+      for (uint8_t len = 1; len <= 32; len++) {
+        if (!signal_fits_frame(start, len, be))
+          continue;
+        seed = seed * 1664525u + 1013904223u;  // LCG, deterministic
+        uint32_t raw = seed & width_all_ones(len);
+        uint8_t mask[8]{}, bits[8]{};
+        signal_encode(start, len, be, raw, mask, bits);
+        int popcount = 0;
+        for (uint8_t i = 0; i < 8; i++)
+          for (uint8_t b = 0; b < 8; b++)
+            popcount += (mask[i] >> b) & 1;
+        CHECK_EQ_MSG(popcount, static_cast<int>(len), tag(be ? "encode mask BE" : "encode mask LE", 8, start, len));
+        uint32_t back = be ? extract_bits_be(bits, 8, start, len) : extract_bits(bits, 8, start, len);
+        CHECK_EQ_MSG(back, raw, tag(be ? "round trip BE" : "round trip LE", 8, start, len));
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// physical_to_raw — can_gateway.set_signal's value conversion
+// ---------------------------------------------------------------------------
+
+TEST(physical_to_raw_scaling_rounding_saturation) {
+  // 0.1 A/bit, offset -819.2 A, 14 bits (a typical signed-by-offset current).
+  CHECK_EQ(physical_to_raw(0.0, 0.1, -819.2, 14, false), 8192u);
+  CHECK_EQ(physical_to_raw(-819.2, 0.1, -819.2, 14, false), 0u);
+  CHECK_EQ(physical_to_raw(10.04, 0.1, -819.2, 14, false), 8292u);  // rounds to nearest
+  CHECK_EQ(physical_to_raw(1e9, 0.1, -819.2, 14, false), 16383u);   // saturates high
+  CHECK_EQ(physical_to_raw(-1e9, 0.1, -819.2, 14, false), 0u);      // saturates low
+  // Two's complement fields.
+  CHECK_EQ(physical_to_raw(-1.0, 1.0, 0.0, 8, true), 0xFFu);
+  CHECK_EQ(physical_to_raw(-200.0, 1.0, 0.0, 8, true), 0x80u);  // -128
+  CHECK_EQ(physical_to_raw(200.0, 1.0, 0.0, 8, true), 0x7Fu);   // +127
+  CHECK_EQ(physical_to_raw(-2.5, 1.0, 0.0, 8, true), 0xFDu);    // half away from zero: -3
+  // 32-bit edges without UB, and NaN saturating low.
+  CHECK_EQ(physical_to_raw(4294967295.0, 1.0, 0.0, 32, false), 0xFFFFFFFFu);
+  CHECK_EQ(physical_to_raw(1e30, 1.0, 0.0, 32, true), 0x7FFFFFFFu);
+  CHECK_EQ(physical_to_raw(-1e30, 1.0, 0.0, 32, true), 0x80000000u);
+  CHECK_EQ(physical_to_raw(0.0 / 0.0, 1.0, 0.0, 8, false), 0u);
+}

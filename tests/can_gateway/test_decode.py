@@ -174,10 +174,37 @@ def test_v20_partial_byte_form_rejected(set_core_config) -> None:
         _sensor(_decode(offset=2))
 
 
-def test_v20_big_endian_bit_level_rejected(set_core_config) -> None:
+def test_v20_motorola_bit_level_accepted(set_core_config) -> None:
+    """A DBC Motorola signal as written: start bit = MSB (sawtooth numbering).
+    13 bits from start bit 4 cover byte 0 bits 4..0 and all of byte 1."""
     _decode_gateway(set_core_config)
-    with pytest.raises(cv.Invalid, match="bit-level"):
-        _sensor(_decode(bit_offset=0, bit_length=4, byte_order="big"))
+    validated = _sensor(_decode(bit_offset=4, bit_length=13, byte_order="big"))
+    assert validated["byte_order"] == "big"
+    assert validated["bit_offset"] == 4
+
+
+def test_v20_motorola_in_last_byte_accepted(set_core_config) -> None:
+    _decode_gateway(set_core_config)
+    _sensor(_decode(bit_offset=63, bit_length=8, byte_order="big"))
+
+
+@pytest.mark.parametrize(
+    "start,length",
+    [
+        (60, 6),  # MSB at byte 7 bit 4: 5 bits in byte 7, the 6th would be in byte 8
+        (56, 2),  # byte 7 bit 0, then byte 8
+        (63, 9),  # all of byte 7, then byte 8
+    ],
+)
+def test_v20_motorola_past_byte_7_rejected(set_core_config, start, length) -> None:
+    _decode_gateway(set_core_config)
+    with pytest.raises(cv.Invalid, match="past byte 7"):
+        _sensor(_decode(bit_offset=start, bit_length=length, byte_order="big"))
+
+
+def test_v20_motorola_32_bits_accepted(set_core_config) -> None:
+    _decode_gateway(set_core_config)
+    _sensor(_decode(bit_offset=7, bit_length=32, byte_order="big"))
 
 
 # ---------------------------------------------------------------- cfg-v25

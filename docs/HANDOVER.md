@@ -13,6 +13,16 @@ the originals if a claim ever needs its provenance.
 
 ## 1. Open, in the order to pick it up
 
+**1.0 PR #4 (Motorola bit-level decode, `modify.signals` / `set_signal`,
+`modify.e2e`) was merged without the ring gate** — at the owner's request, with
+the bench not attached to the build machine, after merging main (a6d1bd6) into the branch. Host (504 cases), pytest, `check.sh`
+and `esphome compile` of the can_gateway test, bridge and isr_hook configs were
+green. Owed, in this order: `verify.py` baseline (unchanged forwarding path must
+still hit 19.4 laps/s), then a bench case for the new path — a rule with
+`signals` + `e2e` on Orange, a peer checking the forwarded CRC against a full
+recompute, and `set_signal` toggling pass-through. The ISR change is confined to
+rules that declare `e2e` (8-byte copy + ≤8-byte bitwise CRC-8).
+
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real
 device attached to the bench for testing transmits in the same range at

@@ -48,6 +48,7 @@ BO_ 67 ErrMsg: 8 BMS
 BO_ 789 BigEndianMsg: 8 BMS
  SG_ PackVolt : 7|13@0+ (0.1,0) [0|800] "V" Vector__XXX
  SG_ ByteAligned : 31|16@0+ (1,0) [0|65535] "A" Vector__XXX
+ SG_ WideRaw : 0|40@1+ (1,0) [0|0] "" Vector__XXX
 
 BA_ "GenSigSNA" SG_ 118 CellVolt_Max "FFFh";
 BA_ "GenSigSNA" SG_ 118 CellVolt_Min "FFFh";
@@ -112,15 +113,23 @@ def test_intel_signal_maps_straight_to_bit_offsets(parsed):
     assert kw == {"bit_offset": 12, "bit_length": 12}
 
 
-def test_motorola_non_byte_aligned_is_refused(parsed):
-    """The component has no bit-level big-endian form; emitting one anyway
-    would read the wrong bits and look plausible. PackVolt is 13 bits — the
-    same odd width a real Motorola pack-voltage signal uses in the wild."""
+def test_motorola_non_byte_aligned_uses_the_bit_level_big_form(parsed):
+    """PackVolt is 13 bits Motorola — the odd width a real pack-voltage signal
+    uses in the wild. It maps to the bit-level form with byte_order big, and
+    bit_offset is the DBC start bit (the MSB) verbatim, not a converted LSB."""
     msgs, _, _ = parsed
     sig = next(s for s in msgs[0x315]["signals"] if s["name"] == "PackVolt")
+    kind, kw, reason = dbc2yaml.position(sig)
+    assert kind == "bit" and reason == ""
+    assert kw == {"bit_offset": 7, "bit_length": 13, "byte_order": "big"}
+
+
+def test_motorola_leaving_the_frame_is_refused():
+    # MSB at byte 7 bit 1: two bits fit, the third would be in byte 8.
+    sig = {"name": "X", "start": 57, "length": 3, "little_endian": False}
     kind, _, reason = dbc2yaml.position(sig)
     assert kind is None
-    assert "Motorola" in reason
+    assert "past byte 7" in reason
 
 
 def test_motorola_byte_aligned_uses_the_byte_form(parsed):
@@ -180,5 +189,6 @@ def test_undecodable_signals_are_absent_from_the_output_not_silently_wrong(dbc, 
     rc = dbc2yaml.main([str(dbc), "--id", "0x315"])
     assert rc == 0
     out = capsys.readouterr()
-    assert "PackVolt" not in out.out, "a refused signal must not be emitted"
-    assert "PackVolt" in out.err, "a refused signal must be reported"
+    assert "WideRaw" not in out.out, "a refused signal must not be emitted"
+    assert "WideRaw" in out.err, "a refused signal must be reported"
+    assert "byte_order: big" in out.out, "the Motorola bit-level signal is emitted"

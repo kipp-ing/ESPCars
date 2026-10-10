@@ -371,3 +371,97 @@ TEST(rule_patch_drives_a_live_rule_through_process_frame) {
   CHECK_EQ(data3[1], 0xEE);
   CHECK_EQ(data3[5], 0x50);  // untouched byte keeps its codegen value
 }
+
+// ---------------------------------------------------------------------------
+// RulePatch::set_signal — declared modify.signals fields, switchable at runtime
+// ---------------------------------------------------------------------------
+//
+// Field under test (hand-computed): Motorola, start/MSB bit 4, 13 bits -> byte 0
+// bits 4..0 (top 5 bits) and byte 1 bits 7..0 (low 8 bits). Codegen declares
+// exactly those bits (0x1F in byte 0, 0xFF in byte 1) and starts pass-through.
+
+namespace {
+constexpr uint64_t MOTO_DECLARED = 0xFF1Full;
+
+void init_motorola(TestPatch &patch) { patch.init_(PatchData{}, MOTO_DECLARED); }
+
+void apply(const TestPatch &patch, uint8_t *data) {
+  uint32_t can_id = 0x1A0;
+  bool extended = false;
+  apply_patch(patch.banks_ptr_()->active_patch(), can_id, extended, false, data, 8);
+}
+}  // namespace
+
+TEST(rule_patch_set_signal_stamps_a_motorola_field) {
+  TestPatch patch;
+  init_motorola(patch);
+  CHECK(patch.set_signal(4, 13, true, 0x1234, true));
+  patch.commit();
+  uint8_t data[8] = {0xE0 | 0x05, 0x99, 0x77, 0, 0, 0, 0, 0};
+  apply(patch, data);
+  CHECK_EQ(data[0], 0xE0 | 0x12);  // bits 7..5 are not the field's: kept
+  CHECK_EQ(data[1], 0x34);
+  CHECK_EQ(data[2], 0x77);
+}
+
+TEST(rule_patch_set_signal_disable_restores_pass_through) {
+  TestPatch patch;
+  init_motorola(patch);
+  patch.set_signal(4, 13, true, 0x1FFF, true);
+  patch.commit();
+  patch.set_signal(4, 13, true, 0, false);
+  patch.commit();
+  const PatchData &active = patch.banks_ptr_()->active_patch();
+  for (uint8_t i = 0; i < MAX_FRAME_DATA_LEN; i++) {
+    CHECK_EQ(active.and_mask[i], 0xFF);
+    CHECK_EQ(active.or_value[i], 0x00);
+  }
+  uint8_t data[8] = {0xA5, 0x5A, 1, 2, 3, 4, 5, 6};
+  const uint8_t expect[8] = {0xA5, 0x5A, 1, 2, 3, 4, 5, 6};
+  apply(patch, data);
+  CHECK_BYTES(data, expect, 8);
+}
+
+TEST(rule_patch_set_signal_value_is_truncated_to_the_field) {
+  TestPatch patch;
+  init_motorola(patch);
+  patch.set_signal(4, 13, true, 0xFFFFFFFFu, true);
+  patch.commit();
+  uint8_t data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  apply(patch, data);
+  CHECK_EQ(data[0], 0x1F);
+  CHECK_EQ(data[1], 0xFF);
+}
+
+TEST(rule_patch_set_signal_cannot_leave_the_declared_bits) {
+  // Same bits read as Intel from start bit 4 would cover byte 0 bits 4..7 and
+  // byte 1 bits 0..7 — bits 5..7 of byte 0 were never declared.
+  TestPatch patch;
+  init_motorola(patch);
+  CHECK(!patch.set_signal(4, 13, false, 0x1FFF, true));
+  patch.commit();
+  uint8_t data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  apply(patch, data);
+  CHECK_EQ(data[0], 0x10);  // only bit 4 (declared) was stamped in byte 0
+  CHECK_EQ(data[1], 0xFF);
+}
+
+TEST(rule_patch_set_signal_leaves_codegen_bytes_alone) {
+  // A rule with a fixed data byte AND a runtime signal: toggling the signal
+  // must not disturb the fixed byte.
+  PatchData shape = codegen_shape();  // byte 1 fixed 0x11, byte 5 nibble 0x50
+  TestPatch patch;
+  // declared: byte 1 = 0xFF (fixed), byte 5 = 0xF0 (fixed), byte 6 = 0xFF (signal)
+  patch.init_(shape, 0x00FFF0000000FF00ull);
+  patch.set_signal(48, 8, false, 0xC3, true);
+  patch.commit();
+  patch.set_signal(48, 8, false, 0, false);
+  patch.commit();
+  const PatchData &active = patch.banks_ptr_()->active_patch();
+  CHECK_EQ(active.and_mask[1], 0x00);
+  CHECK_EQ(active.or_value[1], 0x11);
+  CHECK_EQ(active.and_mask[5], 0x0F);
+  CHECK_EQ(active.or_value[5], 0x50);
+  CHECK_EQ(active.and_mask[6], 0xFF);
+  CHECK_EQ(active.or_value[6], 0x00);
+}
