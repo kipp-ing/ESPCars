@@ -1,0 +1,15 @@
+# One pass over every device in the config. Started by sdlog-fleet.timer.
+# systemd does not start a second instance of a oneshot that is still running;
+# the per-device lock covers manual runs alongside it.
+[Unit]
+Description=sd_logger fleet collection pass
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sdlog
+ExecStart=/usr/bin/python3 /opt/espcars/script/sdlog_fleet.py run --config /etc/sdlog-fleet/fleet.toml
+# A pass that hangs is killed by the fleet's own timeout_s first; this is the backstop.
+TimeoutStartSec=2h
+Nice=10

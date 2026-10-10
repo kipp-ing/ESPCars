@@ -251,6 +251,16 @@ as §3.4, dedups on `(device, seq)`, resumes a partial download with `Range`,
 and only then confirms. `index` alone confirms nothing — safe to run any
 time.
 
+Its exit status is made for a caller that runs it unattended: `0` all
+collected, `75` only the network failed (car away, WiFi cut mid-chunk — run
+again later), `1` a defect, `3` something other than the expected device
+answered (`--expect NAME` pins it), `74` the local archive cannot be written.
+`script/sdlog_fleet.py` is that caller: many devices from one config, every
+few minutes, silent while a car is away and loud on a defect or when
+collection stops (heartbeat file plus an optional Uptime Kuma push). See
+[`sdlog-fleet-spec.md`](sdlog-fleet-spec.md) and the examples in
+`deploy/sdlog-fleet/`.
+
 `serve: false` is a real, supported configuration: a device whose card is
 collected by pulling it out, with the chunk index, retention and the `#gap`
 marker still active. It is also the only shape that lets a bench soak

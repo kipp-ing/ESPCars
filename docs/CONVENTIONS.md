@@ -18,6 +18,8 @@ changed in the move.
   ASan+UBSan. This is where rule engine, slot pool/tracker, rings and backoff
   are actually tested — the bench cannot reach them.
 - `tests/hil/` — the hardware bench; see [`HIL.md`](../tests/hil/HIL.md).
+- `deploy/` — fictional example configs and service units for the host-side
+  tools (`deploy/sdlog-fleet/`). Real instance configs live with the deployment.
 
 ## Commands
 

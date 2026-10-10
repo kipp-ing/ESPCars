@@ -228,10 +228,11 @@ def _retryable(status: int) -> bool:
 | response | client behaviour | pinned by |
 |---|---|---|
 | 5xx / 408 / 429 | retried, up to `retries` attempts, exponential backoff | `test_a_busy_index_is_retried_not_abandoned` (`index_faults=[500,503]` → 3 index requests, run succeeds) |
-| 5xx every time | `_Unreachable`, `<index>` failure, **exit 2** | `test_an_index_that_keeps_stumbling_is_reported_as_unreachable` |
-| any other 4xx | **not retried** — one request, `_Unreachable`, exit 2 | `test_an_index_that_answers_4xx_is_not_retried` (404 → exactly 1 request) |
-| valid JSON that is not an object | not retried, `"the index is not a JSON object but a list"`, exit 2 | `test_an_index_that_is_not_an_object_says_so` |
-| invalid JSON / transport error | **retried** (`json.JSONDecodeError` is a `ValueError`, caught at L436) | — |
+| 5xx every time | `_Unreachable(offline)`, `<index>` failure, **exit 75** (busy is waited out) | `test_an_index_that_keeps_stumbling_is_reported_as_unreachable`, `test_an_index_that_keeps_stumbling_exits_tempfail` |
+| any other 4xx | **not retried** — one request, `_Unreachable`, exit 3 (wrong target) | `test_an_index_that_answers_4xx_is_not_retried` (404 → exactly 1 request) |
+| valid JSON that is not an object | not retried, `"the index is not a JSON object but a list"`, exit 3 | `test_an_index_that_is_not_an_object_says_so` |
+| a whole reply that is not JSON | not retried, exit 3 — something else answers at that URL | `test_an_index_from_something_else_exits_wrong_target[html]` |
+| transport error | **retried**; every attempt failing is exit 75 | `test_pull_exits_tempfail_when_the_device_is_unreachable` |
 | `chunks` missing or not a list | silently treated as `[]` — a clean, empty run | `index()` L454–456 |
 
 So **500 is the right answer for a transient failure** (out of heap, card busy,
@@ -693,9 +694,9 @@ deliberate property of the client, not an accident.
 | where | condition | client does |
 |---|---|---|
 | index | 5xx, 408, 429 | retry (up to `retries`) |
-| index | other 4xx | **fatal**, exit 2, one request |
-| index | not a JSON object | **fatal**, exit 2, one request |
-| index | bad JSON, transport error | retry |
+| index | other 4xx | **fatal**, exit 3, one request |
+| index | not a JSON object, or not JSON at all | **fatal**, exit 3, one request |
+| index | transport error | retry; exit 75 if every attempt fails |
 | index entry | no usable `name`, not an object, unsafe name | skip that entry, report, run continues |
 | chunk GET | 416 | drop partial, retry in-run |
 | chunk GET | other 4xx (incl. 409, 404, 400) | **fatal for that chunk**, run continues, nothing confirmed |

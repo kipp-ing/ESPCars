@@ -1,0 +1,20 @@
+# sdlog_fleet — example config (docs/sdlog-fleet-spec.md §3.1).
+# Fictional names and documentation addresses (RFC 5737). The real instance
+# config lives with the deployment, never in this repo.
+
+archive = "/srv/sdlog/archive"     # chunks land in <archive>/<device>/
+state = "/var/lib/sdlog-fleet"     # <device>.json heartbeats, <device>.lock
+stale_after_days = 3               # alarm when the last success is older than this
+min_free_mb = 1024                 # pre-flight: alarm instead of pulling onto a nearly full disk
+timeout_s = 3600                   # per device pass; a killed pass resumes next run
+# retries = 4                      # passed to sdlog_collect.py; its defaults apply when unset
+# backoff = 0.5
+
+[[device]]
+name = "mr-orange"                 # must equal the name the device reports in /sdlog/index
+url = "http://192.0.2.10:8080"
+push_url = "http://kuma.example:3001/api/push/REPLACE_ME"   # optional
+
+[[device]]
+name = "mr-blue"
+url = "http://192.0.2.11:8080"

@@ -1,0 +1,10 @@
+[Unit]
+Description=sd_logger fleet collection every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
