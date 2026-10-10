@@ -35,7 +35,7 @@ TapRecord tap_for(uint32_t seq) {
   record.t_us = seq * 1000u;
   record.can_id = 0x100u + (seq & 0x7FFu);
   record.dlc = static_cast<uint8_t>(seq % (MAX_FRAME_DATA_LEN + 1));
-  record.flags = static_cast<uint8_t>(seq & (TAP_FLAG_EXTENDED | TAP_FLAG_RTR | TAP_FLAG_SHED));
+  record.flags = static_cast<uint8_t>(seq & (TAP_FLAG_EXTENDED | TAP_FLAG_RTR | TAP_FLAG_SHED | TAP_FLAG_TX));
   record.source = static_cast<uint8_t>(seq & 0xFFu);
   for (uint8_t i = 0; i < MAX_FRAME_DATA_LEN; i++)
     record.data[i] = static_cast<uint8_t>(seq * 31u + i);
@@ -81,11 +81,13 @@ TEST(tap_flags_are_distinct_bits) {
   CHECK_EQ(TAP_FLAG_EXTENDED, 0x01);
   CHECK_EQ(TAP_FLAG_RTR, 0x02);
   CHECK_EQ(TAP_FLAG_SHED, 0x04);
+  CHECK_EQ(TAP_FLAG_TX, 0x08);
   // Distinct single bits: a frame can be extended AND rtr AND shed at once, so
   // the encoding must never alias.
   CHECK_EQ(TAP_FLAG_EXTENDED & TAP_FLAG_RTR, 0);
   CHECK_EQ(TAP_FLAG_EXTENDED & TAP_FLAG_SHED, 0);
   CHECK_EQ(TAP_FLAG_RTR & TAP_FLAG_SHED, 0);
+  CHECK_EQ(TAP_FLAG_SHED & TAP_FLAG_TX, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +203,56 @@ TEST(tap_ring_spsc_survives_a_real_thread) {
   // The run has to have actually contended, or it proved nothing.
   CHECK_EQ(popped > 0u, true);
   CHECK_EQ(pushed.load(std::memory_order_relaxed) < PUSH_COUNT, true);
+}
+
+TEST(tap_rx_and_tx_producers_keep_records_intact_in_their_own_spsc_rings) {
+  // RX and TX are independent ISR producers. They must never share an ObserveRing: push() has a
+  // deliberately non-atomic slot-copy plus tail publication. This runs both producers for real,
+  // drains round-robin as sd_logger does, and verifies that each surviving record is whole.
+  static const uint32_t PUSH_COUNT = 100000;
+  TapRing<16> rx;
+  TapRing<16> tx;
+  std::atomic<bool> rx_done{false};
+  std::atomic<bool> tx_done{false};
+  std::atomic<uint32_t> accepted{0};
+  std::atomic<uint32_t> drained{0};
+  std::atomic<uint32_t> record_ring_accepted{0};
+
+  auto producer = [&](TapRing<16> &ring, uint32_t base, std::atomic<bool> &done) {
+    for (uint32_t k = 1; k <= PUSH_COUNT; k++) {
+      if (ring.push(tap_for(base + k)))
+        accepted.fetch_add(1, std::memory_order_relaxed);
+    }
+    done.store(true, std::memory_order_release);
+  };
+  std::thread rx_producer(producer, std::ref(rx), 0u, std::ref(rx_done));
+  std::thread tx_producer(producer, std::ref(tx), 1000000u, std::ref(tx_done));
+
+  uint32_t torn = 0;
+  auto drain_one = [&](TapRing<16> &ring) {
+    TapRecord out{};
+    if (!ring.pop(out))
+      return false;
+    drained.fetch_add(1, std::memory_order_relaxed);
+    if (!tap_is_consistent(out))
+      torn++;
+    record_ring_accepted.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  };
+  while (!rx_done.load(std::memory_order_acquire) || !tx_done.load(std::memory_order_acquire)) {
+    (void) drain_one(rx);
+    (void) drain_one(tx);
+  }
+  rx_producer.join();
+  tx_producer.join();
+  while (drain_one(rx) || drain_one(tx)) {
+  }
+
+  CHECK_EQ(torn, 0u);
+  CHECK_EQ(drained.load(std::memory_order_relaxed), accepted.load(std::memory_order_relaxed));
+  CHECK_EQ(record_ring_accepted.load(std::memory_order_relaxed), accepted.load(std::memory_order_relaxed));
+  CHECK_EQ(rx.empty(), true);
+  CHECK_EQ(tx.empty(), true);
 }
 
 // ---------------------------------------------------------------------------

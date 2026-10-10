@@ -29,9 +29,13 @@ import inspect
 from pathlib import Path
 import textwrap
 
+import pytest
+from esphome import config_validation as cv
+
 from .common import PORT_A, PORT_B, gateway, port, setup_c6, validate
 
 LOG_TAP_DEFINE = "USE_CAN_GATEWAY_LOG_TAP"
+LOG_TAP_TX_DEPTH_DEFINE = "CAN_GATEWAY_LOG_TAP_TX_DEPTH"
 
 
 def _component_dir() -> Path:
@@ -88,6 +92,33 @@ def test_log_tap_defaults_off(set_core_config) -> None:
     assert config["ports"][0]["log_tap"] is False
 
 
+def test_log_tap_tx_accepted_with_log_tap(set_core_config) -> None:
+    setup_c6(set_core_config)
+    config = validate(
+        gateway(ports=[port(PORT_A, log_tap=True, log_tap_tx=True)], routes=[])
+    )
+    assert config["ports"][0]["log_tap_tx"] is True
+
+
+def test_log_tap_tx_rejected_without_log_tap(set_core_config) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match=r"log_tap_tx.*log_tap"):
+        validate(gateway(ports=[port(PORT_A, log_tap_tx=True)], routes=[]))
+
+
+def test_log_tap_tx_queue_depth_defaults_and_accepts_a_small_ring(set_core_config) -> None:
+    setup_c6(set_core_config)
+    assert validate(gateway())["log_tap_tx_queue_depth"] == 128
+    assert validate(gateway(log_tap_tx_queue_depth=16))["log_tap_tx_queue_depth"] == 16
+
+
+@pytest.mark.parametrize("depth", [0, 15, 8193])
+def test_log_tap_tx_queue_depth_rejects_an_unsafe_or_unbounded_size(set_core_config, depth: int) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid):
+        validate(gateway(log_tap_tx_queue_depth=depth))
+
+
 # ---------------------------------------------------------------- the define
 
 
@@ -129,6 +160,7 @@ def test_define_emitted_exactly_when_a_port_taps(set_core_config) -> None:
         f"ports' CONF_LOG_TAP flags"
     )
     assert add_define_calls(tree).count(LOG_TAP_DEFINE) == 1
+    assert add_define_calls(tree).count(LOG_TAP_TX_DEPTH_DEFINE) == 1
 
 
 # ---------------------------------------------------------------- the ISR arm

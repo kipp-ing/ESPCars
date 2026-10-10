@@ -611,6 +611,32 @@ inline size_t format_header(char *out, size_t room, uint32_t seq, uint64_t t_ful
   return w.finish();
 }
 
+/// `#utc,<boot_us_anchor_hex>,<utc_us_hex>` — one boot/UTC correspondence pair.
+/// Unlike the other timed meta lines, both fields are bare hexadecimal numbers:
+/// they are values, not stamp-column encodings. It is deliberately outside
+/// DeltaClock, so adding or skipping it never changes a record timestamp.
+inline size_t format_utc(char *out, size_t room, uint64_t boot_us_anchor, uint64_t utc_us) {
+  if (room < SD_LOG_MIN_ROOM)
+    return 0;
+  LineWriter w(out, room < SD_LOG_MAX_LINE ? room : SD_LOG_MAX_LINE);
+  w.str("#utc,");
+  w.u64_hex(boot_us_anchor);
+  w.comma();
+  w.u64_hex(utc_us);
+  return w.finish();
+}
+
+/// `#origin,<string>` — the configured board or bench name, once per file.
+inline size_t format_origin(char *out, size_t room, const char *origin) {
+  if (room < SD_LOG_MIN_ROOM)
+    return 0;
+  LineWriter w(out, room < SD_LOG_MAX_LINE ? room : SD_LOG_MAX_LINE);
+  w.str("#origin,");
+  const char *text = origin == nullptr ? "" : origin;
+  w.escaped(text, std::strlen(text), /*comma_to_underscore=*/true);
+  return w.finish();
+}
+
 /// `#src,<K>,<label>,<tag>,<origin>,<detail>` — one per declared source, re-emitted into every
 /// file so a card found on a bench explains itself without the YAML that produced it (F1d).
 /// `detail` may be nullptr, which emits '-'.
@@ -1000,6 +1026,46 @@ class BlockBuffer {
   size_t cap_{0};
   size_t pos_{0};
 };
+
+/// Frame-line ends currently resident in BlockBuffer. `write()` may consume only part of a line
+/// before its next call fails, so a plain count reset on every flush would under-report exactly the
+/// record the reader sees as a torn line. This tracks line ends relative to the pending buffer and
+/// retains a partially written record until its complete line reached the card.
+class UnflushedRecordTracker {
+ public:
+  static constexpr size_t MAX_RECORDS = 512;  // 4096-byte writer block / 9-byte shortest record.
+
+  void commit_record(size_t end) {
+    if (this->count_ < MAX_RECORDS)
+      this->ends_[this->count_++] = static_cast<uint16_t>(end);
+  }
+
+  void consume(size_t bytes) {
+    size_t first = 0;
+    while (first < this->count_ && this->ends_[first] <= bytes)
+      first++;
+    for (size_t i = first; i < this->count_; i++)
+      this->ends_[i - first] = static_cast<uint16_t>(this->ends_[i] - bytes);
+    this->count_ = static_cast<uint16_t>(this->count_ - first);
+  }
+
+  uint16_t count() const { return this->count_; }
+  void reset() { this->count_ = 0; }
+
+ private:
+  uint16_t ends_[MAX_RECORDS]{};
+  uint16_t count_{0};
+};
+
+/// True when a lifetime drop counter needs an in-band marker. Callers deliberately retain the
+/// previous marker across an outage: resetting it on file open would hide losses incurred while no
+/// file was writable.
+inline bool drop_marker_due(uint32_t total, uint32_t marked, uint32_t *delta) {
+  if (total == marked)
+    return false;
+  *delta = total - marked;
+  return true;
+}
 
 }  // namespace sd_logger
 }  // namespace esphome

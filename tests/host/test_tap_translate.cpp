@@ -20,6 +20,7 @@ using esphome::can_gateway::MAX_FRAME_DATA_LEN;
 using esphome::can_gateway::TAP_FLAG_EXTENDED;
 using esphome::can_gateway::TAP_FLAG_RTR;
 using esphome::can_gateway::TAP_FLAG_SHED;
+using esphome::can_gateway::TAP_FLAG_TX;
 using esphome::can_gateway::TapRecord;
 using esphome::sd_logger::LogRecord;
 using esphome::sd_logger::REC_FLAG_EXTENDED;
@@ -54,6 +55,22 @@ TEST(tap_and_record_flags_still_collide_on_bit_two) {
   CHECK_EQ(TAP_FLAG_SHED, 0x04);
   CHECK_EQ(REC_FLAG_TX, 0x04);
   CHECK_EQ(REC_FLAG_SHED, 0x08);
+}
+
+TEST(translate_maps_tx_without_confusing_the_shed_collision) {
+  LogRecord rec{};
+  tap_to_log_record(tap_with(TAP_FLAG_TX), 1, rec);
+  CHECK((rec.flags & REC_FLAG_TX) != 0);
+  CHECK((rec.flags & REC_FLAG_SHED) == 0);
+}
+
+TEST(translate_maps_tx_with_extended_and_rtr) {
+  LogRecord rec{};
+  tap_to_log_record(tap_with(TAP_FLAG_TX | TAP_FLAG_EXTENDED), 1, rec);
+  CHECK_EQ(rec.flags, static_cast<uint8_t>(REC_FLAG_TX | REC_FLAG_EXTENDED));
+
+  tap_to_log_record(tap_with(TAP_FLAG_TX | TAP_FLAG_RTR), 1, rec);
+  CHECK_EQ(rec.flags, static_cast<uint8_t>(REC_FLAG_TX | REC_FLAG_RTR));
 }
 
 TEST(translate_copies_the_plain_fields) {
@@ -101,10 +118,11 @@ TEST(translate_maps_all_three_flags_at_once) {
   CHECK_EQ(rec.flags, static_cast<uint8_t>(REC_FLAG_EXTENDED | REC_FLAG_RTR | REC_FLAG_SHED));
 }
 
-TEST(translate_never_invents_tx_or_truncated) {
-  // Neither can be true of a received frame, whatever the tap's flag byte says.
+TEST(translate_never_invents_truncated) {
+  // Truncation is not a tap flag. This remains a received-frame case: its
+  // shed bit must not collide with the logger's TX bit.
   LogRecord rec{};
-  tap_to_log_record(tap_with(0xFF), 1, rec);
+  tap_to_log_record(tap_with(TAP_FLAG_EXTENDED | TAP_FLAG_RTR | TAP_FLAG_SHED), 1, rec);
   CHECK((rec.flags & REC_FLAG_TX) == 0);
   CHECK((rec.flags & REC_FLAG_TRUNCATED) == 0);
 }

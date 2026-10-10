@@ -24,9 +24,9 @@ CATALOGS = REPO_ROOT / "catalogs"
 
 # Real, bench-specific diagnostic data (a compiled factory catalog, and tables
 # reverse-engineered off real hardware) never goes in this repo — see
-# docs/CONVENTIONS.md. It lives under `private/`, a gitignored directory local
-# to each bench, absent on a fresh clone and in CI; tests touching it must
-# skip, not fail. The checked-in `mini` fixture is the artifact of record for
+# docs/CONVENTIONS.md. It lives in the consuming project's own repository,
+# never here; `private/` below is only an optional local drop-in, absent on a
+# fresh clone and in CI, so tests touching it must skip, not fail. The checked-in `mini` fixture is the artifact of record for
 # everything that runs everywhere.
 PRIVATE = REPO_ROOT / "private"
 PRIVATE_CATALOGS = PRIVATE / "catalogs"

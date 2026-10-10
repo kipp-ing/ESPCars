@@ -11,7 +11,7 @@ reference the same numbers. V10 is deferred; V7/V11/V12 arrived with the native
 can_gateway tap (M2), V13-V18 with write format v1 (spec §6), V19-V21 with card
 recovery (spec §7 Layer C), V22-V26 with chunk collection
 (docs/sdlog-collection-design.md), V27-V28 with the in-band card reset
-(components/sd_logger/card_reset.h).
+(components/sd_logger/card_reset.h), and V29 with capacity confinement.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import re
 from esphome import automation, core
 import esphome.codegen as cg
 from esphome.components.esp32 import (
+    CONF_SDKCONFIG_OPTIONS,
     include_builtin_idf_component,
     only_on_variant,
     require_vfs_dir,
@@ -33,9 +34,11 @@ from esphome.components.logger import (
     LOG_LEVEL_SEVERITY,
     request_log_listener,
 )
+from esphome.components import time
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DATA,
+    CONF_FRAMEWORK,
     CONF_ID,
     CONF_LEVEL,
     CONF_LOGGER,
@@ -74,6 +77,7 @@ except ImportError:  # pragma: no cover - depends on which components were pulle
 sd_logger_ns = cg.esphome_ns.namespace("sd_logger")
 SdLogger = sd_logger_ns.class_("SdLogger", cg.Component)
 LogAction = sd_logger_ns.class_("LogAction", automation.Action)
+ConfineFormatAction = sd_logger_ns.class_("ConfineFormatAction", automation.Action)
 
 CONF_CLK_PIN = "clk_pin"
 CONF_MOSI_PIN = "mosi_pin"
@@ -114,6 +118,10 @@ CONF_COLLECTION = "collection"
 CONF_RETENTION_PERCENT = "retention_percent"
 CONF_MAX_CHUNKS = "max_chunks"
 CONF_SERVE = "serve"
+CONF_TIME_ID = "time_id"
+CONF_ORIGIN = "origin"
+CONF_CONFINE_BYTES = "confine_bytes"
+CONF_CONFIRMATION = "confirmation"
 
 # Source tag 0 is the `sd_logger.log` action (S1). Native taps start at 1 so a
 # record's origin stays readable in the file without a side table (V11).
@@ -178,6 +186,34 @@ def _validate_size(value):
         return int(float(text) * mult)
     except ValueError as err:
         raise cv.Invalid(f"invalid size {value!r}") from err
+
+
+CONFINE_MIN_BYTES = 1 * 1024 * 1024
+# A typo guard, not a policy: the right cap for a given card is whatever its capacity
+# self-test proves, and that is a runtime fact this schema cannot know.
+CONFINE_MAX_BYTES = 32 * 1024 * 1024 * 1024
+CONFINE_SECTOR_BYTES = 512
+
+
+def _validate_confine_bytes(value):
+    """V29: a small, whole-sector partition for a known-counterfeit card."""
+    try:
+        size = _validate_size(value)
+    except cv.Invalid:
+        raise
+    if size <= 0:
+        raise cv.Invalid(f"'{CONF_CONFINE_BYTES}' must be greater than zero")
+    if size % CONFINE_SECTOR_BYTES != 0:
+        raise cv.Invalid(
+            f"'{CONF_CONFINE_BYTES}' must be a multiple of {CONFINE_SECTOR_BYTES} bytes "
+            f"(got {size})"
+        )
+    if not CONFINE_MIN_BYTES <= size <= CONFINE_MAX_BYTES:
+        raise cv.Invalid(
+            f"'{CONF_CONFINE_BYTES}' must be between {CONFINE_MIN_BYTES} and "
+            f"{CONFINE_MAX_BYTES} bytes (got {size})"
+        )
+    return size
 
 
 # V23: the time bound on rotation. The floor keeps the writer from sealing chunks
@@ -724,7 +760,12 @@ CONFIG_SCHEMA = cv.All(
             # is the one path that has never fired on hardware (design §4). Absent
             # is size-only, i.e. exactly today's behaviour.
             cv.Optional(CONF_MAX_FILE_SECONDS): _validate_max_file_seconds,
+            # V29: absent preserves today's full-volume behaviour. Present is a
+            # compile-time constant so an external component needs no core edit.
+            cv.Optional(CONF_CONFINE_BYTES): _validate_confine_bytes,
             cv.Optional(CONF_FORMAT_IF_MOUNT_FAILED, default=False): cv.boolean,
+            cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+            cv.Optional(CONF_ORIGIN): cv.string,
             cv.Optional(CONF_CAN_PORTS): cv.All(
                 cv.ensure_list(
                     cv.maybe_simple_value(CAN_PORT_SCHEMA, key=CONF_PORT)
@@ -966,6 +1007,45 @@ def _validate_collection(config, full_config):
             )
 
 
+def _sdkconfig_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "y", "yes", "true", "on"}
+
+
+def _warn_wl_sector_size(full_config):
+    """Warn when the image is likely to build FF_MAX_SS at 4096.
+
+    This stays a warning, not a hard failure and not an automatic sdkconfig write: an image may
+    legitimately carry a wear-levelling FAT partition on internal flash that needs 4096-byte
+    sectors, and silently forcing 512 would corrupt that filesystem. ESPHome does not expose the
+    fully resolved IDF sdkconfig to an external component during final validation, so the reliable
+    input here is only what the YAML explicitly states. Absence is warned because IDF's default
+    `CONFIG_WL_SECTOR_SIZE` is 4096, which raises `FF_MAX_SS`, inflates every `FIL`, and is exactly
+    the measured sd_logger mount failure.
+    """
+    esp32_config = full_config.get("esp32") or {}
+    framework = esp32_config.get(CONF_FRAMEWORK) or {}
+    options = framework.get(CONF_SDKCONFIG_OPTIONS) or {}
+    numeric = str(options.get("CONFIG_WL_SECTOR_SIZE", "")).strip()
+    explicit_512 = numeric == "512" or _sdkconfig_truthy(
+        options.get("CONFIG_WL_SECTOR_SIZE_512")
+    )
+    explicit_4096 = numeric == "4096" or _sdkconfig_truthy(
+        options.get("CONFIG_WL_SECTOR_SIZE_4096")
+    )
+    if explicit_512 and not explicit_4096:
+        return
+    _LOGGER.warning(
+        "sd_logger: CONFIG_WL_SECTOR_SIZE is not explicitly 512, so IDF may build "
+        "FF_MAX_SS as 4096 and make each FAT FIL about 4 KiB; sd_logger mounts then "
+        "need one large contiguous MALLOC_CAP_DEFAULT allocation. If this image does "
+        "not need a 4096-byte wear-levelled FAT partition on flash, add "
+        "esp32.framework.sdkconfig_options.CONFIG_WL_SECTOR_SIZE_512: y "
+        "(or CONFIG_WL_SECTOR_SIZE: '512')."
+    )
+
+
 def _final_validate(config):
     """V12: a tapped port must have `log_tap: true` on the can_gateway side.
 
@@ -1008,6 +1088,7 @@ def _final_validate(config):
 
     _validate_esphome_logs(config, full_config)
     _validate_collection(config, full_config)
+    _warn_wl_sector_size(full_config)
 
     if (entries := config.get(CONF_CAN_PORTS)) is None:
         return config
@@ -1061,6 +1142,21 @@ async def to_code(config):
     cg.add(var.set_sync_interval(config[CONF_SYNC_INTERVAL].total_milliseconds))
     cg.add(var.set_max_file_size(config[CONF_MAX_FILE_SIZE]))
     cg.add(var.set_format_if_mount_failed(config[CONF_FORMAT_IF_MOUNT_FAILED]))
+    if (confine_bytes := config.get(CONF_CONFINE_BYTES)) is not None:
+        cg.add_define("SD_LOG_CONFINE_BYTES", confine_bytes)
+    if (origin := config.get(CONF_ORIGIN)) is not None:
+        cg.add(var.set_origin(origin))
+    if (time_id := config.get(CONF_TIME_ID)) is not None:
+        clock = await cg.get_variable(time_id)
+        cg.add(
+            clock.add_on_time_sync_callback(
+                cg.RawExpression(
+                    f"[]() {{ {var}->set_utc_anchor("
+                    f"static_cast<uint64_t>({clock}->utcnow().timestamp) * 1000000ULL, "
+                    f"static_cast<uint64_t>(esp_timer_get_time())); }}"
+                )
+            )
+        )
 
     # M6 rotation and collection. Both keys are read by the firmware as of the
     # Phase A wiring: `max_file_seconds` is the second rotation bound (whichever
@@ -1251,4 +1347,23 @@ async def log_action_to_code(config, action_id, template_arg, args):
         cg.add(var.set_data_template(template_))
     else:
         cg.add(var.set_data_static(data))
+    return var
+
+
+@automation.register_action(
+    "sd_logger.confine_format",
+    ConfineFormatAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(SdLogger),
+            cv.Required(CONF_CONFIRMATION): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def confine_format_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    confirmation = await cg.templatable(config[CONF_CONFIRMATION], args, cg.std_string)
+    cg.add(var.set_confirmation(confirmation))
     return var

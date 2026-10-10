@@ -8,7 +8,7 @@ address, a field name. What is never allowed in this repo's history is
 something that ties an example to one real vehicle or ECU: a real vehicle
 model name, a real factory database's tool/vendor name, or an absolute path
 into a sibling repo that holds real reverse-engineered data. That real data
-lives under the gitignored `private/` directory instead.
+lives outside this repo, in the consuming project's own repository.
 
 Run via `script/check.sh`, or directly:
     script/check_no_private_data.py
@@ -86,7 +86,7 @@ def main() -> int:
         print("Real/private diagnostic data found in tracked files (docs/CONVENTIONS.md):\n")
         print("\n".join(violations))
         print(
-            "\nMove real data under the gitignored private/ directory, or use a "
+            "\nMove real data into the consuming project's repository, or use a "
             "fictional example instead (see the mini fixture in tests/uds/fixtures/)."
         )
         return 1

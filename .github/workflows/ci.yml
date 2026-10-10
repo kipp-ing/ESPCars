@@ -86,6 +86,8 @@ jobs:
           # partition, so it proves codegen requests the partition exactly once
           # — add_partition() refuses a duplicate name.
           - tests/build/uds/test-partition.esp32-c6-idf.yaml
+          - tests/build/ccp/test.esp32-c6-idf.yaml
+          - tests/build/ccp/test-write.esp32-c6-idf.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -111,3 +113,19 @@ jobs:
           pip install clang-format==13.0.1
           find components -name '*.cpp' -o -name '*.h' -o -name '*.tcc' | \
             xargs clang-format --dry-run --Werror
+
+  required-checks:
+    name: Required checks
+    if: always()
+    needs: [validate, host-tests, compile, clang-format]
+    runs-on: ubuntu-latest
+    steps:
+      # One stable context for branch protection to require, instead of
+      # pinning to every individual compile-matrix leg by name — a build
+      # fixture can be renamed or added without touching the ruleset.
+      - name: All required jobs passed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" || "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more required jobs did not succeed."
+            exit 1
+          fi
