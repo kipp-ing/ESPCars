@@ -51,6 +51,23 @@ sanitizers. If `.venv` is missing:
 7. Component behavior changed → the bench gate, `verify.py` exit 0. See
    [`HIL.md`](../tests/hil/HIL.md).
 
+## CI and `main`
+
+- `main` takes changes only through a PR, and the ruleset `main-protection`
+  requires a green `Required checks`, pinned to the GitHub Actions app. That job
+  in `.github/workflows/ci.yml` collects all the others. Add a new job to its
+  `needs:`, never to the ruleset: a required context that never reports blocks
+  every merge.
+- CI runs everything `script/check.sh` runs, plus the compile matrix. When you
+  add a step to one of them, add it to the other too. Until 2026-10-10 the
+  private-data guard ran only in `check.sh`.
+- Merge with a merge commit, as the history does.
+- If PRs stop getting runs: this repo got its first run ever only from a manual
+  `gh workflow run CI --ref <branch>`, and push/PR runs followed only after
+  that. `workflow_dispatch:` stays in `ci.yml` for that reason. Check
+  `gh api 'repos/kipp-ing/ESPCars/actions/runs?per_page=1'` before assuming
+  that a PR without checks is green.
+
 ## Hard rules
 
 - Components must stay **external-component-safe**: never require edits to
