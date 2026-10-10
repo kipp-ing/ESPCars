@@ -21,7 +21,20 @@ shown:
 | **No Actions check suite is created at all.** On `main` and on PR heads, the only suite is the `claude` app's. A workflow that failed to parse would at least show a failed run. | `gh api repos/kipp-ing/ESPCars/commits/<sha>/check-suites` |
 | **The account is fine.** Other repos of the same account run Actions (`OwnFrame`, last run 2026-10-06). The old repo `ESPCars-old-archive` last ran on 2026-09-13 13:02Z. This repo was created 26 min later, under the name the old one had held. | `gh api 'repos/kipp-ing/<repo>/actions/runs?per_page=1'` |
 
-**The root cause is not known yet. Do not guess it; narrow it down:**
+**Narrowed down on 2026-10-10, later the same day (steps 1–4 below):**
+
+- The web UI could not be checked: Chrome was not connected.
+- **A manual trigger works.** PR #6 (`ci/gate-main`) adds `workflow_dispatch:`.
+  `gh workflow run CI --ref ci/gate-main` created run 38061578603. That was the
+  repo's first run ever.
+- **After that, `pull_request` works too.** Opening PR #6 thirteen minutes after
+  PR #5 created run 38061602853. Opening #5 had created nothing, with the same
+  account and the same event type.
+- **Still open:** did the first manual run wake the repo, or does only #6's
+  edited `ci.yml` trigger? The push carrying this paragraph to #5 (old `ci.yml`)
+  answers that; see the outcome below.
+
+**The original plan for narrowing it down:**
 
 1. **Check the settings in the web UI.** Open Settings → Actions → General for
    this repo and compare it with `OwnFrame`. The REST API shows only part of
