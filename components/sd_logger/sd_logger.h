@@ -13,6 +13,7 @@
 #include "clock_basis.h"
 #include "collection_policy.h"
 #include "collection_server.h"
+#include "file_ident.h"
 #include "log_format.h"
 #include "log_record.h"
 #include "recovery_policy.h"
@@ -556,8 +557,12 @@ class SdLogger : public Component {
   // which is only ever correct as the last write of a file.
   bool flush_block_(bool all);
   void sync_file_();
-  // Header block: #sdlog, one #src per declared source, #types, #flags, #pad.
+  // Header block: #sdlog, #ident, one #src per declared source, #types, #flags, #pad.
   void write_file_header_();
+  // `#ident` (spec F1j): node name, MAC, build, ELF digest, config hash, project — once, in setup().
+  void capture_ident_();
+  // The card half of `#ident`: the CID of the card just mounted, or none.
+  void capture_card_ident_();
   void write_utc_marker_();
   // `#clock` (docs/sd_logger-clock-spec.md): the current best clock restated at `now64`.
   void write_clock_line_(uint64_t now64);
@@ -639,6 +644,9 @@ class SdLogger : public Component {
 
   // Configured identity, paid once in each header rather than on every record.
   std::string origin_;
+  // What `#ident` states (spec F1j). Captured once, so a header costs no lookups. Written by setup()
+  // and by mount_card_(), read by write_file_header_() — all on the task that owns the card.
+  FileIdent ident_;
 
   // A sync callback runs outside the writer task. This tiny critical section
   // publishes its two 64-bit values as one pair; record formatting never takes it.

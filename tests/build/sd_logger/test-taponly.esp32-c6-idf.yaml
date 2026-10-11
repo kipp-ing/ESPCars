@@ -1,5 +1,9 @@
 esphome:
   name: sdlog-taponly-c6
+  # Compiles the `project=` branch of `#ident` (spec F1j); the other two targets compile without it.
+  project:
+    name: example.sdlog-taponly
+    version: "1.0.0"
 
 esp32:
   board: esp32-c6-devkitc-1
