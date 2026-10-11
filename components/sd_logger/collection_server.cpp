@@ -785,6 +785,7 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       this->parent_->collection_oldest_uncollected(&oldest),
       oldest,
       this->parent_->get_index_refused(),
+      this->parent_->get_torn_unsealed(),
       this->parent_->is_mounted(),
       this->parent_->is_degraded(),
       this->parent_->capacity_status(),

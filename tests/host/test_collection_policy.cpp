@@ -715,6 +715,25 @@ TEST(collection_seal_refuses_anything_but_the_open_chunk) {
   CHECK_EQ(policy.count(), 2u);
 }
 
+TEST(collection_restate_sealed_bytes_after_a_boot_seal) {
+  // F2c: the boot cut a torn chunk back and appended `#close,…,recovered`, so the size the scan
+  // stat()ed is stale. Only a SEALED chunk nobody is reading may take a new size.
+  CollectionPolicy policy = make_policy();
+  CHECK(policy.add(433, 500, ChunkState::SEALED));
+  CHECK(policy.add(434, 100, ChunkState::CONFIRMED));
+  CHECK(policy.add(435, 0, ChunkState::OPEN));
+  CHECK(policy.restate_sealed_bytes(433, 471));
+  CHECK_EQ(bytes_of(policy.find(433)), 471u);
+  CHECK(!policy.restate_sealed_bytes(434, 9));  // a .UPL is never written (R2)
+  CHECK_EQ(bytes_of(policy.find(434)), 100u);
+  CHECK(!policy.restate_sealed_bytes(435, 9));  // the OPEN chunk gets its size from seal()
+  CHECK(!policy.restate_sealed_bytes(999, 9));  // unknown seq
+  CHECK(policy.mark_serving(433));
+  CHECK(!policy.restate_sealed_bytes(433, 1));  // a transfer was promised the old Content-Length
+  CHECK_EQ(bytes_of(policy.find(433)), 471u);
+  CHECK_EQ(policy.count(), 3u);
+}
+
 // -------------------------------------------------------------------------------- confirming (§3)
 
 TEST(collection_confirm_promotes_a_sealed_chunk) {

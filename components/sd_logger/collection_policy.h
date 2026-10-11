@@ -408,6 +408,17 @@ class CollectionPolicy {
     return true;
   }
 
+  /// The boot sealed a torn SEALED chunk (spec F2c), so the size the scan read off the card is no
+  /// longer the file's. `false`, and a no-op, for an unknown seq, a chunk that is not SEALED, or one
+  /// a transfer is reading: its `Content-Length` was the old size, and that promise stands.
+  bool restate_sealed_bytes(uint32_t seq, uint64_t bytes) {
+    ChunkEntry *entry = this->find_mut_(seq);
+    if (entry == nullptr || entry->state != ChunkState::SEALED || entry->serving)
+      return false;
+    entry->bytes = chunk_bytes(bytes);
+    return true;
+  }
+
   /// SEALED -> CONFIRMED: the puller acknowledged the chunk, and the writer may now rename it.
   ///
   /// **Idempotent** — the puller retries a `POST /sdlog/done/<name>` whose response it never saw,
