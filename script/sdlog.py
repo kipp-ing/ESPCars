@@ -99,6 +99,12 @@ THE LINE (spec §6 F1a/F1h)
     `extract` keeps `utc_us` for readings (`#utc`) only; `--estimates` appends
     `utc_best_us,utc_basis` from the best statement in scope.
 
+    `#ident,id=…,mac=…,date=…,clock=…,build=…,elf=…,cfg=…[,project=…][,card=…]`
+    (spec §6 F1j) names the device, the build and the date a file was written
+    with, because a chunk name does not: `seq` is per card. `check` prints it;
+    `date` is shown with its `clock` basis, so an `est` date reads as the lower
+    bound it is. Files written before it existed simply have none.
+
 Usage:
     script/sdlog.py check   L0000007.LOG [...]      # verdict per file, exit 1 on a defect
     script/sdlog.py check   /Volumes/SD/*.LOG       # a whole card
@@ -167,6 +173,52 @@ class Source:
     tag: int
     origin: str
     detail: str
+
+
+@dataclass
+class Ident:
+    """One `#ident` line (spec §6 F1j): key=value pairs, in the writer's order.
+
+    Kept as a mapping rather than fixed attributes so a key added by a newer writer
+    is carried along instead of refused — the line is extensible by design."""
+
+    fields: dict[str, str]
+
+    def get(self, key: str) -> str | None:
+        return self.fields.get(key)
+
+    @property
+    def date_label(self) -> str:
+        """`date` together with what it is worth. The writer never separates them, and
+        neither does this: an `est` date printed bare would read as a reading."""
+        date = self.fields.get("date", "-")
+        clock = self.fields.get("clock", "none")
+        if date == "-" or clock == "none":
+            return "unknown (no clock statement)"
+        basis = clock.split("/", 1)[0]
+        if basis == "est":
+            return f"{date} at least ({clock}: a lower bound, not a reading)"
+        if basis == "drift":
+            return f"{date} ({clock}: ran through deep sleep, may be minutes off)"
+        return f"{date} ({clock})"
+
+
+def parse_ident_line(line: str) -> Ident:
+    """`#ident,k=v,…`. Every field must be `key=value` with a non-empty key; the
+    value may be empty and may itself contain `=`. A field without `=` is not
+    something the writer emits, so it is a malformed line, not a guess."""
+    fields = line.split(",")
+    if fields[0] != "#ident" or len(fields) < 2:
+        raise ValueError("#ident needs key=value fields")
+    parsed: dict[str, str] = {}
+    for item in fields[1:]:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"#ident field {item!r} is not key=value")
+        if key in parsed:
+            raise ValueError(f"#ident repeats key {key!r}")
+        parsed[key] = value
+    return Ident(parsed)
 
 
 @dataclass
@@ -356,6 +408,7 @@ class Report:
     first_utc_us: int | None = None
     last_utc_us: int | None = None
     origin: str | None = None
+    idents: list[Ident] = field(default_factory=list)
     clock: ClockState = field(default_factory=ClockState)
     utc_anchor_count: int = 0
     total_lines: int = 0
@@ -695,6 +748,8 @@ def _parse_meta(report: Report, line: str, utc_anchor: UtcAnchor) -> None:
         report.clock.offer(ClockPoint(utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"), from_clock_line=False)
     elif head == "#clock":
         report.clock.offer(parse_clock_line(line), from_clock_line=True)
+    elif head == "#ident":
+        report.idents.append(parse_ident_line(line))
     elif head == "#origin":
         if len(fields) != 2:
             raise ValueError("#origin needs one string field")
@@ -785,6 +840,24 @@ def _print_clock(clock: ClockState) -> None:
             )
 
 
+# The order `check` prints identity keys in; `date`/`clock` get their own line, and any key
+# a newer writer adds is shown after these rather than dropped.
+_IDENT_SHOWN = ("mac", "build", "elf", "cfg", "project", "card")
+
+
+def _print_idents(idents: list[Ident]) -> None:
+    """Which device and which build wrote the file, and when (spec F1j). One file
+    normally has one `#ident`; a file that was appended to by a later boot has one
+    per header, and each is shown — they may name different builds."""
+    for ident in idents:
+        shown = [ident.get("id") or "-"]
+        shown += [f"{key}={ident.get(key)}" for key in _IDENT_SHOWN if ident.get(key) is not None]
+        known = (*_IDENT_SHOWN, "id", "date", "clock")
+        shown += [f"{key}={value}" for key, value in ident.fields.items() if key not in known]
+        print(f"  ident  {' '.join(shown)}")
+        print(f"  date   {ident.date_label}")
+
+
 def print_report(report: Report, verbose: bool) -> None:
     name = report.path.name
     if report.legacy:
@@ -816,6 +889,7 @@ def print_report(report: Report, verbose: bool) -> None:
     # identity in the less common origin-only configuration.
     if report.origin is not None and not report.utc_anchor_count:
         print(f"  origin {report.origin}")
+    _print_idents(report.idents)
     _print_clock(report.clock)
 
     if verbose and report.sources:
