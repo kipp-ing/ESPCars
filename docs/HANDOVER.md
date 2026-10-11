@@ -89,6 +89,11 @@ has no exception → TEC to 256 → bus-off → recovery → flap ~1/s. Unblocks
   deliberate gap, not an oversight.
 - Ledger leftovers: Todo 7b (§3.7), Todo 4's counter and `reclaim_head` check
   (§3.4), Todo 8's two never-compiled config shapes (§3.8).
+- `sd_logger` `#ident` (spec §6 F1j, 2026-10-11): host, pytest and compile are
+  green; the I1 bench half is owed — `sdlog.py check` on a card after a boot,
+  a rotation and a deep-sleep wake must show an `ident` line for every file,
+  and its `mac`/`elf` must match `dump_config`'s `ident:` line. Ride it along
+  with the `#clock` H1–H8 run on Orange.
 
 ## 2. Where the detail lives
 

@@ -230,6 +230,23 @@ earlier statement was off — for `drift` as seconds per day slept, the number
 that sizes the RC drift on your board. The `utc_us` column of `extract` stays
 readings only; `extract --estimates` adds `utc_best_us,utc_basis`.
 
+**Which device, which firmware?** The file name is not an answer: the number
+in `L0000113.LOG` counts per *card*, starts again on a fresh card, and a card
+can move between devices. So the second line of every file says it
+([spec §6 F1j](sd_logger-spec.md)):
+
+```
+#ident,id=logger-bench,mac=02:00:5e:10:20:30,date=2026-10-11T12:00:03Z,clock=utc/sync,build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234
+```
+
+`id` is the ESPHome node name, `mac` the chip's factory MAC, `build`/`elf`/`cfg`
+the firmware's build time, ELF SHA-256 prefix and config hash (the same values
+the boot log prints, and `dump_config` shows as `ident:`). `project=` appears
+when `esphome: project:` is set, `card=` when the card reports a CID. `date`
+is the wall clock at file open and always comes with its `clock` basis — with
+`est/…` it is only a lower bound. `check` prints both as `ident` and `date`
+lines. Nothing to configure.
+
 ### 3.5 Collect chunks over WiFi (optional)
 
 Rotation seals a file into a chunk (SEALED); a private `esp_http_server`
