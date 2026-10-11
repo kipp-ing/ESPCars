@@ -54,7 +54,7 @@ The tool creates these (`init`). They are written only by this tool.
 |---|---|---|
 | `frames` | device, chunk, kind (C/L/U/I), label, utc DateTime64(3) NULL, id UInt32, flags, dlc, data UInt64 (the data hex as one big-endian number) | MergeTree, PARTITION BY device, ORDER BY (device, label, id, utc) |
 | `signals` | vehicle, device, chunk, signal (`<Message>.<Signal>`), utc DateTime64(3) NULL, value Float64 | MergeTree, PARTITION BY vehicle, ORDER BY (vehicle, signal, utc) |
-| `chunks` | device, chunk, file, seq, sha256, bytes, frames, matched, signals, utc_min/max DateTime64(3) NULL, gaps, catalog, result, detail, decoded_at | ReplacingMergeTree(decoded_at), ORDER BY (device, file) |
+| `chunks` | device, chunk, file, seq, sha256, bytes, frames, can_frames, matched, signals, utc_min/max DateTime64(3) NULL, gaps, catalog, result, detail, decoded_at | ReplacingMergeTree(decoded_at), ORDER BY (device, file) |
 
 - **`chunk` = `<seq>-<sha256[:12]>`.** A card that restarts its seq after an erase
   produces new chunk keys, not collisions (`sdlog-collection-design.md` §10 item 2: no boot id yet).
@@ -91,7 +91,7 @@ The tool creates these (`init`). They are written only by this tool.
 | D13 | **No new runtime dependency for the rest of the tooling.** `sdlog.py`, the collector and the fleet stay stdlib-only; only `sdlog_decode.py` imports the DBC library (§5). | `test_reader_imports_stdlib_only` |
 | D14 | Example config and units in `deploy/sdlog-decode/` fictional, scanned by the private-data guard. | `test_the_example_config_loads`, `script/check_no_private_data.py` |
 | D15 | **ClickHouse round trip** (only with `SDLOG_CLICKHOUSE_URL`): init, load, idempotent rerun, values, `utc` in ms, re-decode after a DBC edit. Uses a throwaway database and drops it. | `test_clickhouse_round_trip` |
-| D16 | **Coverage.** `chunks.matched` = the chunk's CAN frames whose label has a DBC and whose id matched a DBC message (D4). `status` prints per device `coverage = matched / CAN frames` over its ok chunks under the current catalog, so a wrong or thin DBC shows as a number, not as empty signals. | `test_matched_counts_frames_with_a_message`, `test_status_prints_coverage` |
+| D16 | **Coverage.** `chunks.matched` = the chunk's CAN frames whose label has a DBC and whose id matched a DBC message (D4). `can_frames` = its CAN (`C`) frames. `status` prints per device `coverage = Σ matched / Σ can_frames` over its ok chunks under the current catalog, so a wrong or thin DBC shows as a number, not as empty signals. | `test_matched_counts_frames_with_a_message`, `test_status_prints_coverage` |
 
 ## 4. Out of scope
 

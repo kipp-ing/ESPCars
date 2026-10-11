@@ -183,8 +183,8 @@ def _rows(sink, table: str) -> list[dict]:
 
 
 def test_ident_and_clock_lines_change_no_frame(setup) -> None:
-    """The decoder reads readings only: `#ident` and `#clock` pass through, and a card
-    floor (a lower bound) never becomes a `utc_us`."""
+    """`#ident` passes through, a `#clock … utc` reading equals its `#utc`, and a card
+    floor (a lower bound) never places a row: the rows are those of the plain chunk."""
     archive, _, config = setup
     plain = dec.FakeSink()
     assert run(config, plain) == 0
@@ -195,7 +195,7 @@ def test_ident_and_clock_lines_change_no_frame(setup) -> None:
     assert marker["result"] == "ok", marker["detail"]
     assert _rows(stated, "frames") == _rows(plain, "frames")
     assert _rows(stated, "signals") == _rows(plain, "signals")
-    assert stated.tables["frames"][0]["utc_us"] is None
+    assert stated.tables["frames"][0]["utc"] == 999  # from the `#utc`, not from the card floor
 
 
 def test_reader_estimates_are_opt_in(tmp_path: Path) -> None:
@@ -223,17 +223,81 @@ def test_frames_match_extract(setup) -> None:
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     frames = sink.tables["frames"]
-    assert [(f["kind"], f["label"], f["t_us"], f["utc_us"], f["id"], f["flags"], f["dlc"]) for f in frames] == [
-        ("C", "EV", 4096, None, 0x100, "-", 8),
-        ("C", "EV", 4128, 1000016, 0x200, "-", 8),
-        ("L", "lin", 4139, 1000027, 0x3C, "-", 2),
-        ("C", "EV", 4146, 1000034, 0x18FF0100, "x", 1),
-        ("C", "EV", 4154, 1000042, 0x300, "s", 3),
-        ("C", "EV", 4163, 1999811, 0x300, "-", 3),
-        ("C", "EV", 4173, 1999821, 0x7FF, "-", 0),
+    # utc in ms: boot µs 4096 lies before the first `#utc` (1010 = 4112 µs -> 1 000 000 µs),
+    # so it resolves backwards to 999 984 µs; 4163/4173 sit under the second anchor.
+    assert [(f["kind"], f["label"], f["utc"], f["id"], f["flags"], f["dlc"]) for f in frames] == [
+        ("C", "EV", 999, 0x100, "-", 8),
+        ("C", "EV", 1000, 0x200, "-", 8),
+        ("L", "lin", 1000, 0x3C, "-", 2),
+        ("C", "EV", 1000, 0x18FF0100, "x", 1),
+        ("C", "EV", 1000, 0x300, "s", 3),
+        ("C", "EV", 1999, 0x300, "-", 3),
+        ("C", "EV", 1999, 0x7FF, "-", 0),
     ]
+    assert set(frames[0]) == set(dec.FRAME_COLUMNS)  # one time column, no boot µs
     assert frames[0]["data"] == 0xE803F60300000000
     assert frames[-1]["data"] == 0
+
+
+def test_utc_before_the_first_anchor_is_resolved_backwards(setup) -> None:
+    """A chunk never spans a boot: the first anchor places the records before it (spec §2)."""
+    _, _, config = setup
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    first = sink.tables["frames"][0]
+    assert first["utc"] == (1_000_000 - (0x1010 - 0x1000)) // 1000
+    assert [s["utc"] for s in sink.tables["signals"] if s["signal"].startswith("DEMO_STATUS.")] == [999] * 3
+    (marker,) = sink.tables["chunks"]
+    assert (marker["utc_min"], marker["utc_max"]) == (999, 1999)
+
+
+def test_a_chunk_without_anchor_has_null_utc(setup) -> None:
+    """No UTC anchor at all: `utc` NULL. A `drift`/`est` `#clock` never fills it."""
+    archive, _, config = setup
+    lines = [line for line in FIXTURE if not line.startswith("#utc")]
+    lines.insert(1, "#clock,@0,F4240,est,card,6")
+    lines.insert(2, "#clock,@1,F4240,drift,sleep,403")
+    write_chunk(archive / "mr-orange", "L0000007.LOG", lines)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    assert {f["utc"] for f in sink.tables["frames"]} == {None}
+    assert {s["utc"] for s in sink.tables["signals"]} == {None}
+    (marker,) = sink.tables["chunks"]
+    assert (marker["result"], marker["utc_min"], marker["utc_max"]) == ("ok", None, None)
+
+
+def test_a_clock_line_with_basis_utc_is_an_anchor(setup) -> None:
+    """`#clock … utc,warm` (a clock that kept running through a reset) places the chunk
+    like a `#utc` does, backwards included."""
+    archive, _, config = setup
+    lines = [line for line in FIXTURE if not line.startswith("#utc")]
+    lines.insert(5, "#clock,@1010,F4240,utc,warm")
+    write_chunk(archive / "mr-orange", "L0000007.LOG", lines)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    assert [f["utc"] for f in sink.tables["frames"]][:2] == [999, 1000]
+
+
+def test_utc_is_truncated_to_ms(setup) -> None:
+    archive, _, config = setup
+    # anchor 1 999 999 µs at boot 0x1000: the first frame (same µs) is 1999 ms, not 2000
+    lines = [*FIXTURE[:4], "#utc,1000,1E847F", *FIXTURE[4:5], "#close,@2000,rotate"]
+    write_chunk(archive / "mr-orange", "L0000007.LOG", lines)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    assert [f["utc"] for f in sink.tables["frames"]] == [1999]
+
+
+def test_matched_counts_frames_with_a_message(setup) -> None:
+    """D16: matched = CAN frames whose label has a DBC and whose id matched; the extended
+    mismatch and an unknown id do not count, LIN is not a CAN frame."""
+    archive, _, config = setup
+    lines = [*FIXTURE[:-1], "C1x,B,100,E803F60300000000", "#close,@2000,rotate"]
+    write_chunk(archive / "mr-orange", "L0000007.LOG", lines)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    (marker,) = sink.tables["chunks"]
+    assert (marker["can_frames"], marker["matched"]) == (7, 5)
 
 
 def test_decode_against_reference(setup) -> None:
@@ -249,8 +313,11 @@ def test_unknown_id_is_frames_only(setup) -> None:
     _, _, config = setup
     sink = dec.FakeSink()
     run(config, sink)
-    assert not [s for s in sink.tables["signals"] if s["t_us"] == 4173]  # 0x7FF
-    assert not [s for s in sink.tables["signals"] if s["t_us"] == 4139]  # LIN is not DBC-decoded
+    # 0x7FF has no message and LIN is not DBC-decoded: every signal comes from one of the
+    # five matched CAN frames.
+    assert {s["signal"].split(".")[0] for s in sink.tables["signals"]} == {"DEMO_STATUS", "DEMO_PACK", "DEMO_EXT", "DEMO_MUX"}
+    (marker,) = sink.tables["chunks"]
+    assert (marker["can_frames"], marker["matched"]) == (6, 5)
 
 
 def test_an_extended_flag_mismatch_does_not_match(tmp_path: Path, setup) -> None:
@@ -415,6 +482,17 @@ def test_status_counts(setup, capsys) -> None:
     assert "1 ok, 0 defect, 0 pending" in capsys.readouterr().out
 
 
+def test_status_prints_coverage(setup, capsys) -> None:
+    _, _, config = setup
+    sink = dec.FakeSink()
+    assert run(config, sink, "status") == 0
+    assert "coverage -" in capsys.readouterr().out  # nothing decoded yet
+    run(config, sink)
+    capsys.readouterr()
+    assert run(config, sink, "status") == 0
+    assert "coverage 83.3 %" in capsys.readouterr().out  # 5 of 6 CAN frames
+
+
 def test_reader_imports_stdlib_only() -> None:
     """sdlog.py, the collector and the fleet stay stdlib-only (D13)."""
     stdlib = set(sys.stdlib_module_names)
@@ -461,8 +539,11 @@ def test_clickhouse_round_trip(setup) -> None:
             ).splitlines()
         )
         assert {k: float(v) for k, v in values.items()} == pytest.approx(EXPECTED_SIGNALS)
-        utc = sink._query(f"SELECT toString(utc) FROM {database}.frames WHERE t_us = 4128").strip()
-        assert utc == "1970-01-01 00:00:01.000016"
+        utc = sink._query(f"SELECT groupArray(toString(utc)) FROM (SELECT utc FROM {database}.frames WHERE id IN (256, 512) ORDER BY utc)").strip()
+        assert utc == "['1970-01-01 00:00:00.999','1970-01-01 00:00:01.000']"
+        assert sink.coverage("mr-orange", dec.catalog_hash(dec.load_config(config).devices[0])) == (5, 6)
+        bounds = sink._query(f"SELECT toString(utc_min), toString(utc_max) FROM {database}.chunks FORMAT TSV").strip()
+        assert bounds == "1970-01-01 00:00:00.999\t1970-01-01 00:00:01.999"
         dbc.write_text(dbc.read_text().replace("(0.01,0)", "(0.1,0)"))
         assert run(config, sink) == 0
         speed = sink._query(f"SELECT groupArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'").strip()
