@@ -199,6 +199,15 @@ unless `--strict` is asked for (the CI/bench-gate shape). A malformed line
 returning garbage; one torn trailing line after a cut is expected and
 harmless.
 
+Since F2c (spec §6) the device does this itself on the **next boot**: each of
+the three newest `.LOG` files that ends without `#close` is cut back to its
+last complete line and sealed with `#close,@<t>,recovered`, before the first
+new file opens. `check` reports that as `close recovered (power cut)`, and the
+collector and decoder take it like any other close. A file the boot could not
+seal (a failed write, a read-only card, or a torn file older than the three
+newest) keeps reading as MISSING and is counted as `torn_unsealed` — in a
+second stats line and in `/sdlog/status`.
+
 Every stream line is `grep`-able directly, because type, tag and flags all
 sit in the self-delimiting leading token:
 
@@ -473,7 +482,9 @@ being deliberate about anyway:
 | `text_dropped` climbing | the captured-log ring is full — raise `esphome_logs.buffer_depth`, or the board is logging faster than the writer can drain |
 | `card_dropped` climbing | there was no writable file at all for that stretch — the card is gone, not merely slow; look at `mounted` for why |
 | `index_refused` climbing (or nonzero) | the in-RAM index filled and had no confirmed, non-serving chunk to reclaim for at least one rotation — raise `collection.max_chunks`, collect more often, or shorten the unconfirmed stretch. Refused chunks are not listed, served or reclaimed until a remount can see them |
-| a `.LOG` file has no trailing `#close` | the power-cut signature — expected after pulling the power, harmless if it's the very last line (one torn line is recoverable by design). `check --strict` is what turns this into a bench-gate failure when it shouldn't be there |
+| a `.LOG` file has no trailing `#close` | the power-cut signature — expected on a card read *before* the device booted again, harmless if it's the very last line (one torn line is recoverable by design). The next boot seals it as `#close,…,recovered` (F2c), so on a running device only the open file and a `torn_unsealed` one lack it. `check --strict` is what turns this into a bench-gate failure when it shouldn't be there |
+| `#close,@<t>,recovered` as the last line | the file was cut by a power loss and sealed by the next boot (F2c): complete up to its last whole line, and collected like any other chunk |
+| `torn_unsealed=<n>` stats line, `"torn_unsealed"` in `/sdlog/status` | a torn file the boot could not seal — the `W` line at boot names it and the step that failed. The collector keeps refusing it; once it is archived by hand, `POST /sdlog/done/<name>` confirms it |
 | `script/sdlog.py check` reports a malformed line mid-file | a real defect — a formatter bug, or the card returned garbage; not the torn-trailing-line case above |
 | `#drop,<t_us>,ring\|tap:<label>\|text,<delta>,<total>` in the file | the in-band version of the counters above — read together with which counter moved to find the bottleneck |
 | `#gap,<t_us>,<chunks>,<bytes>,<first_seq>,<last_seq>` in the file | retention discarded never-collected chunks. `first_seq`/`last_seq` are the **endpoints of the window emptied**, not a promise every seq between them is gone — `script/sdlog.py` states "punctured" when some seqs inside the window were actually collected safely |
