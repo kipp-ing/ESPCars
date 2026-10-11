@@ -128,6 +128,7 @@ The most severe applies: 74 > 3 > 1 > 75 > 0.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import importlib.util
 import json
@@ -162,6 +163,12 @@ DEFAULT_TIMEOUT = 10.0
 DEFAULT_RETRIES = 4  # attempts per chunk per run, not retries *after* the first
 DEFAULT_BACKOFF = 0.5  # seconds before the second attempt; grows from there
 PART_SUFFIX = ".part"
+# A chunk torn on the card (no #close) is taken after two equal full fetches
+# (sdlog-fleet-spec.md C11–C15). Its bytes wait as a candidate between runs; once
+# accepted, a `.torn` sidecar next to the archived file says so to every reader.
+CANDIDATE_SUFFIX = ".torn-candidate"
+TORN_SUFFIX = ".torn"
+TORN_MAX_SIGHTINGS = 3
 
 # One read from the socket. Big enough that a 4 MB chunk is not a syscall storm,
 # small enough that a partial keeps most of what arrived before a cut.
@@ -225,6 +232,7 @@ class Outcome:
     confirmed: list[str] = field(default_factory=list)  # the device acknowledged
     skipped: list[str] = field(default_factory=list)  # already archived (dedup)
     failed: list[tuple[str, str]] = field(default_factory=list)  # (name, reason)
+    torn: list[tuple[str, str]] = field(default_factory=list)  # accepted as torn (C12): (name, reason)
     # The subset of ``failed`` lost to the network alone (or to a race the next
     # run resolves). Everything else in ``failed`` is a defect.
     transient: list[str] = field(default_factory=list)
@@ -287,6 +295,7 @@ class _Transfer:
     wire: int = 0  # bytes read off the socket, including discarded attempts
     resumed: bool = False
     restarted: bool = False
+    torn: str | None = None  # why the chunk was accepted as torn (C12)
 
 
 def _size(path: Path) -> int:
@@ -399,12 +408,40 @@ def verify_chunk(path: Path) -> str | None:
     short — a SEALED chunk always carries one, so its absence here is the signal
     that the bytes are incomplete rather than that the device lost power.
 
-    That last reading is the one place this tool disagrees with a bench operator
-    holding the card: on a card a missing ``#close`` is the power-cut signature
-    and an expected test result, but a device that put the chunk in the index
-    called it SEALED, so over HTTP the only remaining explanation is short bytes.
+    On its own a missing ``#close`` cannot tell short bytes from a file torn on the
+    card. :meth:`Collector._fetch` decides that: fewer bytes than the index promised
+    is short (transient), exactly the promised bytes twice over is torn (C11–C13).
     """
     return _read_report(path)[1]
+
+
+def _is_torn(report) -> bool:
+    """Parses as an sd_logger chunk, and the only thing missing is `#close`: the
+    power-cut signature (a torn last line is already discarded by the reader)."""
+    return (
+        report is not None
+        and not report.bad_lines
+        and not report.legacy
+        and not report.unsupported_version
+        and report.format_version is not None
+        and report.close_reason is None
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class Collector:
@@ -552,6 +589,12 @@ class Collector:
     def partial_path(self, name: str) -> Path:
         return self.archive_dir() / (safe_name(name) + PART_SUFFIX)
 
+    def candidate_path(self, name: str) -> Path:
+        return self.archive_dir() / (safe_name(name) + CANDIDATE_SUFFIX)
+
+    def torn_path(self, name: str) -> Path:
+        return self.archive_dir() / (safe_name(name) + TORN_SUFFIX)
+
     def fetch(self, chunk: Chunk) -> Path:
         """Bytes to disk, resuming a partial with ``Range``. No confirm here."""
         return self._fetch(chunk, _Transfer())
@@ -631,6 +674,12 @@ class Collector:
         if chunk.size and local != chunk.size:
             raise defect(f"archived copy is {local} B, the device offers {chunk.size} B")
         report, problem = _read_report(path)
+        if problem is not None and _is_torn(report):
+            # Accepted as torn on an earlier run (C12) whose confirm did not stick:
+            # the sidecar vouches for exactly these bytes.
+            sidecar = _read_json(self.torn_path(chunk.name)) or {}
+            if sidecar.get("sha256") == _sha256(path):
+                problem = None
         if problem is not None:
             raise defect(f"archived copy does not verify ({problem})")
         if chunk.seq and report.seq is not None and report.seq != chunk.seq:
@@ -730,6 +779,16 @@ class Collector:
             raise _ChunkFailed(reason, transient=True)
 
         problem = verify_chunk(partial)
+        report = _read_report(partial)[0] if problem is not None else None
+        if problem is not None and _is_torn(report):
+            if not chunk.size or _size(partial) != chunk.size:
+                # Fewer bytes than the index promised: lost on the way, not torn on
+                # the card (C14). The partial stays; the next run resumes it.
+                raise _ChunkFailed(
+                    f"short transfer: {_size(partial)} of {chunk.size or '?'} B and no #close", transient=True
+                )
+            transfer.torn = self._torn_sighting(chunk, partial, report)
+            problem = None
         if problem is not None:
             # Every promised byte arrived and the result still does not parse, so
             # a retry would fetch the same bytes. Drop them: a bad partial left in
@@ -744,10 +803,70 @@ class Collector:
             # never replaced. The bytes stay in the partial for a human.
             raise _ChunkFailed(f"{final.name} appeared in the archive meanwhile — not replaced")
         try:
+            if transfer.torn is not None:
+                # Sidecar first: an archived torn file without it would read as a
+                # defect to the decoder and to the dedup check.
+                self._write_torn_sidecar(chunk, partial, transfer.torn)
             partial.replace(final)
         except OSError as err:
             raise _ArchiveError(f"cannot store as {final.name}: {err}") from err
+        if transfer.torn is not None:
+            self._drop_candidate(chunk.name)
         return final
+
+    # ------------------------------------------------------------------- torn
+
+    def _drop_candidate(self, name: str) -> None:
+        _unlink(self.candidate_path(name))
+        _unlink(self.candidate_path(name).with_name(self.candidate_path(name).name + ".json"))
+
+    def _torn_sighting(self, chunk: Chunk, partial: Path, report) -> str:
+        """A full fetch without `#close` (C11–C13). Returns the reason when this
+        sighting equals the previous one; otherwise keeps the bytes as a candidate
+        and raises — transient while sightings remain, a defect after that."""
+        named = [ident.get("id") for ident in report.idents if ident.get("id")]
+        origin = report.origin or (named[0] if named else None)
+        if chunk.seq and report.seq is not None and report.seq != chunk.seq:
+            problem = f"torn chunk carries seq {report.seq}, the index says {chunk.seq}"
+        elif self.expect is not None and origin is not None and origin != self.expect:
+            problem = f"torn chunk names device {origin!r}, expected {self.expect!r}"
+        else:
+            problem = None
+        if problem is not None:
+            _unlink(partial)
+            self._drop_candidate(chunk.name)
+            raise _ChunkFailed(problem)
+        size, sha = _size(partial), _sha256(partial)
+        candidate = self.candidate_path(chunk.name)
+        meta_path = candidate.with_name(candidate.name + ".json")
+        before = _read_json(meta_path)
+        if before and before.get("bytes") == size and before.get("sha256") == sha and candidate.is_file():
+            return f"torn on the card: no #close, {size} B stable over two full fetches"
+        seen = int(before.get("seen", 0)) + 1 if before else 1
+        if seen >= TORN_MAX_SIGHTINGS:
+            _unlink(partial)
+            self._drop_candidate(chunk.name)
+            raise _ChunkFailed(f"no #close and not stable: {seen} full fetches, no two equal in a row")
+        try:
+            partial.replace(candidate)
+            meta_path.write_text(json.dumps({"bytes": size, "sha256": sha, "seen": seen}) + "\n", encoding="utf-8")
+        except OSError as err:
+            raise _ArchiveError(f"cannot keep {candidate.name}: {err}") from err
+        raise _ChunkFailed(
+            f"no #close: torn candidate ({size} B, sighting {seen}), taken when the next full fetch is equal",
+            transient=True,
+        )
+
+    def _write_torn_sidecar(self, chunk: Chunk, partial: Path, reason: str) -> None:
+        sidecar = {
+            "device": self._name(),
+            "name": chunk.name,
+            "bytes": _size(partial),
+            "sha256": _sha256(partial),
+            "reason": reason,
+            "accepted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self.torn_path(chunk.name).write_text(json.dumps(sidecar, indent=2) + "\n", encoding="utf-8")
 
     def _download(self, chunk: Chunk, partial: Path, offset: int, transfer: _Transfer) -> None:
         """One attempt. Appends to ``partial`` and raises if the body ran short.
@@ -895,6 +1014,8 @@ class Collector:
                 else:
                     self._fetch(chunk, transfer)
                     outcome.fetched.append(chunk.name)
+                    if transfer.torn is not None:
+                        outcome.torn.append((chunk.name, transfer.torn))
                     if transfer.resumed:
                         outcome.resumed.append(chunk.name)
                     if transfer.restarted:
@@ -990,6 +1111,11 @@ def print_outcome(outcome: Outcome) -> None:
         # the difference between what was paid for and what was kept is the
         # number that explains a slow run.
         parts.append(f"{_human(outcome.bytes_wire)} off the wire")
+    if outcome.torn:
+        parts.append(f"{len(outcome.torn)} torn accepted ({', '.join(name for name, _ in outcome.torn)})")
+    # TORN lines before the summary: the fleet keeps the last line as the summary.
+    for name, reason in outcome.torn:
+        print(f"TORN {name}: {reason}")
     print(f"{outcome.device}: " + ", ".join(parts))
     for name, reason in outcome.failed:
         print(f"  LEFT   {name}: {reason}", file=sys.stderr)

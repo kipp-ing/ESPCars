@@ -39,6 +39,7 @@ import argparse
 import fcntl
 import hashlib
 import importlib.util
+import json
 import re
 import sys
 import time
@@ -484,7 +485,19 @@ def first_utc_anchor(path: Path):
     return None
 
 
-def _defect_reason(report, device: Device) -> str | None:
+def _torn_sidecar(path: Path, sha: str) -> str | None:
+    """The collector accepted this chunk as torn on the card (sdlog-fleet-spec C12):
+    its `<file>.torn` sidecar, if it vouches for exactly these bytes, else None."""
+    try:
+        sidecar = json.loads(path.with_name(path.name + ".torn").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(sidecar, dict) or sidecar.get("sha256") != sha:
+        return None
+    return str(sidecar.get("reason") or "accepted by the collector")
+
+
+def _defect_reason(report, device: Device, torn: bool = False) -> str | None:
     if report.legacy:
         return "pre-v1 file (no #sdlog header)"
     if report.unsupported_version:
@@ -492,7 +505,7 @@ def _defect_reason(report, device: Device) -> str | None:
     if report.bad_lines:
         number, what = report.bad_lines[0]
         return f"malformed line {number}: {what}"
-    if report.close_reason is None:
+    if report.close_reason is None and not torn:
         return "no #close: not a sealed chunk"
     if report.origin is not None and report.origin != device.name:
         return f"#origin {report.origin!r} is not device {device.name!r}"
@@ -518,7 +531,8 @@ def load_chunk(path: Path, device: Device, catalog: str, decoder: Decoder | None
         "result": "ok", "detail": "",
     }
     sink.delete_chunk(device.name, chunk)
-    reason = _defect_reason(report, device)
+    torn = _torn_sidecar(path, sha) if report.close_reason is None else None
+    reason = _defect_reason(report, device, torn is not None)
     frames = signals = can_frames = matched = 0
     utc_min = utc_max = None
     if reason is None:
@@ -574,8 +588,10 @@ def load_chunk(path: Path, device: Device, catalog: str, decoder: Decoder | None
             frames += len(frame_rows)
             sink.insert("signals", SIGNAL_COLUMNS, signal_rows)
             signals += len(signal_rows)
+            notes = [f"torn: {torn}"] if torn is not None else []
             if decoder is not None and decoder.errors > errors_before:
-                marker["detail"] = f"{decoder.errors - errors_before} frames failed to decode"
+                notes.append(f"{decoder.errors - errors_before} frames failed to decode")
+            marker["detail"] = "; ".join(notes)
         else:
             # A defect writes nothing but its marker: drop whatever a batch already put in.
             sink.delete_chunk(device.name, chunk)

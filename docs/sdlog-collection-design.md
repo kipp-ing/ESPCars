@@ -63,7 +63,7 @@ mutations in the system:
 | State | On card | Meaning | Who may touch it |
 |---|---|---|---|
 | **OPEN** | `L0000433.LOG`, `fd_ >= 0` | The writer is appending. Not listed, not servable. | Writer only |
-| **SEALED** | `L0000433.LOG`, closed | `#close` written, fsynced — by the writer, or for a file torn by a power cut by the next boot (`#close,…,recovered`, `sd_logger-spec.md` F2c). Complete and readable. | Collector may read |
+| **SEALED** | `L0000433.LOG`, closed | `#close` written, fsynced — by the writer, or for a file torn by a power cut by the next boot (`#close,…,recovered`, `sd_logger-spec.md` F2c). Complete and readable. A listed file without `#close` (torn and not sealed) is taken by the collector after two equal full fetches (`sdlog-fleet-spec.md` C11–C13). | Collector may read |
 | **CONFIRMED** | `L0000433.UPL` | The puller acknowledged receipt. Eligible for deletion. | Retention may delete |
 | **GONE** | — | Deleted to reclaim space. | — |
 

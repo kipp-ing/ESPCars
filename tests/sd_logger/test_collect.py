@@ -40,6 +40,7 @@ green for the wrong reason.
 from __future__ import annotations
 
 import errno
+import hashlib
 import http.client
 import importlib.util
 import json
@@ -1222,16 +1223,106 @@ def test_a_chunk_in_a_format_this_collector_cannot_read_is_never_confirmed(
     assert stored(dest, "mr-orange") == []
 
 
-def test_a_chunk_without_a_close_line_is_treated_as_short(device: FakeDevice, dest: Path) -> None:
-    """A SEALED chunk always carries `#close` (§3). Arriving without one, it is a
-    transfer that ended early — not a power cut, which is only a card's excuse."""
+def test_a_torn_chunk_is_a_candidate_first(device: FakeDevice, dest: Path) -> None:
+    """C11. A full fetch without `#close` may be bytes lost on the way or a file torn
+    on the card. One sighting cannot tell: keep the bytes aside, archive and confirm
+    nothing, and count it as transient."""
     name = device.add(431, unclosed_chunk(431))
 
     outcome = collector(device, dest).collect()
 
     assert device.confirms(name) == []
-    assert [n for n, _ in outcome.failed] == [name]
+    assert outcome.failed and outcome.transient == [name]
+    assert stored(dest, "mr-orange") == [f"{name}.torn-candidate", f"{name}.torn-candidate.json"]
+
+
+def test_a_torn_chunk_seen_twice_is_archived_and_confirmed(device: FakeDevice, dest: Path, capsys) -> None:
+    """C12/C15. The same bytes twice: archived unchanged with a `.torn` sidecar,
+    confirmed, reported as TORN, and the candidate is gone. Exit 0, not a defect."""
+    name = device.add(431, unclosed_chunk(431))
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_TEMPFAIL
+    capsys.readouterr()
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == 0
+
+    out = capsys.readouterr().out
+    assert f"TORN {name}: torn on the card" in out
+    assert "1 torn accepted (L0000431.LOG)" in out.splitlines()[-1]
+    assert device.confirms(name) != []
+    assert (dest / "mr-orange" / name).read_bytes() == unclosed_chunk(431)
+    assert stored(dest, "mr-orange") == [name, f"{name}.torn"]
+    sidecar = json.loads((dest / "mr-orange" / f"{name}.torn").read_text())
+    assert sidecar["sha256"] == hashlib.sha256(unclosed_chunk(431)).hexdigest()
+    assert (sidecar["device"], sidecar["name"], sidecar["bytes"]) == ("mr-orange", name, len(unclosed_chunk(431)))
+
+
+def test_an_unstable_torn_chunk_becomes_a_defect(device: FakeDevice, dest: Path) -> None:
+    """C13. Different bytes every time start the count over; after 3 sightings with no
+    two equal in a row it needs a human."""
+    name = device.add(431, sealed_chunk(431, close=False, vary_from=5, mark="A1"))
+    pull = collector(device, dest)
+    first = pull.collect()
+    device.chunks[name] = sealed_chunk(431, close=False, vary_from=5, mark="B2")
+    second = pull.collect()
+    device.chunks[name] = sealed_chunk(431, close=False, vary_from=5, mark="C3")
+    third = pull.collect()
+
+    assert first.transient == [name] and second.transient == [name]
+    assert [n for n, _ in third.failed] == [name] and third.transient == []
+    assert "not stable" in third.failed[0][1]
+    assert device.confirms(name) == []
     assert stored(dest, "mr-orange") == []
+
+
+def test_a_torn_chunk_with_a_foreign_header_is_a_defect(device: FakeDevice, dest: Path) -> None:
+    """C13. A header that does not name the chunk is not a torn copy of it."""
+    name = device.add(431, unclosed_chunk(432))
+
+    outcome = collector(device, dest).collect()
+
+    assert [n for n, _ in outcome.failed] == [name] and outcome.transient == []
+    assert "seq 432" in outcome.failed[0][1]
+    assert stored(dest, "mr-orange") == []
+
+
+def test_a_torn_chunk_naming_another_device_is_a_defect(device: FakeDevice, dest: Path) -> None:
+    data = unclosed_chunk(431).replace(b"#src,", b"#origin,mr-pink\n#src,", 1)
+    name = device.add(431, data)
+
+    outcome = collector(device, dest, expect="mr-orange").collect()
+
+    assert [n for n, _ in outcome.failed] == [name] and outcome.transient == []
+    assert "mr-pink" in outcome.failed[0][1]
+
+
+def test_a_short_fetch_is_never_a_torn_candidate(device: FakeDevice, dest: Path) -> None:
+    """C14. Only a fetch of exactly the index's `bytes` can prove the file is whole on
+    the card; without that length it stays a transient short transfer."""
+    device.report_bytes = False
+    name = device.add(431, unclosed_chunk(431))
+    pull = collector(device, dest)
+
+    for _ in range(4):
+        outcome = pull.collect()
+        assert outcome.transient == [name]
+    assert device.confirms(name) == []
+    assert not any(n.endswith(".torn-candidate") for n in stored(dest, "mr-orange"))
+
+
+def test_an_accepted_torn_chunk_whose_confirm_was_lost_is_confirmed_again(device: FakeDevice, dest: Path) -> None:
+    """The dedup path vouches for an archived torn copy through its sidecar (C12), so a
+    confirm that did not stick is resent instead of turning into a defect."""
+    name = device.add(431, unclosed_chunk(431))
+    device.confirm_sticks = False
+    pull = collector(device, dest)
+    pull.collect()
+    pull.collect()
+    device.confirm_sticks = True
+
+    outcome = pull.collect()
+
+    assert outcome.failed == []
+    assert outcome.skipped == [name] and outcome.confirmed == [name]
 
 
 def test_a_chunk_sealed_by_the_next_boot_is_collected_like_a_clean_one(

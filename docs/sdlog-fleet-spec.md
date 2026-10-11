@@ -62,6 +62,17 @@ All of these converge on the next run without help.
 | C8 | An archive that cannot be written exits 74, stops the pass, and confirms nothing. | `test_an_unwritable_archive_exits_ioerr_and_confirms_nothing` |
 | C9 | A disk that fails mid-write is reported as archive I/O and is not retried as a transport error. | `test_a_write_error_mid_chunk_is_archive_io_not_network` |
 | C10 | A fetch answered 404/409 is transient, not a defect. | `test_a_fetch_race_is_transient` |
+| C11 | **Torn, not short.** A chunk fetched in full (exactly the index's `bytes`) that parses, has no `#close`, and whose header names it (`#sdlog` seq = the name's seq; `#origin`/`#ident id` = `--expect` when given) is a *torn candidate*, not a short transfer. Its bytes are kept as `<name>.torn-candidate` beside a `<name>.torn-candidate.json` (`bytes`, `sha256`, `seen`), nothing is archived or confirmed, and the chunk counts as transient. | `test_a_torn_chunk_is_a_candidate_first` |
+| C12 | **Stable twice → accepted.** On a later run the chunk is still listed with the same `bytes` and a full fetch gives the same sha256: the bytes are archived unchanged under `<name>`, with a sidecar `<name>.torn` (JSON: `device`, `name`, `bytes`, `sha256`, `reason`, `accepted_at`), then confirmed (`POST /sdlog/done/<name>`). The pass prints `TORN <name>: <reason>` and does not count it as a defect. | `test_a_torn_chunk_seen_twice_is_archived_and_confirmed` |
+| C13 | **Not stable → start over, then defect.** A different size or sha256 drops the candidate and starts counting again. After 3 sightings without two equal ones in a row, the chunk is a defect (exit 1) with the reason. A header that does not name the chunk is a defect at once, as before. | `test_an_unstable_torn_chunk_becomes_a_defect`, `test_a_torn_chunk_with_a_foreign_header_is_a_defect` |
+| C14 | A chunk fetched short of the index's `bytes` stays a transient short transfer (C5); only a full fetch can be a torn candidate. | `test_a_short_fetch_is_never_a_torn_candidate` |
+| C15 | Candidate files are never loaded by the decoder (it reads `*.LOG` only) and are removed once the chunk is archived or declared a defect. | `test_candidate_files_are_cleaned_up` |
+
+**Why the collector, too (2026-10-11).** F2c (`sd_logger-spec.md`) seals a torn file at the next boot, but
+only the 3 newest and only when every step works (`torn_unsealed` otherwise). A torn file behind them (an
+OTA reboot, a power cut on old firmware, a card error) would turn every pass red forever. Two equal full
+fetches tell a file that is torn on the card apart from bytes lost on the way: the index lists SEALED files
+only, so a listed file does not grow.
 
 ## 3. Fleet behaviour (`script/sdlog_fleet.py`)
 
@@ -112,6 +123,7 @@ push_url = "http://kuma.example:3001/api/push/TOKEN"   # optional
 | F13 | **Fleet exit status**: 0 if no device had an `error` in this run, 1 otherwise, 2 for a usage or config error. Staleness alone does not fail a run; that is `status`'s job (F14). | `test_run_exit_status` |
 | F14 | **`status`** prints one line per device (result, age of the last success, alarm) and exits 1 if any device is in alarm. | `test_status_reports_alarm_and_exits_one` |
 | F15 | **`--every N`** repeats `run` every N seconds until interrupted. | `test_every_repeats_the_pass` |
+| F17 | **Torn is a warning.** A `TORN` line from the collector (C12) leaves the pass `ok`. The heartbeat counts it (`torn_accepted`, cumulative) and keeps the newest one as `last_torn {at, name, reason}`; the summary and the push `msg` name it. It never raises the alarm. | `test_a_torn_chunk_is_a_warning_not_an_alarm` |
 | F16 | The example config and units in `deploy/sdlog-fleet/` are fictional, and the private-data guard scans them (`.toml`, `.service`, `.timer`). | `test_config_loads_the_example`, `script/check_no_private_data.py` |
 
 ### 3.3 Why the push goes out on every pass, not only on success

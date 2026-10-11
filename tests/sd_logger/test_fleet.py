@@ -322,6 +322,35 @@ def test_the_heartbeat_file_records_each_pass(tmp_path: Path) -> None:
     assert state["last_error"]["exit"] == 1
 
 
+def test_a_torn_chunk_is_a_warning_not_an_alarm(tmp_path: Path) -> None:
+    """F17. The collector's TORN line keeps the pass ok and the push up; the heartbeat
+    counts it and remembers the newest one, and the summary names it."""
+    output = (
+        "TORN L0000012.LOG: torn on the card: no #close, 1536 B stable over two full fetches\n"
+        "mr-orange: 1 fetched (1.5 KB), 1 confirmed, 1 torn accepted (L0000012.LOG)\n"
+    )
+    clock = Clock()
+    pusher = Pusher()
+    fleet = make_fleet(tmp_path, runner=lambda argv, timeout: (0, output), clock=clock, pusher=pusher)
+
+    results = fleet.run_once()
+
+    assert results["mr-orange"].result == "ok"
+    assert sdlog_fleet.exit_code(results) == 0
+    state = heartbeat(tmp_path)
+    assert (state["verdict"], state["torn_accepted"]) == ("ok", 1)
+    assert state["last_torn"] == {
+        "at": T0.isoformat(),
+        "name": "L0000012.LOG",
+        "reason": "torn on the card: no #close, 1536 B stable over two full fetches",
+    }
+    assert "1 torn accepted (L0000012.LOG)" in state["summary"]
+    query = parse_qs(urlparse(pusher.urls[-1]).query)
+    assert query["status"] == ["up"] and "L0000012.LOG" in query["msg"][0]
+    fleet.run_once()
+    assert heartbeat(tmp_path)["torn_accepted"] == 2
+
+
 def test_the_heartbeat_file_is_replaced_atomically(tmp_path: Path, monkeypatch) -> None:
     """F8. A crash mid-write leaves the previous heartbeat, never half a file."""
     clock = Clock()

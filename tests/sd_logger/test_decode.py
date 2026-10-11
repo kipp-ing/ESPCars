@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import ast
 import fcntl
+import hashlib
 import importlib.util
+import json
 import os
 import sys
 import uuid
@@ -422,6 +424,25 @@ def test_a_torn_last_line_is_not_a_defect(setup) -> None:
     path.write_bytes(path.read_bytes() + b"C1,5,100,E8")  # power cut mid-line, after #close
     sink = dec.FakeSink()
     assert run(config, sink) == 0
+
+
+def test_a_collector_accepted_torn_chunk_loads(setup) -> None:
+    """D8. No `#close`, but the collector's `.torn` sidecar vouches for these exact bytes
+    (sdlog-fleet-spec C12): loaded up to the last complete line, ok, detail says torn.
+    A sidecar for other bytes vouches for nothing."""
+    archive, _, config = setup
+    torn = ("\n".join(FIXTURE[:-1]) + "\nC1,5,100,E8").encode("latin-1")  # no #close, torn last line
+    path = archive / "mr-orange" / "L0000007.LOG"
+    path.write_bytes(torn)
+    sidecar = path.with_name(path.name + ".torn")
+    sidecar.write_text(json.dumps({"sha256": "0" * 64, "reason": "x"}))
+    sink = dec.FakeSink()
+    assert run(config, sink) == 1  # the sidecar is for other bytes
+    sidecar.write_text(json.dumps({"sha256": hashlib.sha256(torn).hexdigest(), "reason": "stable twice"}))
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    (marker,) = sink.tables["chunks"]
+    assert (marker["result"], marker["detail"], marker["frames"]) == ("ok", "torn: stable twice", 7)
 
 
 def test_a_chunk_sealed_by_the_next_boot_decodes_like_a_clean_one(setup) -> None:
