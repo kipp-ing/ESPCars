@@ -1,0 +1,419 @@
+"""script/sdlog_decode.py — archived chunks into frames/signals/chunks (docs/sdlog-decode-spec.md).
+
+Everything runs against the in-process ``FakeSink`` and the fictional
+``fixtures/mini.dbc``. The expected physical values are computed by hand in the
+comments, not by the DBC library under test, so a byte-order or sign mistake in
+how the decoder drives it shows up here. A ClickHouse round trip runs only when
+``SDLOG_CLICKHOUSE_URL`` is set.
+"""
+
+from __future__ import annotations
+
+import ast
+import fcntl
+import importlib.util
+import os
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("cantools")
+
+_SCRIPT = Path(__file__).parent.parent.parent / "script"
+_FIXTURES = Path(__file__).parent / "fixtures"
+MINI_DBC = _FIXTURES / "mini.dbc"
+
+
+def _load(name: str):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, _SCRIPT / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+sdlog = _load("sdlog")
+dec = _load("sdlog_decode")
+
+
+# ------------------------------------------------------------------ fixtures
+
+# One chunk with every kind of line the decoder has to get right. Hand-computed:
+#   0x100 E803F603…  Speed = 0x03E8*0.01 = 10.0, Temp = int8(0xF6)*0.5 = -5.0, Gear = 3
+#   0x200 0FA0FF9C…  Motorola: PackVoltage = 0x0FA0*0.1 = 400.0, PackCurrent = int16(0xFF9C)*0.1 = -10.0
+#   0x18FF0100 x 2A  extended: Counter = 42
+#   0x300 00D007     mux 0: CellA = 0x07D0*0.001 = 2.0
+#   0x300 01B80B     mux 1: CellB = 0x0BB8*0.001 = 3.0
+#   0x7FF (empty)    no message: frame only
+FIXTURE = [
+    "#sdlog,2,7,@0,2026.7.0",
+    "#origin,mr-orange",
+    "#src,C,EV,1,can_gateway,500000",
+    "#src,L,lin,5,linbus,19200",
+    "C1,@1000,100,E803F60300000000",
+    "#utc,1010,F4240",
+    "C1,20,200,0FA0FF9C00000000",
+    "XI,5,sd_logger,records=3, dropped=0",
+    "L5,6,3C,55AA",
+    "C1x,7,18FF0100,2A",
+    "C1s,8,300,00D007",
+    "#utc,1100,1E8480",
+    "C1,9,300,01B80B",
+    "C1,A,7FF,",
+    "#close,@2000,rotate",
+]
+
+EXPECTED_SIGNALS = {
+    "DEMO_STATUS.Speed": 10.0,
+    "DEMO_STATUS.Temp": -5.0,
+    "DEMO_STATUS.Gear": 3.0,
+    "DEMO_PACK.PackVoltage": 400.0,
+    "DEMO_PACK.PackCurrent": -10.0,
+    "DEMO_EXT.Counter": 42.0,
+    "DEMO_MUX.CellA": 2.0,
+    "DEMO_MUX.CellB": 3.0,
+}
+
+
+def write_chunk(directory: Path, name: str, lines: list[str]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(("\n".join(lines) + "\n").encode("latin-1"))
+    return path
+
+
+def with_seq(lines: list[str], seq: int) -> list[str]:
+    return [f"#sdlog,2,{seq},@0,2026.7.0", *lines[1:]]
+
+
+@pytest.fixture
+def setup(tmp_path: Path):
+    archive = tmp_path / "archive"
+    dbc = tmp_path / "mini.dbc"
+    dbc.write_bytes(MINI_DBC.read_bytes())
+    write_chunk(archive / "mr-orange", "L0000007.LOG", FIXTURE)
+    config = tmp_path / "decode.toml"
+    config.write_text(
+        f'archive = "{archive}"\nsink = "fake"\n\n'
+        f'[[device]]\nname = "mr-orange"\nvehicle = "demo-car"\n[device.dbc]\nEV = "{dbc}"\n'
+    )
+    return archive, dbc, config
+
+
+def run(config: Path, sink, command: str = "run") -> int:
+    return dec.main([command, "--config", str(config)], sink=sink)
+
+
+# ------------------------------------------------------------------ D1 config
+
+
+@pytest.mark.parametrize(
+    "body, why",
+    [
+        ('archive = "/a"\nsink = "fake"\nbogus = 1\n[[device]]\nname = "d"\nvehicle = "v"\n', "unknown key"),
+        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\nvehicle = "v"\n[[device]]\nname = "d"\nvehicle = "v"\n', "duplicate"),
+        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\nvehicle = "v"\n[device.dbc]\nEV = "/no/such.dbc"\n', "not found"),
+        ('archive = "/a"\nsink = "mongo"\n[[device]]\nname = "d"\nvehicle = "v"\n', "unknown sink"),
+        ('archive = "/a"\nsink = "fake"\n', "at least one"),
+        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "../x"\nvehicle = "v"\n', "safe path"),
+        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\n', "vehicle is required"),
+    ],
+)
+def test_config_rejects(tmp_path: Path, capsys, body: str, why: str) -> None:
+    config = tmp_path / "decode.toml"
+    config.write_text(body)
+    assert run(config, dec.FakeSink()) == 2
+    assert why in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ D2 shared reader
+
+
+def test_extract_unchanged_after_refactor(tmp_path: Path, capsys) -> None:
+    """Output of `extract` captured from the reader before it was split into
+    `StreamReader` (and checked byte-identical on two real chunks at the time)."""
+    path = write_chunk(tmp_path, "L0000007.LOG", FIXTURE)
+    golden = {
+        "C": [
+            "t_us,label,id_hex,flags,dlc,data_hex,utc_us",
+            "4096,EV,100,-,8,E803F60300000000,",
+            "4128,EV,200,-,8,0FA0FF9C00000000,1000016",
+            "4146,EV,18FF0100,x,1,2A,1000034",
+            "4154,EV,300,s,3,00D007,1000042",
+            "4163,EV,300,-,3,01B80B,1999811",
+            "4173,EV,7FF,-,0,,1999821",
+        ],
+        "L": ["t_us,label,id_hex,flags,dlc,data_hex,utc_us", "4139,lin,3C,-,2,55AA,1000027"],
+        "X": ["t_us,level,tag,message,utc_us", "4133,I,sd_logger,records=3, dropped=0,1000021"],
+    }
+    for kind, expected in golden.items():
+        assert sdlog.main(["extract", str(path), "--type", kind]) == 0
+        assert capsys.readouterr().out.splitlines() == expected
+
+
+def test_reader_yields_frames_with_utc(tmp_path: Path) -> None:
+    path = write_chunk(tmp_path, "L0000007.LOG", FIXTURE)
+    lines = [(s.kind, s.t_us, s.utc_us) for s in sdlog.StreamReader(path)]
+    assert lines[0] == ("C", 4096, None)  # before the first #utc
+    assert lines[1] == ("C", 4128, 1000016)
+    assert [k for k, _, _ in lines] == ["C", "C", "X", "L", "C", "C", "C", "C"]
+
+
+# ------------------------------------------------------------------ D3/D4 frames and decode
+
+
+def test_frames_match_extract(setup) -> None:
+    _, _, config = setup
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    frames = sink.tables["frames"]
+    assert [(f["kind"], f["label"], f["t_us"], f["utc_us"], f["id"], f["flags"], f["dlc"]) for f in frames] == [
+        ("C", "EV", 4096, None, 0x100, "-", 8),
+        ("C", "EV", 4128, 1000016, 0x200, "-", 8),
+        ("L", "lin", 4139, 1000027, 0x3C, "-", 2),
+        ("C", "EV", 4146, 1000034, 0x18FF0100, "x", 1),
+        ("C", "EV", 4154, 1000042, 0x300, "s", 3),
+        ("C", "EV", 4163, 1999811, 0x300, "-", 3),
+        ("C", "EV", 4173, 1999821, 0x7FF, "-", 0),
+    ]
+    assert frames[0]["data"] == 0xE803F60300000000
+    assert frames[-1]["data"] == 0
+
+
+def test_decode_against_reference(setup) -> None:
+    _, _, config = setup
+    sink = dec.FakeSink()
+    run(config, sink)
+    got = {s["signal"]: s["value"] for s in sink.tables["signals"] if s["signal"] != "DEMO_MUX.Mux"}
+    assert got == pytest.approx(EXPECTED_SIGNALS)
+    assert {s["vehicle"] for s in sink.tables["signals"]} == {"demo-car"}
+
+
+def test_unknown_id_is_frames_only(setup) -> None:
+    _, _, config = setup
+    sink = dec.FakeSink()
+    run(config, sink)
+    assert not [s for s in sink.tables["signals"] if s["t_us"] == 4173]  # 0x7FF
+    assert not [s for s in sink.tables["signals"] if s["t_us"] == 4139]  # LIN is not DBC-decoded
+
+
+def test_an_extended_flag_mismatch_does_not_match(tmp_path: Path, setup) -> None:
+    archive, _, config = setup
+    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:4], "C1x,@1000,100,E803F60300000000", "#close,@2000,rotate"])
+    sink = dec.FakeSink()
+    run(config, sink)
+    assert sink.tables["signals"] == []
+
+
+def test_a_signal_that_does_not_fit_spares_the_rest_of_the_dbc(setup) -> None:
+    """Real DBCs carry mistakes. One signal past the message end must not cost the file."""
+    _, dbc, config = setup
+    dbc.write_text(dbc.read_text().replace(' SG_ Gear : 24|4@1+', ' SG_ Broken : 60|16@1+ (1,0) [0|1] "" Vector__XXX\n SG_ Gear : 24|4@1+'))
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    got = {s["signal"] for s in sink.tables["signals"]}
+    assert "DEMO_PACK.PackVoltage" in got
+
+
+def test_an_unloadable_dbc_exits_two(setup, capsys) -> None:
+    _, dbc, config = setup
+    dbc.write_text("this is not a DBC {")
+    assert run(config, dec.FakeSink()) == 2
+    assert "does not load" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ D5–D7 marker, idempotence, catalog
+
+
+def test_a_crash_before_the_marker_redoes_the_chunk(setup) -> None:
+    _, _, config = setup
+    sink = dec.FakeSink(fail_on="chunks")
+    assert run(config, sink) == 75
+    assert sink.tables["chunks"] == []
+    assert sink.tables["frames"]  # the rows went in, the marker did not
+    assert run(config, sink) == 0
+    assert len(sink.tables["frames"]) == 7  # replaced, not appended
+    assert len(sink.tables["chunks"]) == 1
+
+
+def test_second_run_is_a_noop(setup) -> None:
+    _, _, config = setup
+    sink = dec.FakeSink()
+    run(config, sink)
+    counts = {t: len(rows) for t, rows in sink.tables.items()}
+    run(config, sink)
+    assert {t: len(rows) for t, rows in sink.tables.items()} == counts
+
+
+def test_dbc_edit_redecodes_without_duplicates(setup) -> None:
+    _, dbc, config = setup
+    sink = dec.FakeSink()
+    run(config, sink)
+    frames_before = len(sink.tables["frames"])
+    # Change the Speed factor: same signals, new values, new catalog.
+    dbc.write_text(dbc.read_text().replace("Speed : 0|16@1+ (0.01,0)", "Speed : 0|16@1+ (0.1,0)"))
+    assert run(config, sink) == 0
+    speeds = [s["value"] for s in sink.tables["signals"] if s["signal"] == "DEMO_STATUS.Speed"]
+    assert speeds == [pytest.approx(100.0)]
+    assert len(sink.tables["frames"]) == frames_before
+    state = sink.chunk_state("mr-orange")
+    assert state["L0000007.LOG"][1] == dec.catalog_hash(dec.load_config(config).devices[0])
+
+
+# ------------------------------------------------------------------ D8/D9 defects and gaps
+
+
+@pytest.mark.parametrize(
+    "lines, why",
+    [
+        (FIXTURE[:-1], "no #close"),
+        ([*FIXTURE[:5], "C1,ZZ,100,00", *FIXTURE[5:]], "malformed"),
+        (["#sdlog,1,7,412000,2026.7.0", *FIXTURE[1:]], "v1"),
+        (["#sdlog,2,7,@0,2026.7.0", "#origin,mr-blue", *FIXTURE[2:]], "#origin"),
+    ],
+)
+def test_a_bad_chunk_is_a_defect_and_writes_nothing(setup, lines: list[str], why: str) -> None:
+    archive, _, config = setup
+    write_chunk(archive / "mr-orange", "L0000007.LOG", lines)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 1
+    assert sink.tables["frames"] == [] and sink.tables["signals"] == []
+    (marker,) = sink.tables["chunks"]
+    assert marker["result"] == "defect" and why in marker["detail"]
+
+
+def test_a_torn_last_line_is_not_a_defect(setup) -> None:
+    archive, _, config = setup
+    path = archive / "mr-orange" / "L0000007.LOG"
+    path.write_bytes(path.read_bytes() + b"C1,5,100,E8")  # power cut mid-line, after #close
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+
+
+def test_gaps_are_recorded(setup) -> None:
+    archive, _, config = setup
+    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:5], "#gap,@1005,3,12000,2,4", *FIXTURE[5:]])
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    assert sink.tables["chunks"][0]["gaps"] == 1
+    assert len(sink.tables["frames"]) == 7
+
+
+def test_a_reused_seq_is_a_new_chunk_key(setup) -> None:
+    """After a card erase, seq restarts: same seq, different content → different key."""
+    archive, _, config = setup
+    write_chunk(archive / "mr-orange", "L0000008.LOG", with_seq([*FIXTURE[:4], "C1,@1000,100,0000000000000000", "#close,@2000,rotate"], 7))
+    sink = dec.FakeSink()
+    run(config, sink)
+    keys = {c["chunk"] for c in sink.tables["chunks"]}
+    assert len(keys) == 2 and all(k.startswith("7-") for k in keys)
+
+
+# ------------------------------------------------------------------ D10–D13
+
+
+def test_archive_is_untouched(setup) -> None:
+    archive, _, config = setup
+    path = archive / "mr-orange" / "L0000007.LOG"
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    run(config, dec.FakeSink())
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert sorted(p.name for p in (archive / "mr-orange").iterdir()) == ["L0000007.LOG"]
+
+
+def test_partials_are_not_loaded(setup) -> None:
+    archive, _, config = setup
+    (archive / "mr-orange" / "L0000008.LOG.part").write_bytes(b"#sdlog,2,8,@0,2026.7.0\n")
+    sink = dec.FakeSink()
+    run(config, sink)
+    assert [c["file"] for c in sink.tables["chunks"]] == ["L0000007.LOG"]
+
+
+@pytest.mark.parametrize("case, code", [("ok", 0), ("defect", 1), ("down", 75)])
+def test_exit_status(setup, case: str, code: int) -> None:
+    archive, _, config = setup
+    if case == "defect":
+        write_chunk(archive / "mr-orange", "L0000007.LOG", FIXTURE[:-1])
+    sink = dec.FakeSink(unavailable=case == "down")
+    assert run(config, sink) == code
+
+
+def test_a_held_lock_skips(setup, capsys) -> None:
+    _, _, config = setup
+    with open(str(config) + ".lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sink = dec.FakeSink()
+        assert run(config, sink) == 0
+        assert "busy" in capsys.readouterr().out
+        assert sink.tables["chunks"] == []
+
+
+def test_status_counts(setup, capsys) -> None:
+    archive, _, config = setup
+    sink = dec.FakeSink()
+    assert run(config, sink, "status") == 0
+    assert "0 ok, 0 defect, 1 pending" in capsys.readouterr().out
+    run(config, sink)
+    capsys.readouterr()
+    assert run(config, sink, "status") == 0
+    assert "1 ok, 0 defect, 0 pending" in capsys.readouterr().out
+
+
+def test_reader_imports_stdlib_only() -> None:
+    """sdlog.py, the collector and the fleet stay stdlib-only (D13)."""
+    stdlib = set(sys.stdlib_module_names)
+    for name in ("sdlog.py", "sdlog_collect.py", "sdlog_fleet.py"):
+        tree = ast.parse((_SCRIPT / name).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                roots = [node.module.split(".")[0]]
+            else:
+                continue
+            for root in roots:
+                assert root in stdlib or root == "__future__", f"{name} imports {root}"
+
+
+def test_the_example_config_loads(tmp_path: Path) -> None:
+    example = Path(__file__).parent.parent.parent / "deploy" / "sdlog-decode" / "decode.example.toml"
+    text = example.read_text().replace("/path/to/consuming-project/vehicles/demo/dbc/ev.dbc", str(MINI_DBC))
+    config = tmp_path / "decode.toml"
+    config.write_text(text)
+    assert dec.load_config(config).devices[0].name == "mr-orange"
+
+
+# ------------------------------------------------------------------ ClickHouse round trip (optional)
+
+
+@pytest.mark.skipif(not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set")
+def test_clickhouse_round_trip(setup) -> None:
+    _, dbc, config = setup
+    url = os.environ["SDLOG_CLICKHOUSE_URL"]
+    database = f"sdlog_test_{uuid.uuid4().hex[:8]}"
+    sink = dec.ClickHouseSink(url, database)
+    try:
+        sink.init()
+        assert run(config, sink) == 0
+        assert run(config, sink) == 0  # idempotent
+        rows = sink._query(f"SELECT count() FROM {database}.frames").strip()
+        assert rows == "7"
+        values = dict(
+            line.split("\t")
+            for line in sink._query(
+                f"SELECT signal, toString(value) FROM {database}.signals WHERE signal != 'DEMO_MUX.Mux' FORMAT TSV"
+            ).splitlines()
+        )
+        assert {k: float(v) for k, v in values.items()} == pytest.approx(EXPECTED_SIGNALS)
+        utc = sink._query(f"SELECT toString(utc) FROM {database}.frames WHERE t_us = 4128").strip()
+        assert utc == "1970-01-01 00:00:01.000016"
+        dbc.write_text(dbc.read_text().replace("(0.01,0)", "(0.1,0)"))
+        assert run(config, sink) == 0
+        speed = sink._query(f"SELECT groupArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'").strip()
+        assert speed == "[100]"
+    finally:
+        sink._query(f"DROP DATABASE IF EXISTS {database}")

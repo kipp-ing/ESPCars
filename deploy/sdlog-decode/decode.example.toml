@@ -1,0 +1,16 @@
+# sdlog_decode — example config (docs/sdlog-decode-spec.md §1.1).
+# Fictional names. The real instance config — device names, and DBC paths into the
+# consuming project's own repository — lives with the deployment, never in this repo.
+
+archive = "/srv/sdlog/archive"          # what sdlog_fleet.py fills: <archive>/<device>/L*.LOG
+sink = "clickhouse"
+clickhouse_url = "http://localhost:8123"
+database = "sdlog"
+# lock = "/var/lib/sdlog-decode/decode.lock"   # default: <this file>.lock
+# batch_rows = 200000
+
+[[device]]
+name = "mr-orange"                      # = <archive>/<name>/ and the chunks' #origin
+vehicle = "demo-car"                    # what its signals are filed under
+[device.dbc]
+EV = "/path/to/consuming-project/vehicles/demo/dbc/ev.dbc"   # bus label from #src → DBC

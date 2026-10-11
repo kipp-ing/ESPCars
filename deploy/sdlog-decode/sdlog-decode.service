@@ -1,0 +1,12 @@
+# One decode pass over every pending chunk. Started after each fleet pass by
+# sdlog-decode.path or the timer; systemd does not start a second oneshot that is
+# still running, and the tool's own lock covers manual runs alongside it.
+[Unit]
+Description=sd_logger archive decode pass
+After=clickhouse-server.service
+
+[Service]
+Type=oneshot
+User=sdlog
+ExecStart=/opt/espcars/.venv/bin/python /opt/espcars/script/sdlog_decode.py run --config /etc/sdlog-decode/decode.toml
+Nice=10

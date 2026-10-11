@@ -111,6 +111,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -773,6 +774,99 @@ def cmd_check(args) -> int:
     return status
 
 
+class ReadError(Exception):
+    """A file this reader must stop on: the message says where and why."""
+
+
+@dataclass
+class StreamLine:
+    """One `C`/`L`/`U`/`I`/`X` line with its stamp resolved.
+
+    `t_us` is absolute boot-time µs, `utc_us` the UTC axis when a preceding `#utc`
+    anchor resolves it, else None. `fields` and `line` are the raw text, so a
+    caller decides what a well-formed record is (extract and the decoder agree
+    because they share this, not because they each re-implement the chain)."""
+
+    kind: str
+    t_us: int
+    utc_us: int | None
+    fields: list[str]
+    line: str
+
+
+class StreamReader:
+    """Walk a v2 file's stream lines in order, resolving the stamp chain, the UTC
+    anchor and the `#src` labels as they stream past.
+
+    This is the one place `extract` and `sdlog_decode.py` read records from. It
+    reads *every* stream line rather than only a wanted type: skipping the other
+    types would drop their steps on the floor and put every later timestamp out by
+    however much they came to. Stops at the one line a power cut can tear (no
+    terminator), and raises `ReadError` where continuing would print wrong numbers.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        # tag -> label, filled in from `#src` as the header streams past. The record
+        # lines carry the tag; the name lives in the header now.
+        self.labels: dict[int, str] = {}
+
+    def label(self, tag: int, token: str) -> str:
+        return self.labels.get(tag, token)
+
+    def __iter__(self) -> Iterator[StreamLine]:
+        path = self.path
+        chain = Chain()
+        utc_anchor = UtcAnchor()
+        with path.open("r", encoding="latin-1") as handle:
+            for line in handle:
+                # A line with no terminator is the one line a power cut can tear, and
+                # it can only be the last. Defined by the missing newline rather than
+                # by its content: a torn line is often still field-count-correct and
+                # merely short a few payload bytes, which no field check would catch.
+                if not line.endswith("\n"):
+                    break
+                line = line.rstrip("\n")
+                if line.startswith("#"):
+                    if line.startswith("#sdlog,"):
+                        fields = line.split(",")
+                        version = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+                        if version not in SUPPORTED_FORMAT_VERSIONS:
+                            raise ReadError(
+                                f"{path.name}: write format v{version}, which this reader does not know"
+                                f" — refusing to extract rather than print wrong columns"
+                            )
+                    elif line.startswith("#src,"):
+                        src = line.split(",")
+                        if len(src) >= 4 and set(src[3]) <= HEX_DIGITS and src[3]:
+                            self.labels[int(src[3], 16)] = src[2]
+                    elif line.startswith("#utc,") or line == "#utc":
+                        fields = line.split(",")
+                        if len(fields) != 3:
+                            raise ReadError(f"{path.name}: unreadable #utc line, extract stops here")
+                        try:
+                            utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
+                        except ValueError:
+                            raise ReadError(f"{path.name}: unreadable #utc line, extract stops here") from None
+                    continue
+                fields = line.split(",")
+                kind = fields[0][0] if fields[0] else ""
+                if kind not in RECORD_KINDS and kind != "X":
+                    continue
+                try:
+                    t_us = chain.read(fields[1]) if len(fields) > 1 else None
+                except ValueError:
+                    # A stamp the formatter cannot have written. `check` is the command
+                    # that reports that; here the honest move is to stop, because the
+                    # chain could not take its step and every timestamp after this line
+                    # is adrift by an unknown amount. Printing those is the one thing
+                    # worse than printing nothing.
+                    raise ReadError(f"{path.name}: unreadable stamp column, extract stops here") from None
+                if t_us is None:
+                    continue
+                yield StreamLine(kind, t_us, utc_anchor.resolve(t_us), fields, line)
+
+
 def cmd_extract(args) -> int:
     """One type as a plain single-schema CSV — what a spreadsheet or pandas wants,
     without the typed-line dispatch getting in the way.
@@ -780,10 +874,7 @@ def cmd_extract(args) -> int:
     The `t_us` column is **absolute decimal boot-time µs**; the appended `utc_us`
     column is decimal epoch µs when a preceding `#utc` anchor resolves it, else
     blank. `dlc` is put back: the saving is in the file, not in what a caller gets
-    out of it. Resolving the chain is the whole reason this reads every stream line
-    rather than only the wanted one — skipping the other types would drop their
-    steps on the floor and put every later timestamp out by however much they came
-    to.
+    out of it. The chain, UTC and label resolution live in `StreamReader`.
     """
     path = Path(args.file)
     wanted = args.type.upper()
@@ -798,65 +889,14 @@ def cmd_extract(args) -> int:
     if header is None:
         print(f"unknown type {args.type!r} (use C, L, U, I or X)", file=sys.stderr)
         return 2
-    chain = Chain()
-    utc_anchor = UtcAnchor()
     printed_header = False
-    # tag -> label, filled in from `#src` as the header streams past. The record
-    # lines carry the tag; the name lives in the header now.
-    labels: dict[int, str] = {}
-    with path.open("r", encoding="latin-1") as handle:
-        for line in handle:
-            # A line with no terminator is the one line a power cut can tear, and
-            # it can only be the last. Defined by the missing newline rather than
-            # by its content: a torn line is often still field-count-correct and
-            # merely short a few payload bytes, which no field check would catch.
-            if not line.endswith("\n"):
-                break
-            line = line.rstrip("\n")
-            if line.startswith("#"):
-                if line.startswith("#sdlog,"):
-                    fields = line.split(",")
-                    version = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
-                    if version not in SUPPORTED_FORMAT_VERSIONS:
-                        print(
-                            f"{path.name}: write format v{version}, which this reader does not know"
-                            f" — refusing to extract rather than print wrong columns",
-                            file=sys.stderr,
-                        )
-                        return 2
-                elif line.startswith("#src,"):
-                    src = line.split(",")
-                    if len(src) >= 4 and set(src[3]) <= HEX_DIGITS and src[3]:
-                        labels[int(src[3], 16)] = src[2]
-                elif line.startswith("#utc,") or line == "#utc":
-                    fields = line.split(",")
-                    if len(fields) != 3:
-                        print(f"{path.name}: unreadable #utc line, extract stops here", file=sys.stderr)
-                        return 2
-                    try:
-                        utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
-                    except ValueError:
-                        print(f"{path.name}: unreadable #utc line, extract stops here", file=sys.stderr)
-                        return 2
+    reader = StreamReader(path)
+    try:
+        for stream in reader:
+            if stream.kind != wanted:
                 continue
-            fields = line.split(",")
-            kind = fields[0][0] if fields[0] else ""
-            if kind not in RECORD_KINDS and kind != "X":
-                continue
-            try:
-                t_us = chain.read(fields[1]) if len(fields) > 1 else None
-            except ValueError:
-                # A stamp the formatter cannot have written. `check` is the command
-                # that reports that; here the honest move is to stop, because the
-                # chain could not take its step and every timestamp after this line
-                # is adrift by an unknown amount. Printing those is the one thing
-                # worse than printing nothing.
-                print(f"{path.name}: unreadable stamp column, extract stops here", file=sys.stderr)
-                return 2
-            if t_us is None or kind != wanted:
-                continue
-            utc_us = utc_anchor.resolve(t_us)
-            utc_column = "" if utc_us is None else str(utc_us)
+            fields = stream.fields
+            utc_column = "" if stream.utc_us is None else str(stream.utc_us)
             label = None
             if wanted in RECORD_KINDS:
                 if len(fields) != RECORD_FIELDS:
@@ -865,7 +905,7 @@ def cmd_extract(args) -> int:
                     _, tag, flags = split_token(fields[0])
                 except ValueError:
                     continue
-                label = labels.get(tag, fields[0])
+                label = reader.label(tag, fields[0])
                 if args.label and label != args.label:
                     continue
                 if args.shed and "s" not in flags:
@@ -885,13 +925,16 @@ def cmd_extract(args) -> int:
                 # lines a second on the card and nothing at all in a CSV, and a
                 # spreadsheet wants them as columns.
                 data = fields[3]
-                print(f"{t_us},{label},{fields[2]},{flags or '-'},{len(data) // 2},{data},{utc_column}")
+                print(f"{stream.t_us},{label},{fields[2]},{flags or '-'},{len(data) // 2},{data},{utc_column}")
                 continue
             # An `X` line goes out as the level letter off the token, then everything
             # after the stamp verbatim: the message is the last field and may hold
             # commas, so it is never re-split.
-            _, _, tail = line.partition(",")[2].partition(",")
-            print(f"{t_us},{fields[0][1:]},{tail},{utc_column}")
+            _, _, tail = stream.line.partition(",")[2].partition(",")
+            print(f"{stream.t_us},{fields[0][1:]},{tail},{utc_column}")
+    except ReadError as err:
+        print(err, file=sys.stderr)
+        return 2
     if not printed_header and not args.no_header:
         print(header)
     return 0
