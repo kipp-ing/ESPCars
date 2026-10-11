@@ -103,20 +103,20 @@ TEST(clock_lines_round_trip_through_the_parser) {
 TEST(clock_parser_refuses_what_the_writer_cannot_have_written) {
   ClockPoint p;
   const char *bad[] = {
-      "#clock,64960,ABC,utc,sync",           // stamp not anchor-marked
-      "#clock,@64960,abc,utc,sync",          // lowercase hex
-      "#clock,@64960,,utc,sync",             // empty value
-      "#clock,@64960,11112222333344445,utc,sync",  // 17 digits: above 64 bits
-      "#clock,@64960,ABC,UTC,sync",          // basis is lowercase
-      "#clock,@64960,ABC,utc,card,4",        // a card floor is never a reading
-      "#clock,@64960,ABC,est,sync",          // and a sync is never an estimate
-      "#clock,@64960,ABC,utc,sleep",         // sleep is drift, not utc
-      "#clock,@64960,ABC,utc,sync,4",        // detail on a source that has none
-      "#clock,@64960,ABC,est,card",          // a card floor always names its file
-      "#clock,@64960,ABC,est,card,4x",       // detail is decimal
-      "#clock,@64960,ABC,est,card,4,5",      // a field too many
-      "#clock,@64960,ABC,utc",               // a field too few
-      "#clocks,@64960,ABC,utc,sync",         // a different line
+      "#clock,64960,ABC,utc,sync",                           // stamp not anchor-marked
+      "#clock,@64960,abc,utc,sync",                          // lowercase hex
+      "#clock,@64960,,utc,sync",                             // empty value
+      "#clock,@64960,11112222333344445,utc,sync",            // 17 digits: above 64 bits
+      "#clock,@64960,ABC,UTC,sync",                          // basis is lowercase
+      "#clock,@64960,ABC,utc,card,4",                        // a card floor is never a reading
+      "#clock,@64960,ABC,est,sync",                          // and a sync is never an estimate
+      "#clock,@64960,ABC,utc,sleep",                         // sleep is drift, not utc
+      "#clock,@64960,ABC,utc,sync,4",                        // detail on a source that has none
+      "#clock,@64960,ABC,est,card",                          // a card floor always names its file
+      "#clock,@64960,ABC,est,card,4x",                       // detail is decimal
+      "#clock,@64960,ABC,est,card,4,5",                      // a field too many
+      "#clock,@64960,ABC,utc",                               // a field too few
+      "#clocks,@64960,ABC,utc,sync",                         // a different line
       "#clock,@64960,ABC,est,card,99999999999999999999999",  // detail overflows
   };
   for (const char *line : bad)
@@ -151,15 +151,14 @@ TEST(projection_adds_the_boot_time_difference_and_saturates) {
 // C4 ---------------------------------------------------------------------------------------------
 
 TEST(c4_a_cleanly_closed_file_ends_at_its_close_line) {
-  const std::string tail =
-      "#sdlog,2,41,@100,2026.7.0\n"
-      "#clock,@200,65E2B1A3C4000,utc,sync\n"
-      "C1,@300,1A2,00\n"
-      "C1,64,1A2,01\n"
-      "#clock,@F4240,65E2B1A4B8240,utc,sync\n"
-      "C1,@F4300,1A2,02\n"
-      "#drop,@F4400,ring,1,1\n"
-      "#close,@F4500,clean\n";
+  const std::string tail = "#sdlog,2,41,@100,2026.7.0\n"
+                           "#clock,@200,65E2B1A3C4000,utc,sync\n"
+                           "C1,@300,1A2,00\n"
+                           "C1,64,1A2,01\n"
+                           "#clock,@F4240,65E2B1A4B8240,utc,sync\n"
+                           "C1,@F4300,1A2,02\n"
+                           "#drop,@F4400,ring,1,1\n"
+                           "#close,@F4500,clean\n";
   ClockPoint end;
   CHECK(scan(tail, false, &end));
   CHECK_EQ(end.t_us, 0xF4500ull);
@@ -169,10 +168,9 @@ TEST(c4_a_cleanly_closed_file_ends_at_its_close_line) {
 
 TEST(c4_a_power_cut_tail_is_never_read_as_a_time) {
   // The last line has no newline: torn. It would push the end four seconds later.
-  const std::string tail =
-      "#clock,@200,1000000,est,build\n"
-      "#drop,@300,ring,1,1\n"
-      "#close,@3D0A00";
+  const std::string tail = "#clock,@200,1000000,est,build\n"
+                           "#drop,@300,ring,1,1\n"
+                           "#close,@3D0A00";
   ClockPoint end;
   CHECK(scan(tail, false, &end));
   CHECK_EQ(end.t_us, 0x300ull);
@@ -184,10 +182,9 @@ TEST(c4_a_power_cut_tail_is_never_read_as_a_time) {
 TEST(c4_a_window_that_starts_mid_line_skips_the_fragment) {
   // The window opened inside a `#clock` line: what it sees of it parses as a perfectly good line
   // with a far later time, which is exactly what must not be believed.
-  const std::string tail =
-      "lock,@999999,FFFFFFFFFFFF,utc,sync\n"
-      "#clock,@200,1000000,utc,sync\n"
-      "#close,@300,clean\n";
+  const std::string tail = "lock,@999999,FFFFFFFFFFFF,utc,sync\n"
+                           "#clock,@200,1000000,utc,sync\n"
+                           "#close,@300,clean\n";
   ClockPoint end;
   CHECK(scan(tail, true, &end));
   CHECK_EQ(end.t_us, 0x300ull);
@@ -199,8 +196,8 @@ TEST(c4_a_window_that_starts_mid_line_skips_the_fragment) {
 
 TEST(c4_garbage_and_overlong_lines_change_nothing) {
   std::string tail = "#clock,@200,1000000,utc,sync\n";
-  tail += "#clock,@300,zz,utc,sync\n";       // garbled clock: ignored, not a reset
-  tail += "#close,@nothex,clean\n";          // garbled stamp: ignored
+  tail += "#clock,@300,zz,utc,sync\n";                                // garbled clock: ignored, not a reset
+  tail += "#close,@nothex,clean\n";                                   // garbled stamp: ignored
   tail += "#clock," + std::string(SD_LOG_MAX_LINE + 40, 'A') + "\n";  // longer than any line
   tail += "#rotate,@280,L0000042.LOG\n";
   ClockPoint end;
@@ -211,10 +208,9 @@ TEST(c4_garbage_and_overlong_lines_change_nothing) {
 
 TEST(c4_the_latest_timed_line_wins_not_the_last_one) {
   // Meta lines are not time-sorted (F1f): the floor is the furthest the run provably got.
-  const std::string tail =
-      "#clock,@200,1000000,est,card,40\n"
-      "#drop,@900,ring,1,1\n"
-      "#drop,@500,tap:seg1,1,1\n";
+  const std::string tail = "#clock,@200,1000000,est,card,40\n"
+                           "#drop,@900,ring,1,1\n"
+                           "#drop,@500,tap:seg1,1,1\n";
   ClockPoint end;
   CHECK(scan(tail, false, &end));
   CHECK_EQ(end.t_us, 0x900ull);
@@ -223,19 +219,17 @@ TEST(c4_the_latest_timed_line_wins_not_the_last_one) {
 }
 
 TEST(c4_timed_lines_before_the_clock_do_not_count) {
-  const std::string tail =
-      "#drop,@FFFFFF,ring,1,1\n"
-      "#clock,@200,1000000,utc,sync\n";
+  const std::string tail = "#drop,@FFFFFF,ring,1,1\n"
+                           "#clock,@200,1000000,utc,sync\n";
   ClockPoint end;
   CHECK(scan(tail, false, &end));
   CHECK_EQ(end.t_us, 0x200ull);
 }
 
 TEST(c4_an_old_file_with_only_utc_still_gives_an_end) {
-  const std::string tail =
-      "#sdlog,2,7,@64960,2026.7.0\n"
-      "#utc,100,1000000\n"
-      "#close,@500,clean\n";
+  const std::string tail = "#sdlog,2,7,@64960,2026.7.0\n"
+                           "#utc,100,1000000\n"
+                           "#close,@500,clean\n";
   ClockPoint end;
   CHECK(scan(tail, false, &end));
   CHECK_EQ(end.utc_us, 0x1000400ull);
@@ -250,22 +244,20 @@ TEST(c4_no_clock_at_all_is_no_answer) {
 
 TEST(c4_a_second_header_starts_a_new_boot_domain) {
   // A reused seq appended to by a later boot: the first boot's clock does not project into it.
-  const std::string tail =
-      "#clock,@200,1000000,utc,sync\n"
-      "#sdlog,2,7,@5,2026.7.0\n"
-      "#close,@500,clean\n";
+  const std::string tail = "#clock,@200,1000000,utc,sync\n"
+                           "#sdlog,2,7,@5,2026.7.0\n"
+                           "#close,@500,clean\n";
   ClockPoint end;
   CHECK(!scan(tail, false, &end));
 }
 
 TEST(c4_chunked_feeding_gives_the_same_answer) {
-  const std::string tail =
-      "ent fragment\n"
-      "#clock,@200,1000000,est,card,40\n"
-      "C1,@300,1A2,00\n"
-      "#clock,@F4240,2000000,drift,sleep,600\n"
-      "#close,@F4500,clean\n"
-      "C1,@F4600,1A2,0";
+  const std::string tail = "ent fragment\n"
+                           "#clock,@200,1000000,est,card,40\n"
+                           "C1,@300,1A2,00\n"
+                           "#clock,@F4240,2000000,drift,sleep,600\n"
+                           "#close,@F4500,clean\n"
+                           "C1,@F4600,1A2,0";
   ClockPoint whole;
   CHECK(scan(tail, true, &whole));
   for (size_t step = 1; step < 9; step++) {
@@ -393,11 +385,12 @@ TEST(c1_a_deep_sleep_wake_is_drift_and_states_how_long_it_slept) {
   CHECK_EQ(d.best.src, ClockSrc::SLEEP);
   CHECK(d.best.has_detail);
   CHECK_EQ(d.best.detail, 600ull);
-  CHECK_EQ(clock_line(d.best), std::string("#clock,@C3500,") + [] {
-             char b[32];
-             std::snprintf(b, sizeof(b), "%llX", static_cast<unsigned long long>(T_2026 + 600800000));
-             return std::string(b);
-           }() + ",drift,sleep,600\n");
+  CHECK_EQ(
+      clock_line(d.best), std::string("#clock,@C3500,") + [] {
+        char b[32];
+        std::snprintf(b, sizeof(b), "%llX", static_cast<unsigned long long>(T_2026 + 600800000));
+        return std::string(b);
+      }() + ",drift,sleep,600\n");
 }
 
 TEST(c1_a_wake_without_a_card_clock_is_drift_without_a_duration) {

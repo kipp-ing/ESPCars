@@ -4,6 +4,8 @@
 // ESPHOME_VERSION, for the `#sdlog` header line: a card should say which
 // firmware wrote it without anyone having to remember.
 #include "esphome/core/version.h"
+// App.get_build_time(): the T4 floor of the clock spec — firmware cannot run before it was built.
+#include "esphome/core/application.h"
 
 #include <cerrno>
 #include <cstdarg>
@@ -13,6 +15,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #ifdef USE_LOGGER
@@ -24,6 +27,8 @@ extern "C" {
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
+#include "esp_attr.h"       // RTC_NOINIT_ATTR, for the clock state that must outlive a deep sleep
+#include "esp_system.h"     // esp_reset_reason()
 #include "esp_heap_caps.h"  // heap_caps_get_free_size / heap_caps_get_largest_free_block, for MountFailureFacts
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
@@ -35,6 +40,45 @@ extern "C" {
 
 namespace esphome {
 namespace sd_logger {
+
+// Whether the system clock is a reading or has run through a deep sleep since its last sync (clock
+// spec §3). RTC memory, not NVS: it must survive exactly what the RTC timer survives — deep sleep
+// and every reset but power-on — and be meaningless after the one that clears the timer too. The
+// magic is what makes garbage after a power-on read as "unknown" rather than as either state.
+static RTC_NOINIT_ATTR uint32_t s_clock_state;  // NOLINT
+static const uint32_t CLOCK_STATE_SYNCED = 0x5DC10C01;
+static const uint32_t CLOCK_STATE_DRIFTED = 0x5DC10C02;
+
+static WakeKind wake_kind_from_reset() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_DEEPSLEEP:
+      return WakeKind::DEEP_SLEEP;
+    case ESP_RST_POWERON:
+    case ESP_RST_UNKNOWN:
+      // Unknown is read as power-on: the cheaper mistake is to distrust a clock that survived.
+      return WakeKind::POWER_ON;
+    default:
+      return WakeKind::OTHER;
+  }
+}
+
+static const char *wake_kind_str(WakeKind wake) {
+  switch (wake) {
+    case WakeKind::DEEP_SLEEP:
+      return "deep-sleep wake";
+    case WakeKind::OTHER:
+      return "warm reset";
+    default:
+      return "power-on";
+  }
+}
+
+static uint64_t gettimeofday_us() {
+  struct timeval tv;
+  if (gettimeofday(&tv, nullptr) != 0 || tv.tv_sec < 0)
+    return 0;
+  return static_cast<uint64_t>(tv.tv_sec) * 1000000ULL + static_cast<uint64_t>(tv.tv_usec);
+}
 
 static const char *const TAG = "sd_logger";
 
@@ -505,6 +549,7 @@ void SdLogger::setup() {
   // — from a session-ender into a gap of a few seconds.
   if (this->mount_card_(this->format_if_mount_failed_)) {
     this->seq_ = this->scan_next_seq_();
+    this->learn_clock_();
     if (!this->logging_permitted_()) {
       ESP_LOGE(TAG, "card mounted read-only: capacity=%s; writer will not start", this->capacity_status());
     } else if (this->open_next_file_()) {
@@ -1329,6 +1374,7 @@ void SdLogger::confine_format(const std::string &confirmation) {
     return;
   }
   this->seq_ = this->scan_next_seq_();
+  this->learn_clock_();
   if (!this->open_next_file_()) {
     ESP_LOGE(TAG, "confine format failed after remount: could not open log file");
     this->unmount_card_();
@@ -1572,6 +1618,8 @@ void SdLogger::write_file_header_() {
   if (this->utc_generation_ == generation)
     this->utc_emitted_generation_ = generation;
   portEXIT_CRITICAL(&this->utc_mux_);
+  // Every file states its wall clock in the header (clock spec C2), whatever that is worth.
+  this->write_clock_line_(now);
 
 #ifdef USE_SD_LOGGER_CAN_TAP
   for (uint8_t i = 0; i < this->can_tap_count_; i++) {
@@ -1633,13 +1681,38 @@ void SdLogger::write_file_header_() {
   this->marked_text_dropped_ = this->text_dropped_.load(std::memory_order_relaxed);
 }
 
+void SdLogger::on_time_sync() {
+  // Sampled back to back, esp_timer first: the pair is one instant to within a few µs, and the µs
+  // part is whatever the source set — SNTP carries it, ESPHome's synchronize_epoch_() zeroes it.
+  const uint64_t boot_us = static_cast<uint64_t>(esp_timer_get_time());
+  const uint64_t utc_us = gettimeofday_us();
+  if (utc_us == 0)
+    return;
+  this->set_utc_anchor(utc_us, boot_us);
+}
+
 void SdLogger::set_utc_anchor(uint64_t utc_us, uint64_t boot_us_at_sync) {
+  ClockPoint floor;
   portENTER_CRITICAL(&this->utc_mux_);
   this->utc_anchor_.utc_us = utc_us;
   this->utc_anchor_.boot_us = boot_us_at_sync;
   this->utc_anchor_.valid = true;
+  this->clock_best_ = ClockPoint{};
+  this->clock_best_.t_us = boot_us_at_sync;
+  this->clock_best_.utc_us = utc_us;
+  this->clock_best_.basis = ClockBasis::UTC;
+  this->clock_best_.src = ClockSrc::SYNC;
+  floor = this->clock_floor_;
   this->utc_generation_++;
   portEXIT_CRITICAL(&this->utc_mux_);
+  // The system clock is a reading again, and a later warm reset may say so (clock spec §3).
+  s_clock_state = CLOCK_STATE_SYNCED;
+  // C8: accepted regardless — a real clock outranks an estimate — but never silently.
+  if (clock_contradicts_floor(floor, utc_us, boot_us_at_sync)) {
+    this->clock_back_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(TAG, "clock: sync lands %" PRIu64 " s before the card floor (%s) — accepted; is the clock source wrong?",
+             (clock_project(floor, boot_us_at_sync) - utc_us) / 1000000ULL, clock_src_str(floor.src));
+  }
   if (this->writer_task_ != nullptr)
     xTaskNotifyGive(this->writer_task_);
 }
@@ -1717,6 +1790,123 @@ void SdLogger::write_utc_marker_() {
   if (this->utc_generation_ == generation)
     this->utc_emitted_generation_ = generation;
   portEXIT_CRITICAL(&this->utc_mux_);
+  // The basis just changed mid-file: say so in the line a reader of the tail looks for (§4 item 3).
+  this->write_clock_line_(static_cast<uint64_t>(esp_timer_get_time()));
+}
+
+void SdLogger::write_clock_line_(uint64_t now64) {
+  ClockPoint best;
+  portENTER_CRITICAL(&this->utc_mux_);
+  best = this->clock_best_;
+  portEXIT_CRITICAL(&this->utc_mux_);
+  // Restarted whether or not a line goes out: with nothing to state there is nothing owed either.
+  this->clock_bytes_since_ = 0;
+  this->clock_last_us_ = now64;
+  if (!best.valid() || !this->ensure_room_(SD_LOG_MAX_LINE))
+    return;
+  this->commit_line_(format_clock(this->block_.cursor(), this->block_.room(), clock_at(best, now64)));
+  this->clock_bytes_since_ = 0;
+}
+
+bool SdLogger::read_card_clock_end_(ClockPoint *end, uint32_t *seq_out) {
+  // Bounded by construction (clock spec C5): at most SD_LOG_CLOCK_TAIL_FILES names, each read from
+  // SD_LOG_CLOCK_TAIL_BYTES before its end in 4 KiB pieces. Heap, not stack: this runs on the main
+  // task at setup and on the writer task after a recovery, and neither stack has 4.5 KiB to spare.
+  static const size_t READ_CHUNK = 4096;
+  char *buf = static_cast<char *>(malloc(READ_CHUNK));
+  ClockTailScanner *scanner = new (std::nothrow) ClockTailScanner(false);
+  bool found = false;
+  if (buf == nullptr || scanner == nullptr) {
+    ESP_LOGW(TAG, "clock: no memory for the card tail scan — no card floor this boot");
+  } else {
+    for (uint32_t back = 1; back <= SD_LOG_CLOCK_TAIL_FILES && back <= this->seq_ && !found; back++) {
+      const uint32_t seq = this->seq_ - back;
+      for (ChunkState state : {ChunkState::SEALED, ChunkState::CONFIRMED}) {
+        char name[SD_LOG_NAME_LEN];
+        format_chunk_name(name, seq, state);
+        const std::string path = this->mount_point_ + "/" + name;
+        const int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0)
+          continue;
+        const off_t size = lseek(fd, 0, SEEK_END);
+        const off_t start = size > static_cast<off_t>(SD_LOG_CLOCK_TAIL_BYTES) ? size - SD_LOG_CLOCK_TAIL_BYTES : 0;
+        if (size > 0 && lseek(fd, start, SEEK_SET) == start) {
+          *scanner = ClockTailScanner(start > 0);
+          ssize_t got;
+          while ((got = read(fd, buf, READ_CHUNK)) > 0)
+            scanner->feed(buf, static_cast<size_t>(got));
+          if (got < 0)
+            ESP_LOGW(TAG, "clock: reading %s failed (errno %d) — using what was read", name, errno);
+          if (scanner->end(end)) {
+            *seq_out = seq;
+            found = true;
+          }
+        }
+        close(fd);
+        break;  // one name per seq exists; the other extension is not a second file
+      }
+    }
+  }
+  free(buf);
+  delete scanner;
+  return found;
+}
+
+void SdLogger::learn_clock_() {
+  // Once per boot, and before the first header: what the clock is worth now (clock spec §3). Later
+  // remounts keep the answer — the boot and its clock have not changed, only the card may have.
+  if (this->clock_learned_)
+    return;
+  this->clock_learned_ = true;
+
+  const int64_t t0 = esp_timer_get_time();
+  BootClockInputs in;
+  in.now_boot_us = static_cast<uint64_t>(esp_timer_get_time());
+  in.sys_utc_us = gettimeofday_us();
+  in.wake = wake_kind_from_reset();
+  in.sys_drifted = s_clock_state == CLOCK_STATE_DRIFTED;
+  const time_t build = App.get_build_time();
+  in.build_utc_us = build > 0 ? static_cast<uint64_t>(build) * 1000000ULL : 0;
+  in.card_valid = this->read_card_clock_end_(&in.card_end, &in.card_seq);
+  const BootClockDecision d = decide_boot_clock(in);
+  const int64_t took_ms = (esp_timer_get_time() - t0) / 1000;
+
+  bool synced;
+  ClockPoint best;
+  portENTER_CRITICAL(&this->utc_mux_);
+  this->clock_floor_ = d.floor;
+  synced = this->utc_anchor_.valid;
+  if (!synced) {
+    this->clock_best_ = d.best;
+    if (d.best.basis == ClockBasis::UTC) {
+      // T2a is a reading: it goes out as `#utc` as well, which is what every existing reader uses.
+      this->utc_anchor_.utc_us = d.best.utc_us;
+      this->utc_anchor_.boot_us = d.best.t_us;
+      this->utc_anchor_.valid = true;
+      this->utc_generation_++;
+    }
+  }
+  best = this->clock_best_;
+  portEXIT_CRITICAL(&this->utc_mux_);
+
+  // A wake carries drift until the next sync — and so does any warm reset before that sync.
+  if (!synced && d.best.basis == ClockBasis::DRIFT)
+    s_clock_state = CLOCK_STATE_DRIFTED;
+  else if (in.wake == WakeKind::POWER_ON && !synced)
+    s_clock_state = 0;
+
+  if (d.sys_rejected) {
+    ESP_LOGW(TAG, "clock: system clock after a %s is not plausible (%" PRIu64 " s) — using the %s floor",
+             wake_kind_str(in.wake), in.sys_utc_us / 1000000ULL, clock_src_str(d.floor.src));
+  }
+  if (in.card_valid) {
+    ESP_LOGI(TAG, "clock: %s, card floor from L%07" PRIu32 " (%s/%s), read in %" PRId64 " ms", wake_kind_str(in.wake),
+             in.card_seq, clock_basis_str(in.card_end.basis), clock_src_str(in.card_end.src), took_ms);
+  } else {
+    ESP_LOGI(TAG, "clock: %s, no card floor (read in %" PRId64 " ms)", wake_kind_str(in.wake), took_ms);
+  }
+  ESP_LOGI(TAG, "clock: files state %s/%s%s", clock_basis_str(best.basis), clock_src_str(best.src),
+           synced ? " (a sync came first)" : "");
 }
 
 bool SdLogger::close_file_(const char *reason) {
@@ -1727,6 +1917,9 @@ bool SdLogger::close_file_(const char *reason) {
   // by a power loss (spec F1d). One line, and the bench criterion "parses as
   // valid CSV up to the last line" becomes something a script can decide.
   const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+  // The exact end, in the line the next boot's tail scan looks for — before a deep sleep this is
+  // what the wake measures the slept time from (clock spec §4 item 4).
+  this->write_clock_line_(now);
   if (this->ensure_room_(SD_LOG_MAX_LINE))
     this->commit_line_(format_close(this->block_.cursor(), this->block_.room(), now, reason));
   // The one place a partial sector may be written: there is nothing left to
@@ -1987,6 +2180,7 @@ bool SdLogger::try_recover_() {
   // Rescan rather than reusing seq_: the card may be a different one, and appending to a
   // sequence that belonged to the old card would interleave two runs in one file.
   this->seq_ = this->scan_next_seq_();
+  this->learn_clock_();
   if (!this->logging_permitted_()) {
     ESP_LOGE(TAG, "card remounted read-only: capacity=%s; recovery will not write", this->capacity_status());
     return true;
@@ -2280,6 +2474,7 @@ void SdLogger::commit_line_(size_t len) {
   // Counted, never lseek()'d: at production load this runs ~3600 times a second
   // and the file offset is knowable without asking the VFS.
   this->file_bytes_ += static_cast<uint32_t>(len);
+  this->clock_bytes_since_ += static_cast<uint32_t>(len);
 }
 
 void SdLogger::write_record_(const LogRecord &rec, uint64_t now64) {
@@ -3348,14 +3543,25 @@ void SdLogger::writer_loop_() {
       //
       // Every loop re-checks file_ok_(): a failing write takes the file down mid-pass, and the
       // remaining pops would otherwise go into a closed fd.
+      // The byte bound of the `#clock` restatement is checked per line, not per pass: one pass can
+      // drain a whole ring, and the boot tail scan relies on a restatement every 32 KiB (C5).
       LogRecord rec;
-      while (this->file_ok_() && this->pop_record_(rec))
+      while (this->file_ok_() && this->pop_record_(rec)) {
         this->write_record_(rec, now64);
+        if (this->clock_bytes_since_ >= SD_LOG_CLOCK_RESTATE_BYTES)
+          this->write_clock_line_(now64);
+      }
       TextRecord text;
-      while (this->file_ok_() && this->pop_text_(text))
+      while (this->file_ok_() && this->pop_text_(text)) {
         this->write_text_(text, now64);
+        if (this->clock_bytes_since_ >= SD_LOG_CLOCK_RESTATE_BYTES)
+          this->write_clock_line_(now64);
+      }
 
       this->write_drop_markers_(now64);
+      // The time bound, for a quiet bus: its floor must not go stale while nothing is written.
+      if (this->file_ok_() && clock_restate_due(this->clock_bytes_since_, now64, this->clock_last_us_))
+        this->write_clock_line_(now64);
 
       // The time bound again, once per pass. write_record_() covers the busy case, but the whole
       // point of the bound is the *quiet* one — a bus that produces nothing reaches no record path
@@ -3613,6 +3819,11 @@ void SdLogger::loop() {
   // already parses. A latched card that is being written through the masked idle bit is working,
   // but it has not completed a real initialisation since it last had power — the operator is
   // entitled to know that without reading the boot log.
+  // Like the lines below: its own line, and only once it is true (clock spec C8).
+  if (this->clock_back_.load(std::memory_order_relaxed) > 0) {
+    ESP_LOGW(TAG, "  clock_back=%" PRIu32 " — a clock sync landed before the card floor; check the clock source",
+             this->clock_back_.load(std::memory_order_relaxed));
+  }
   if (this->degraded_identification_)
     ESP_LOGW(TAG, "  card mounted with a latched idle bit masked — working, but still owed a power cycle");
   if (this->capacity_degraded())
@@ -3690,6 +3901,14 @@ void SdLogger::dump_config() {
   }
 #endif
 #endif
+  {
+    ClockPoint best;
+    portENTER_CRITICAL(&this->utc_mux_);
+    best = this->clock_best_;
+    portEXIT_CRITICAL(&this->utc_mux_);
+    ESP_LOGCONFIG(TAG, "  clock: %s/%s (docs/sd_logger-clock-spec.md)", clock_basis_str(best.basis),
+                  clock_src_str(best.src));
+  }
   if (this->card_power_pin_ >= 0)
     ESP_LOGCONFIG(TAG, "  card_power_pin=%d", this->card_power_pin_);
   if (this->recovery_.enabled()) {

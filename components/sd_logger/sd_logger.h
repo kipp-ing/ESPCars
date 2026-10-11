@@ -10,6 +10,7 @@
 #endif
 
 #include "card_reset.h"
+#include "clock_basis.h"
 #include "collection_policy.h"
 #include "collection_server.h"
 #include "log_format.h"
@@ -25,6 +26,7 @@
 #endif
 
 #include <atomic>
+#include <new>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -233,6 +235,11 @@ class SdLogger : public Component {
   // correspondence here; the writer task owns block_ and emits the #utc line on
   // its next notified pass, so this callback never races the card write path.
   void set_utc_anchor(uint64_t utc_us, uint64_t boot_us_at_sync);
+  // What a `time_id:` clock's on_time_sync calls: samples gettimeofday() (µs, C7) next to
+  // esp_timer and hands the pair to set_utc_anchor().
+  void on_time_sync();
+  // Lifetime count of syncs that landed before the card floor (clock spec C8).
+  uint32_t get_clock_back() const { return clock_back_.load(std::memory_order_relaxed); }
 
   // Producer entry point. Non-blocking and safe to call from any task context
   // (guarded by a short critical section); returns false and counts a drop when
@@ -552,6 +559,11 @@ class SdLogger : public Component {
   // Header block: #sdlog, one #src per declared source, #types, #flags, #pad.
   void write_file_header_();
   void write_utc_marker_();
+  // `#clock` (docs/sd_logger-clock-spec.md): the current best clock restated at `now64`.
+  void write_clock_line_(uint64_t now64);
+  // Once per boot, before the first file opens: read the card's newest tail, decide the boot clock.
+  void learn_clock_();
+  bool read_card_clock_end_(ClockPoint *end, uint32_t *seq_out);
   // `#drop` markers, emitted only when a counter actually moves (spec D4/F1d).
   void write_drop_markers_(uint64_t now64);
 
@@ -634,6 +646,14 @@ class SdLogger : public Component {
   UtcAnchor utc_anchor_;
   uint32_t utc_generation_{0};
   uint32_t utc_emitted_generation_{0};
+  // Under utc_mux_ as well: the best clock the header states, and the T3/T4 floor kept for C8.
+  ClockPoint clock_best_;
+  ClockPoint clock_floor_;
+  std::atomic<uint32_t> clock_back_{0};
+  // Writer-task only: the restatement cadence (clock spec §4), and whether learn_clock_() has run.
+  uint32_t clock_bytes_since_{0};
+  uint64_t clock_last_us_{0};
+  bool clock_learned_{false};
 
   // The stamp column's delta chain (spec §6 F1h). Writer-task only, like `block_`, and reset by
   // write_file_header_() so every sealed chunk decodes without the chunks before it.

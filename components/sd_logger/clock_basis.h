@@ -71,7 +71,7 @@ inline uint64_t clock_project(const ClockPoint &p, uint64_t boot_us) {
   if (boot_us >= p.t_us) {
     const uint64_t delta = boot_us - p.t_us;
     return delta > std::numeric_limits<uint64_t>::max() - p.utc_us ? std::numeric_limits<uint64_t>::max()
-                                                                     : p.utc_us + delta;
+                                                                   : p.utc_us + delta;
   }
   const uint64_t delta = p.t_us - boot_us;
   return delta > p.utc_us ? 0 : p.utc_us - delta;
@@ -382,8 +382,8 @@ struct BootClockInputs {
 };
 
 struct BootClockDecision {
-  ClockPoint best;   ///< what the header states
-  ClockPoint floor;  ///< T3/T4 at boot µs 0, kept for C8 even when T2 wins
+  ClockPoint best;           ///< what the header states
+  ClockPoint floor;          ///< T3/T4 at boot µs 0, kept for C8 even when T2 wins
   bool sys_rejected{false};  ///< a non-power-on boot whose system clock failed C1
 };
 
@@ -448,7 +448,8 @@ inline bool clock_contradicts_floor(const ClockPoint &floor, uint64_t utc_us, ui
 
 /// When the restatement is owed (spec §4 item 2).
 inline bool clock_restate_due(uint32_t bytes_since, uint64_t now_us, uint64_t last_us) {
-  return bytes_since >= SD_LOG_CLOCK_RESTATE_BYTES || (now_us >= last_us && now_us - last_us >= SD_LOG_CLOCK_RESTATE_US);
+  return bytes_since >= SD_LOG_CLOCK_RESTATE_BYTES ||
+         (now_us >= last_us && now_us - last_us >= SD_LOG_CLOCK_RESTATE_US);
 }
 
 }  // namespace sd_logger
