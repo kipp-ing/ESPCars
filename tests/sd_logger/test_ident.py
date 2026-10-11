@@ -42,3 +42,16 @@ def test_i4_identity_is_captured_once_and_the_card_per_mount() -> None:
     header = _body("write_file_header_")
     for call in ("esp_efuse_mac_get_default", "esp_app_get_elf_sha256", "get_config_hash", "snprintf"):
         assert call not in header, call
+
+
+def test_i2_mac_and_elf_come_from_sources_that_are_right_on_every_variant() -> None:
+    """Field test 2026-10-11 on an ESP32-C6: `esp_efuse_mac_get_default()` is the 8-byte EUI-64 on
+    chips with IEEE 802.15.4 (C6, H2), so the line named `ff:fe` as part of the MAC; and
+    `esp_app_get_elf_sha256()` is cut to CONFIG_APP_RETRIEVE_LEN_ELF_SHA (default 9) digits."""
+    capture = _body("capture_ident_")
+    assert "get_mac_address_raw(mac);" in capture
+    assert "ident_set_mac(this->ident_, mac);" in capture
+    assert "esp_app_get_description()" in capture and "app_elf_sha256" in capture
+    code = re.sub(r"//[^\n]*", "", SOURCE.read_text(encoding="utf-8"))
+    for call in ("esp_efuse_mac_get_default", "esp_app_get_elf_sha256", "esp_read_mac"):
+        assert not re.search(rf"\b{call}\s*\(", code), call

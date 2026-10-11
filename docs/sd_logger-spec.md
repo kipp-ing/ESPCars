@@ -770,11 +770,11 @@ eras apart on a card that holds both, without sniffing.
   | key | value | source on the device |
   |---|---|---|
   | `id` | the ESPHome node name (escaped, `,`→`_`) | `App.get_name()` |
-  | `mac` | the chip's factory base MAC, lowercase `aa:bb:cc:dd:ee:ff` | `esp_efuse_mac_get_default()` (eFuse) |
+  | `mac` | the device's MAC-48 (six octets), lowercase `aa:bb:cc:dd:ee:ff` — the MAC ESPHome logs as WiFi `Local MAC` | `get_mac_address_raw()` (ESPHome). **Not** `esp_efuse_mac_get_default()`: on chips with IEEE 802.15.4 (ESP32-C6, -H2) that returns the 8-byte EUI-64 (`aa:bb:cc:ff:fe:dd:ee:ff`), whose first six bytes are not the MAC |
   | `date` | wall clock at file open, UTC, whole seconds, `YYYY-MM-DDTHH:MM:SSZ`; `-` when there is no statement at all | the same `ClockPoint` the header's `#clock` line states |
   | `clock` | `<basis>/<src>` of that date (`utc/sync`, `utc/warm`, `drift/sleep`, `est/card`, `est/build`); `none` with `date=-` | as `#clock` (clock spec §3) |
   | `build` | firmware build time, UTC, same spelling as `date`; `-` if unknown | `App.get_build_time()` |
-  | `elf` | first 16 hex digits of the app ELF SHA-256, lowercase; `-` if unknown | `esp_app_get_elf_sha256()` — the digits the boot log prints as `ELF file SHA256` |
+  | `elf` | first 16 hex digits of the app ELF SHA-256, lowercase; `-` if unknown | `esp_app_get_description()->app_elf_sha256` (the binary digest). The boot log's `ELF file SHA256` shows a shorter prefix of it. **Not** `esp_app_get_elf_sha256()`: IDF cuts that string to `CONFIG_APP_RETRIEVE_LEN_ELF_SHA` digits (default 9) whatever buffer it is given |
   | `cfg` | ESPHome config hash, 8 lowercase hex digits | `App.get_config_hash()` |
   | `project` | `<name>@<version>` (escaped), **only** when `esphome: project:` is set | `ESPHOME_PROJECT_NAME` / `ESPHOME_PROJECT_VERSION` |
   | `card` | `<MID>-<OID>-<PSN>` from the card's CID, lowercase hex (2/4/8 digits), **only** when the card reported one | `sdmmc_card_t::cid`, captured at mount |
@@ -808,7 +808,7 @@ eras apart on a card that holds both, without sniffing.
   | ID | requirement | test |
   |---|---|---|
   | I1 | Every file the writer opens — the first after boot (a wake from deep sleep is a boot), every rotation, every file after a recovery remount — carries exactly one `#ident` line, directly after `#sdlog`. It does not depend on config: `id`, `mac`, `date`, `clock`, `build`, `elf` and `cfg` are always there (`-`/`none` when unknown). | host: `ident_*` golden lines; source test `tests/sd_logger/test_ident.py` (the header writer emits it unconditionally, right after `#sdlog`); HIL: `sdlog.py check` on a card after a boot, a rotation and a deep-sleep wake shows an `ident` line for every file |
-  | I2 | Field order and spelling exactly as in the table; the untrusted strings (`id`, `project`) go through the F1e escape pass with `,`→`_`; an over-long line is cut with `~` like every other line and stays terminated. | host: golden lines, escaping, truncation |
+  | I2 | Field order and spelling exactly as in the table; the untrusted strings (`id`, `project`) go through the F1e escape pass with `,`→`_`; an over-long line is cut with `~` like every other line and stays terminated. `mac` is the six-byte MAC-48 and equals `Local MAC`; `elf` has 16 digits. Both were wrong in the first field test (2026-10-11, ESP32-C6: `mac=20:6e:f1:ff:fe:0a` from the EUI-64, `elf=` 9 digits). | host: golden lines, escaping, truncation, `ident_i2_mac_is_the_six_byte_mac_48`, `ident_i2_elf_is_sixteen_digits_of_the_binary_digest`; source test: the MAC and digest sources (`test_ident.py`); HIL (with I1): `dump_config`'s `ident: mac=` equals the WiFi `Local MAC` |
   | I3 | `date`/`clock` are the header's `#clock` statement at file-open time, rounded down to whole seconds; `est` stays `est`. No statement → `date=-,clock=none`. | host: a golden line per basis; epoch, leap-day and year-end dates |
   | I4 | Cheap: MAC, ELF digest, config hash, build time and project are captured once in `setup()`, the CID once per mount; the line is built without heap and without `snprintf`. | review; `esphome compile` of `tests/build/sd_logger/*` |
   | I5 | Readers: `parse_file` exposes it (`Report.idents`) and `sdlog.py check` prints it (`ident` line); a file without `#ident` (written before 2026-10-11) reads exactly as before; unknown keys are kept, not refused; a field without `=` is a malformed line. | `tests/sd_logger/test_sdlog_reader.py` |

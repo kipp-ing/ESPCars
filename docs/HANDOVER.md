@@ -35,8 +35,11 @@ spec's H1–H8 (`docs/sd_logger-clock-spec.md` §7 — boot basis, SNTP, warm re
 deep sleep drift, card floor, resync correction, reset matrix, then `verify.py`
 exit 0), and #9's I1 riding along — `sdlog.py check` after a boot, a rotation
 and a deep-sleep wake shows an `ident` line for every file, its `mac`/`elf`
-matching `dump_config`'s `ident:` line. A field test on a car device started
-2026-10-11; it is evidence, not the bench run.
+matching `dump_config`'s `ident:` line, and that `mac` equal to the WiFi `Local
+MAC`. A field test on a car device started 2026-10-11; it is evidence, not the
+bench run. Its first finding is fixed on the branch: on the C6 `#ident` named the
+802.15.4 EUI-64's first six bytes as `mac` (`…:ff:fe:…`) and only 9 `elf`
+digits (spec F1j I2); re-check both on the next flash.
 
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real

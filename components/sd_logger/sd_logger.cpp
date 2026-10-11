@@ -6,6 +6,8 @@
 #include "esphome/core/version.h"
 // App.get_build_time(): the T4 floor of the clock spec — firmware cannot run before it was built.
 #include "esphome/core/application.h"
+// get_mac_address_raw(): `#ident`'s MAC, the same six bytes ESPHome logs as "Local MAC".
+#include "esphome/core/helpers.h"
 
 #include <cerrno>
 #include <cstdarg>
@@ -27,9 +29,8 @@ extern "C" {
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
-#include "esp_app_desc.h"   // esp_app_get_elf_sha256(), for `#ident`'s build digest
+#include "esp_app_desc.h"   // esp_app_get_description(), for `#ident`'s build digest
 #include "esp_attr.h"       // RTC_NOINIT_ATTR, for the clock state that must outlive a deep sleep
-#include "esp_mac.h"        // esp_efuse_mac_get_default(), for `#ident`'s factory MAC
 #include "esp_system.h"     // esp_reset_reason()
 #include "esp_heap_caps.h"  // heap_caps_get_free_size / heap_caps_get_largest_free_block, for MountFailureFacts
 #include "esp_timer.h"
@@ -1704,11 +1705,18 @@ void SdLogger::capture_ident_() {
   // Everything here is fixed for the life of the firmware, so it is read once and the header only
   // copies it. Borrowed strings: the node name lives in a static buffer, the project in flash.
   this->ident_.id = App.get_name().c_str();
-  this->ident_.has_mac = esp_efuse_mac_get_default(this->ident_.mac) == ESP_OK;
+  // ESPHome's device MAC, the one its log shows as "Local MAC": six bytes on every variant. Not
+  // esp_efuse_mac_get_default(), which is the 8-byte EUI-64 on 802.15.4 chips (see ident_set_mac).
+  uint8_t mac[6];
+  get_mac_address_raw(mac);
+  ident_set_mac(this->ident_, mac);
   const time_t built = App.get_build_time();
   this->ident_.build_s = built > 0 ? static_cast<uint64_t>(built) : 0;
-  // The size includes the terminator: 16 hex digits, the prefix the boot log's `ELF file SHA256` shows.
-  esp_app_get_elf_sha256(this->ident_.elf, sizeof(this->ident_.elf));
+  // From the binary digest in the app descriptor (flash), not esp_app_get_elf_sha256(), whose string
+  // IDF cuts to CONFIG_APP_RETRIEVE_LEN_ELF_SHA (default 9) digits (see ident_set_elf).
+  const esp_app_desc_t *app = esp_app_get_description();
+  ident_set_elf(this->ident_, app != nullptr ? app->app_elf_sha256 : nullptr,
+                app != nullptr ? sizeof(app->app_elf_sha256) : 0);
   this->ident_.cfg = App.get_config_hash();
   this->ident_.has_cfg = true;
 #ifdef ESPHOME_PROJECT_NAME

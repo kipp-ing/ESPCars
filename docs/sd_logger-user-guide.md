@@ -239,9 +239,10 @@ can move between devices. So the second line of every file says it
 #ident,id=logger-bench,mac=02:00:5e:10:20:30,date=2026-10-11T12:00:03Z,clock=utc/sync,build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234
 ```
 
-`id` is the ESPHome node name, `mac` the chip's factory MAC, `build`/`elf`/`cfg`
-the firmware's build time, ELF SHA-256 prefix and config hash (the same values
-the boot log prints, and `dump_config` shows as `ident:`). `project=` appears
+`id` is the ESPHome node name, `mac` the device MAC (the WiFi `Local MAC`),
+`build`/`elf`/`cfg` the firmware's build time, a 16-digit ELF SHA-256 prefix
+(the boot log shows the first digits of the same hash) and config hash;
+`dump_config` shows the same values as `ident:`. `project=` appears
 when `esphome: project:` is set, `card=` when the card reports a CID. `date`
 is the wall clock at file open and always comes with its `clock` basis — with
 `est/…` it is only a lower bound. `check` prints both as `ident` and `date`

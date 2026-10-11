@@ -18,7 +18,10 @@ using esphome::sd_logger::ClockPoint;
 using esphome::sd_logger::ClockSrc;
 using esphome::sd_logger::FileIdent;
 using esphome::sd_logger::format_ident;
+using esphome::sd_logger::ident_set_elf;
+using esphome::sd_logger::ident_set_mac;
 using esphome::sd_logger::LineWriter;
+using esphome::sd_logger::SD_LOG_IDENT_ELF_CHARS;
 using esphome::sd_logger::SD_LOG_MAX_LINE;
 using esphome::sd_logger::write_iso8601_utc;
 
@@ -177,4 +180,49 @@ TEST(ident_i2_an_overlong_line_is_marked_and_terminated) {
   const std::string tight = ident_line(full_ident(), at(OPEN_S, ClockBasis::UTC, ClockSrc::SYNC), 40);
   CHECK_EQ(tight.size(), static_cast<size_t>(40));
   CHECK_EQ(tight.substr(tight.size() - 2), std::string("~\n"));
+}
+
+// Field test 2026-10-11 (ESP32-C6): `esp_efuse_mac_get_default()` handed over the EUI-64
+// 20:6e:f1:ff:fe:0a:d0:f0 and the line spelled its first six bytes, 20:6e:f1:ff:fe:0a, while the
+// device's MAC is 20:6e:f1:0a:d0:f0. ident_set_mac takes exactly six bytes (an 8-byte array does not
+// compile against it); the device side passes get_mac_address_raw(), pinned by tests/sd_logger/test_ident.py.
+TEST(ident_i2_mac_is_the_six_byte_mac_48) {
+  FileIdent ident;
+  ident.id = "n";
+  const uint8_t mac[6] = {0x20, 0x6E, 0xF1, 0x0A, 0xD0, 0xF0};
+  ident_set_mac(ident, mac);
+  CHECK(ident.has_mac);
+  CHECK_EQ(ident_line(ident, ClockPoint{}),
+           std::string("#ident,id=n,mac=20:6e:f1:0a:d0:f0,date=-,clock=none,build=-,elf=-,cfg=-\n"));
+
+  // All zeros is ESPHome's "could not read one": unknown, not a MAC.
+  const uint8_t none[6] = {};
+  ident_set_mac(ident, none);
+  CHECK(!ident.has_mac);
+  CHECK_EQ(ident_line(ident, ClockPoint{}),
+           std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=-,cfg=-\n"));
+}
+
+// Same field test: `elf=f81b322c5`, nine digits, because esp_app_get_elf_sha256() copies from a RAM
+// string cut to CONFIG_APP_RETRIEVE_LEN_ELF_SHA (default 9). The line takes 16 from the binary digest.
+TEST(ident_i2_elf_is_sixteen_digits_of_the_binary_digest) {
+  uint8_t digest[32];
+  for (size_t i = 0; i < sizeof(digest); i++)
+    digest[i] = static_cast<uint8_t>(0xF8 - i * 0x11);
+  FileIdent ident;
+  ident.id = "n";
+  ident_set_elf(ident, digest, sizeof(digest));
+  CHECK_EQ(std::string(ident.elf), std::string("f8e7d6c5b4a39281"));
+  CHECK_EQ(std::strlen(ident.elf), SD_LOG_IDENT_ELF_CHARS);
+  CHECK_EQ(ident_line(ident, ClockPoint{}),
+           std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=f8e7d6c5b4a39281,cfg=-\n"));
+
+  // Leading zero nibbles are kept; a short digest gives what it has; none gives `-`.
+  const uint8_t zeros[2] = {0x00, 0x0A};
+  ident_set_elf(ident, zeros, sizeof(zeros));
+  CHECK_EQ(std::string(ident.elf), std::string("000a"));
+  ident_set_elf(ident, nullptr, 32);
+  CHECK_EQ(std::string(ident.elf), std::string(""));
+  CHECK_EQ(ident_line(ident, ClockPoint{}),
+           std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=-,cfg=-\n"));
 }

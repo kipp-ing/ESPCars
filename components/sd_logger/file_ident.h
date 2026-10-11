@@ -18,8 +18,8 @@
 namespace esphome {
 namespace sd_logger {
 
-/// Hex digits of the ELF SHA-256 the line carries. 64 bits: enough to tell any two builds apart, and
-/// the prefix a human compares against the boot log's `ELF file SHA256` line.
+/// Hex digits of the ELF SHA-256 the line carries. 64 bits: enough to tell any two builds apart. The
+/// boot log's `ELF file SHA256` line shows a shorter prefix of the same digest (9 digits by default).
 static const size_t SD_LOG_IDENT_ELF_CHARS = 16;
 
 /// What `#ident` states. Captured once (MAC, build, ELF, config hash, project in `setup()`; the CID
@@ -40,6 +40,9 @@ struct FileIdent {
   uint16_t card_oid{0};
   uint32_t card_psn{0};
 };
+
+// The line spells exactly six octets. An EUI-64 has no place in it (see `ident_set_mac`).
+static_assert(sizeof(FileIdent::mac) == 6, "#ident's mac is a MAC-48");
 
 namespace ident_detail {
 
@@ -66,6 +69,34 @@ inline void dec_fixed(LineWriter &w, uint64_t v, unsigned digits) {
 }
 
 }  // namespace ident_detail
+
+/// `mac`: the 6-byte MAC-48 ESPHome reports as the device's (`get_mac_address_raw()`, the WiFi
+/// "Local MAC"). The array reference is the point: an 8-byte buffer cannot bind to it. On chips with
+/// IEEE 802.15.4 (ESP32-C6, -H2) `esp_efuse_mac_get_default()` returns the EUI-64 — the MAC-48 with
+/// `ff:fe` inserted after the OUI — so its first six bytes are `aa:bb:cc:ff:fe:dd`, not the MAC, and
+/// the two extra bytes land past a 6-byte buffer (field test, 2026-10-11). All zeros is ESPHome's
+/// "could not read one" and writes `mac=-`.
+inline void ident_set_mac(FileIdent &ident, const uint8_t (&mac)[6]) {
+  bool any = false;
+  for (size_t i = 0; i < 6; i++) {
+    ident.mac[i] = mac[i];
+    any = any || mac[i] != 0;
+  }
+  ident.has_mac = any;
+}
+
+/// `elf`: the first SD_LOG_IDENT_ELF_CHARS hex digits of the binary ELF SHA-256 (the app
+/// descriptor's `app_elf_sha256`). Not `esp_app_get_elf_sha256()`: that copies from a RAM string IDF
+/// cuts to CONFIG_APP_RETRIEVE_LEN_ELF_SHA characters (default 9), whatever buffer it is given — which
+/// is how the field test saw `elf=f81b322c5`. `nullptr` or no bytes writes `elf=-`.
+inline void ident_set_elf(FileIdent &ident, const uint8_t *digest, size_t len) {
+  size_t n = 0;
+  for (size_t i = 0; digest != nullptr && i < len && n + 2 <= SD_LOG_IDENT_ELF_CHARS; i++) {
+    ident.elf[n++] = ident_detail::LOWER_HEX[digest[i] >> 4];
+    ident.elf[n++] = ident_detail::LOWER_HEX[digest[i] & 0xF];
+  }
+  ident.elf[n] = '\0';
+}
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for UTC seconds since the epoch. Days to civil date by Howard Hinnant's
 /// `civil_from_days` (http://howardhinnant.github.io/date_algorithms.html#civil_from_days),
