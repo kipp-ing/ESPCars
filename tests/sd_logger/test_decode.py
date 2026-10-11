@@ -338,6 +338,17 @@ def test_a_signal_that_does_not_fit_spares_the_rest_of_the_dbc(setup) -> None:
     assert "DEMO_PACK.PackVoltage" in got
 
 
+def test_decode_failures_are_counted_per_frame(setup) -> None:
+    """D4a counts failed frames, not distinct payloads: the decode cache must not hide repeats."""
+    archive, dbc, config = setup
+    dbc.write_text(dbc.read_text().replace(' SG_ Gear : 24|4@1+', ' SG_ Broken : 60|16@1+ (1,0) [0|1] "" Vector__XXX\n SG_ Gear : 24|4@1+'))
+    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:5], "C1,10,100,E803F60300000000", "#close,@2000,rotate"])
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    (marker,) = sink.tables["chunks"]
+    assert marker["detail"] == "2 frames failed to decode"
+
+
 def test_an_unloadable_dbc_exits_two(setup, capsys) -> None:
     _, dbc, config = setup
     dbc.write_text("this is not a DBC {")

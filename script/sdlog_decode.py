@@ -203,7 +203,8 @@ class Decoder:
                 )
             except Exception as err:  # noqa: BLE001 - cantools raises several types
                 raise ConfigError(f"device {device.name!r}: DBC for {label!r} does not load: {err}") from None
-        self._cache: dict[tuple[str, int, bool, str], tuple[bool, list[tuple[str, float]]]] = {}
+        # (matched, signals, failed): a failed decode is cached too, and counted per frame (D4a)
+        self._cache: dict[tuple[str, int, bool, str], tuple[bool, list[tuple[str, float]], bool]] = {}
         self.errors = 0
 
     def reset_cache(self) -> None:
@@ -218,8 +219,10 @@ class Decoder:
         key = (label, can_id, extended, data_hex)
         hit = self._cache.get(key)
         if hit is not None:
-            return hit
+            self.errors += hit[2]
+            return hit[0], hit[1]
         out: list[tuple[str, float]] = []
+        failed = False
         try:
             message = db.get_message_by_frame_id(can_id)
         except KeyError:
@@ -232,8 +235,9 @@ class Decoder:
                 )
                 out = [(f"{message.name}.{name}", float(value)) for name, value in values.items()]
             except Exception:  # noqa: BLE001 - one undecodable frame must not stop the chunk
+                failed = True
                 self.errors += 1
-        self._cache[key] = (matched, out)
+        self._cache[key] = (matched, out, failed)
         return matched, out
 
 
