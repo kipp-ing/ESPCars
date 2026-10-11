@@ -10,8 +10,10 @@
 #endif
 
 #include "card_reset.h"
+#include "clock_basis.h"
 #include "collection_policy.h"
 #include "collection_server.h"
+#include "file_ident.h"
 #include "log_format.h"
 #include "log_record.h"
 #include "recovery_policy.h"
@@ -25,6 +27,7 @@
 #endif
 
 #include <atomic>
+#include <new>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -233,6 +236,11 @@ class SdLogger : public Component {
   // correspondence here; the writer task owns block_ and emits the #utc line on
   // its next notified pass, so this callback never races the card write path.
   void set_utc_anchor(uint64_t utc_us, uint64_t boot_us_at_sync);
+  // What a `time_id:` clock's on_time_sync calls: samples gettimeofday() (µs, C7) next to
+  // esp_timer and hands the pair to set_utc_anchor().
+  void on_time_sync();
+  // Lifetime count of syncs that landed before the card floor (clock spec C8).
+  uint32_t get_clock_back() const { return clock_back_.load(std::memory_order_relaxed); }
 
   // Producer entry point. Non-blocking and safe to call from any task context
   // (guarded by a short critical section); returns false and counts a drop when
@@ -549,9 +557,18 @@ class SdLogger : public Component {
   // which is only ever correct as the last write of a file.
   bool flush_block_(bool all);
   void sync_file_();
-  // Header block: #sdlog, one #src per declared source, #types, #flags, #pad.
+  // Header block: #sdlog, #ident, one #src per declared source, #types, #flags, #pad.
   void write_file_header_();
+  // `#ident` (spec F1j): node name, MAC, build, ELF digest, config hash, project — once, in setup().
+  void capture_ident_();
+  // The card half of `#ident`: the CID of the card just mounted, or none.
+  void capture_card_ident_();
   void write_utc_marker_();
+  // `#clock` (docs/sd_logger-clock-spec.md): the current best clock restated at `now64`.
+  void write_clock_line_(uint64_t now64);
+  // Once per boot, before the first file opens: read the card's newest tail, decide the boot clock.
+  void learn_clock_();
+  bool read_card_clock_end_(ClockPoint *end, uint32_t *seq_out);
   // `#drop` markers, emitted only when a counter actually moves (spec D4/F1d).
   void write_drop_markers_(uint64_t now64);
 
@@ -627,6 +644,9 @@ class SdLogger : public Component {
 
   // Configured identity, paid once in each header rather than on every record.
   std::string origin_;
+  // What `#ident` states (spec F1j). Captured once, so a header costs no lookups. Written by setup()
+  // and by mount_card_(), read by write_file_header_() — all on the task that owns the card.
+  FileIdent ident_;
 
   // A sync callback runs outside the writer task. This tiny critical section
   // publishes its two 64-bit values as one pair; record formatting never takes it.
@@ -634,6 +654,18 @@ class SdLogger : public Component {
   UtcAnchor utc_anchor_;
   uint32_t utc_generation_{0};
   uint32_t utc_emitted_generation_{0};
+  // Under utc_mux_ as well: the best clock the header states, and the T3/T4 floor kept for C8.
+  ClockPoint clock_best_;
+  ClockPoint clock_floor_;
+  // Main loop only (setup() and the time-sync callback): the system clock as setup() found it, so
+  // a callback that finds it unchanged is not taken for a sync (clock spec C12).
+  SysClockSample setup_clock_;
+  uint32_t clock_unstepped_syncs_{0};
+  std::atomic<uint32_t> clock_back_{0};
+  // Writer-task only: the restatement cadence (clock spec §4), and whether learn_clock_() has run.
+  uint32_t clock_bytes_since_{0};
+  uint64_t clock_last_us_{0};
+  bool clock_learned_{false};
 
   // The stamp column's delta chain (spec §6 F1h). Writer-task only, like `block_`, and reset by
   // write_file_header_() so every sealed chunk decodes without the chunks before it.

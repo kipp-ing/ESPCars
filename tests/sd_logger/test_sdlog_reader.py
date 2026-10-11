@@ -867,3 +867,245 @@ def test_head_prints_only_the_header_block(tmp_path: Path, capsys) -> None:
     path = write_log(tmp_path, HEADER + ["#pad,   "] + RECORDS + ["#close,@1,clean"])
     assert sdlog.main(["head", str(path)]) == 0
     assert capsys.readouterr().out.strip().split("\n") == HEADER
+
+
+# ------------------------------------------------------------- #clock (clock spec C10)
+#
+# The `#clock` lines below are the golden lines of tests/host/test_clock_basis.cpp's
+# shape case, so the writer's formatter and this reader stay pinned to each other.
+
+
+def clock_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.startswith(("clock", "correction", "CLOCK"))]
+
+
+def test_clock_lines_parse_and_refuse_like_the_writer() -> None:
+    point = sdlog.parse_clock_line("#clock,@0,ABC,est,card,41")
+    assert (point.t_us, point.utc_us, point.basis, point.src, point.detail) == (0, 0xABC, "est", "card", 41)
+    assert sdlog.parse_clock_line("#clock,@1F4,ABC,drift,sleep,600").detail == 600
+    assert sdlog.parse_clock_line("#clock,@64960,65E2B1A3C4000,utc,sync").detail is None
+    for bad in (
+        "#clock,64960,ABC,utc,sync",  # stamp not anchor-marked
+        "#clock,@64960,abc,utc,sync",  # lowercase hex
+        "#clock,@64960,ABC,utc,card,4",  # a card floor is never a reading
+        "#clock,@64960,ABC,utc,sync,4",  # detail on a source that has none
+        "#clock,@64960,ABC,est,card",  # a card floor always names its file
+        "#clock,@64960,ABC,utc",  # a field too few
+    ):
+        with pytest.raises(ValueError):
+            sdlog.parse_clock_line(bad)
+
+
+def test_check_reports_an_estimate_and_what_the_first_reading_corrected(tmp_path: Path, capsys) -> None:
+    """A cold boot states the card floor; the sync at home says how much time the floor
+    could not see. 3 s here — on a car, the time it stood with the battery off."""
+    lines = check_lines(
+        tmp_path,
+        HEADER
+        + [
+            "#clock,@0,F4240,est,card,41",  # at least 1.000000 s at boot µs 0
+            "C1x,@100,1A2,00",
+            "#utc,1F4,3D0AF4",  # boot 500 µs reads 4.000500 s: 3 s past the floor
+            "#clock,@1F4,3D0AF4,utc,sync",
+            "#close,@200,clean",
+        ],
+        capsys,
+    )
+    assert clock_lines(lines) == [
+        "clock est/card:41 -> utc/sync, opened 1970-01-01T00:00:01.000000Z (at least)",
+        "correction +3.000 s against est/card:41 (time the floor could not see: power off, or a clock not yet synced)",
+    ]
+
+
+def test_check_turns_a_sleep_correction_into_a_drift_rate(tmp_path: Path, capsys) -> None:
+    """The number §3 of the clock spec has no datasheet figure for: what the RC slow
+    clock gained or lost per day of deep sleep, measured by the next real sync."""
+    lines = check_lines(
+        tmp_path,
+        HEADER
+        + [
+            "#clock,@0,5F5E100,drift,sleep,600",  # 100 s at boot 0, after 600 s asleep
+            "#clock,@1F4,4786AB4,utc,sync",  # the reading: 25 s behind the sleep clock
+            "#close,@200,clean",
+        ],
+        capsys,
+    )
+    assert clock_lines(lines)[1] == "correction -25.000 s against drift/sleep:600 (-3600.0 s per day slept)"
+
+
+def test_check_shouts_when_a_reading_lands_below_the_floor(tmp_path: Path, capsys) -> None:
+    """C8: accepted (the reading wins), but never silent — and not a parse defect."""
+    path = write_log(
+        tmp_path,
+        # floor 10 s at boot 0; the reading at boot 500 µs says 500 µs: 10 s below it, far past the
+        # 2 s slack. One second below would be inside the slack and not a finding.
+        HEADER + ["#clock,@0,989680,est,build", "#clock,@1F4,1F4,utc,sync", "#close,@200,clean"],
+    )
+    assert sdlog.main(["check", str(path)]) == 0
+    lines = [" ".join(line.split()) for line in capsys.readouterr().out.splitlines()]
+    assert any(line.startswith("CLOCK a reading landed +10.000 s before the lower bound") for line in lines)
+
+
+def test_a_worse_statement_never_overrides_a_reading() -> None:
+    clock = sdlog.ClockState()
+    clock.offer(sdlog.ClockPoint(0, 5_000_000, "utc", "sync"), True)
+    clock.offer(sdlog.ClockPoint(100, 1_000_000, "est", "card", 3), True)
+    assert clock.resolve(1000) == (5_001_000, "utc")
+    assert clock.corrections == []
+
+
+def test_check_prints_a_plain_reading_without_an_opening_bound(tmp_path: Path, capsys) -> None:
+    lines = check_lines(
+        tmp_path, HEADER + ["#utc,64960,65E2B1A3C4000", "#clock,@64960,65E2B1A3C4000,utc,sync", "#close,@1,clean"], capsys
+    )
+    assert clock_lines(lines) == ["clock utc/sync"]
+
+
+def test_extract_estimates_is_opt_in_and_keeps_utc_us_for_readings(tmp_path: Path, capsys) -> None:
+    path = write_log(
+        tmp_path,
+        HEADER
+        + [
+            "C1x,@100,1A2,00",  # no statement yet
+            "#clock,@0,F4240,est,build",
+            "C1x,10,1A2,01",  # boot 272: at least 1.000272 s
+            "#utc,120,1E8480",
+            "#clock,@120,1E8480,utc,sync",
+            "C1x,10,1A2,02",  # boot 288: read 2.000000 s
+            "#close,@1,clean",
+        ],
+    )
+    assert sdlog.main(["extract", str(path), "--type", "C", "--estimates"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "t_us,label,id_hex,flags,dlc,data_hex,utc_us,utc_best_us,utc_basis",
+        "256,C1,1A2,x,1,00,,,",
+        "272,C1,1A2,x,1,01,,1000272,est",
+        "288,C1,1A2,x,1,02,2000000,2000000,utc",
+    ]
+    # Without the flag the columns are what every consumer already parses.
+    assert sdlog.main(["extract", str(path), "--type", "C", "--no-header"]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == "272,C1,1A2,x,1,01,"
+
+
+# ------------------------------------------------------------- #ident (spec §6 F1j, I5)
+#
+# IDENT is the golden line of tests/host/test_file_ident.cpp's
+# `ident_i2_full_line_is_the_documented_one` — fictional values throughout.
+IDENT = (
+    "#ident,id=logger-bench,mac=02:00:5e:10:20:30,date=2026-10-11T12:00:03Z,clock=utc/sync,"
+    "build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234,project=acme.logger@1.2.0,"
+    "card=03-5344-0badcafe"
+)
+
+
+def ident_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.startswith(("ident", "date"))]
+
+
+def test_ident_is_parsed_into_its_keys(tmp_path: Path) -> None:
+    report = parse(tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@F3ED0,clean"])
+    assert report.clean
+    assert len(report.idents) == 1
+    ident = report.idents[0]
+    assert ident.fields == {
+        "id": "logger-bench",
+        "mac": "02:00:5e:10:20:30",
+        "date": "2026-10-11T12:00:03Z",
+        "clock": "utc/sync",
+        "build": "2026-10-04T09:12:33Z",
+        "elf": "1a2b3c4d5e6f7a8b",
+        "cfg": "5eed1234",
+        "project": "acme.logger@1.2.0",
+        "card": "03-5344-0badcafe",
+    }
+    # The records around it are untouched: `#ident` is outside the stamp chain like every meta line.
+    assert report.counts == {"C": 2, "X": 1, "L": 1}
+
+
+def test_check_prints_the_identity_and_the_date_with_its_basis(tmp_path: Path, capsys) -> None:
+    lines = check_lines(tmp_path, [HEADER[0], IDENT, *HEADER[1:], "#close,@1,clean"], capsys)
+    assert ident_lines(lines) == [
+        "ident logger-bench mac=02:00:5e:10:20:30 build=2026-10-04T09:12:33Z elf=1a2b3c4d5e6f7a8b"
+        " cfg=5eed1234 project=acme.logger@1.2.0 card=03-5344-0badcafe",
+        "date 2026-10-11T12:00:03Z (utc/sync)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("date", "clock", "shown"),
+    [
+        (
+            "2026-10-11T12:00:03Z",
+            "est/card",
+            "date 2026-10-11T12:00:03Z at least (est/card: a lower bound, not a reading)",
+        ),
+        (
+            "2026-10-04T09:12:33Z",
+            "est/build",
+            "date 2026-10-04T09:12:33Z at least (est/build: a lower bound, not a reading)",
+        ),
+        (
+            "2026-10-11T12:00:03Z",
+            "drift/sleep",
+            "date 2026-10-11T12:00:03Z (drift/sleep: ran through deep sleep, may be minutes off)",
+        ),
+        ("2026-10-11T12:00:03Z", "utc/warm", "date 2026-10-11T12:00:03Z (utc/warm)"),
+        ("-", "none", "date unknown (no clock statement)"),
+    ],
+)
+def test_an_estimated_date_never_reads_as_a_reading(
+    tmp_path: Path, capsys, date: str, clock: str, shown: str
+) -> None:
+    line = f"#ident,id=n,mac=-,date={date},clock={clock},build=-,elf=-,cfg=-"
+    lines = check_lines(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys)
+    assert ident_lines(lines) == ["ident n mac=- build=- elf=- cfg=-", shown]
+
+
+def test_a_file_without_ident_reads_exactly_as_before(tmp_path: Path, capsys) -> None:
+    """Every card written before 2026-10-11: no `#ident`, no `ident` line, no defect."""
+    report = parse(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
+    assert report.clean
+    assert report.idents == []
+    assert ident_lines(check_lines(tmp_path, HEADER + RECORDS + ["#close,@1,clean"], capsys)) == []
+
+
+def test_an_unknown_ident_key_is_kept_not_refused(tmp_path: Path, capsys) -> None:
+    line = IDENT + ",boot=deadbeef,note=a=b"
+    report = parse(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"])
+    assert report.clean
+    assert report.idents[0].get("boot") == "deadbeef"
+    assert report.idents[0].get("note") == "a=b"  # a value may itself contain `=`
+    lines = check_lines(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys)
+    assert ident_lines(lines)[0].endswith(" card=03-5344-0badcafe boot=deadbeef note=a=b")
+
+
+def test_each_header_of_an_appended_file_keeps_its_own_ident(tmp_path: Path) -> None:
+    second = IDENT.replace("elf=1a2b3c4d5e6f7a8b", "elf=8b7a6f5e4d3c2b1a")
+    report = parse(tmp_path, [HEADER[0], IDENT, *HEADER[1:], HEADER[0], second, "#close,@1,clean"])
+    assert [ident.get("elf") for ident in report.idents] == ["1a2b3c4d5e6f7a8b", "8b7a6f5e4d3c2b1a"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "#ident",  # no fields at all
+        "#ident,id=n,mac",  # a field without `=`
+        "#ident,id=n,=x",  # an empty key
+        "#ident,id=n,id=m",  # a key twice
+    ],
+)
+def test_a_malformed_ident_line_is_a_defect(tmp_path: Path, line: str) -> None:
+    report = parse(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"])
+    assert not report.clean
+    assert len(report.bad_lines) == 1
+
+
+def test_extract_and_head_pass_ident_through_untouched(tmp_path: Path, capsys) -> None:
+    path = write_log(tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@1,clean"])
+    assert sdlog.main(["extract", str(path), "--type", "C", "--no-header"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "412345,C1,1A2,x,8,0011223344556677,",
+        "412388,C2,1A2,xs,8,0011223344556677,",
+    ]
+    assert sdlog.main(["head", str(path)]) == 0
+    assert capsys.readouterr().out.splitlines()[:2] == [HEADER[0], IDENT]

@@ -23,6 +23,31 @@ still hit 19.4 laps/s), then a bench case for the new path — a rule with
 recompute, and `set_signal` toggling pass-through. The ISR change is confined to
 rules that declare `e2e` (8-byte copy + ≤8-byte bitwise CRC-8).
 
+**1.0a PR #8 (`sd_logger` `#clock` time basis, with PR #9's `#ident` merged
+into it) goes to main without any hardware run** — main (27abe14, new
+since the branch point: #10 sdlog_decode) merged into the branch, `StreamReader` now
+carries the opt-in `--estimates` clock and `sdlog_decode` was shown to read
+`#clock`/`#ident` files unchanged (`test_ident_and_clock_lines_change_no_frame`).
+`check.sh` (1108 pytest, 542 host cases, clang-format, config) and `esphome
+compile` of `tests/build/sd_logger/test.esp32-c6-idf.yaml` were green; nothing
+ran on a board. Owed, on Orange with `tests/hil/clock-orange.yaml`: the clock
+spec's H1–H8 (`docs/sd_logger-clock-spec.md` §7 — boot basis, SNTP, warm reset,
+deep sleep drift, card floor, resync correction, reset matrix, then `verify.py`
+exit 0), and #9's I1 riding along — `sdlog.py check` after a boot, a rotation
+and a deep-sleep wake shows an `ident` line for every file, its `mac`/`elf`
+matching `dump_config`'s `ident:` line, and that `mac` equal to the WiFi `Local
+MAC`. A field test on a car device started 2026-10-11; it is evidence, not the
+bench run. Its first finding is fixed on the branch: on the C6 `#ident` named the
+802.15.4 EUI-64's first six bytes as `mac` (`…:ff:fe:…`) and only 9 `elf`
+digits (spec F1j I2); re-check both on the next flash. Its second finding is
+fixed too: ESPHome's sntp fires `on_time_sync` from its first `loop()` whenever
+the clock is already valid, so every warm reset and every wake was relabelled
+`utc/sync` 0.37 s after boot (clock spec C12 now requires the clock to have
+moved); on the next flash a warm restart must stay `utc/warm` and a wake
+`drift/sleep` until SNTP really syncs. Unconfirmed, one run: that C6's RC sleep
+clock was ~12.8 s off after ~15 min of deep sleep (~1 %); the fixed image
+measures it as `drift` + correction.
+
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real
 device attached to the bench for testing transmits in the same range at

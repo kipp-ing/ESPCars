@@ -92,11 +92,25 @@ THE LINE (spec §6 F1a/F1h)
     `#drop` times, extracted CSV — is in absolute decimal µs. When present,
     `#utc` adds a second UTC axis rather than replacing that one.
 
+    `#clock,@<t>,<utc_hex>,<basis>,<src>[,<detail>]` (docs/sd_logger-clock-spec.md)
+    states the file's wall clock and what it is worth: `utc` a reading, `drift` a
+    reading that ran through deep sleep, `est` a lower bound. `check` prints it and,
+    when a reading follows a worse statement, how far that statement was off.
+    `extract` keeps `utc_us` for readings (`#utc`) only; `--estimates` appends
+    `utc_best_us,utc_basis` from the best statement in scope.
+
+    `#ident,id=…,mac=…,date=…,clock=…,build=…,elf=…,cfg=…[,project=…][,card=…]`
+    (spec §6 F1j) names the device, the build and the date a file was written
+    with, because a chunk name does not: `seq` is per card. `check` prints it;
+    `date` is shown with its `clock` basis, so an `est` date reads as the lower
+    bound it is. Files written before it existed simply have none.
+
 Usage:
     script/sdlog.py check   L0000007.LOG [...]      # verdict per file, exit 1 on a defect
     script/sdlog.py check   /Volumes/SD/*.LOG       # a whole card
     script/sdlog.py extract L0000007.LOG --type C   # one type as a plain CSV
     script/sdlog.py extract L0000007.LOG --type C --label seg1 --shed
+    script/sdlog.py extract L0000007.LOG --type C --estimates   # + best-known UTC
     script/sdlog.py head    L0000007.LOG            # just the #src/#types header
 
 Exit status: 0 clean, 1 a defect was found (malformed line, or a `#drop`/`#gap`
@@ -163,6 +177,52 @@ class Source:
 
 
 @dataclass
+class Ident:
+    """One `#ident` line (spec §6 F1j): key=value pairs, in the writer's order.
+
+    Kept as a mapping rather than fixed attributes so a key added by a newer writer
+    is carried along instead of refused — the line is extensible by design."""
+
+    fields: dict[str, str]
+
+    def get(self, key: str) -> str | None:
+        return self.fields.get(key)
+
+    @property
+    def date_label(self) -> str:
+        """`date` together with what it is worth. The writer never separates them, and
+        neither does this: an `est` date printed bare would read as a reading."""
+        date = self.fields.get("date", "-")
+        clock = self.fields.get("clock", "none")
+        if date == "-" or clock == "none":
+            return "unknown (no clock statement)"
+        basis = clock.split("/", 1)[0]
+        if basis == "est":
+            return f"{date} at least ({clock}: a lower bound, not a reading)"
+        if basis == "drift":
+            return f"{date} ({clock}: ran through deep sleep, may be minutes off)"
+        return f"{date} ({clock})"
+
+
+def parse_ident_line(line: str) -> Ident:
+    """`#ident,k=v,…`. Every field must be `key=value` with a non-empty key; the
+    value may be empty and may itself contain `=`. A field without `=` is not
+    something the writer emits, so it is a malformed line, not a guess."""
+    fields = line.split(",")
+    if fields[0] != "#ident" or len(fields) < 2:
+        raise ValueError("#ident needs key=value fields")
+    parsed: dict[str, str] = {}
+    for item in fields[1:]:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"#ident field {item!r} is not key=value")
+        if key in parsed:
+            raise ValueError(f"#ident repeats key {key!r}")
+        parsed[key] = value
+    return Ident(parsed)
+
+
+@dataclass
 class Drop:
     t_us: int
     what: str
@@ -199,6 +259,100 @@ class UtcAnchor:
             delta = record_boot_us - self.boot_us
             return min((1 << 64) - 1, self.utc_us + delta)
         return max(0, self.utc_us - (self.boot_us - record_boot_us))
+
+
+CLOCK_BASES = {"utc": 3, "drift": 2, "est": 1}
+# The pairing is part of the format (clock_basis.h, parse_clock_line): a source only ever
+# comes with one basis, and only `card` and `sleep` carry a detail.
+CLOCK_SOURCES = {"sync": "utc", "warm": "utc", "sleep": "drift", "card": "est", "build": "est"}
+# Two clocks sampled a moment apart, one possibly whole-second: the writer's own slack.
+CLOCK_SLACK_US = 2_000_000
+
+
+@dataclass
+class ClockPoint:
+    """One `#clock` statement (docs/sd_logger-clock-spec.md §4): an anchor pair plus what it is
+    worth. `utc(b) = utc_us + (b - t_us)`; with `basis == "est"` that is a lower bound."""
+
+    t_us: int
+    utc_us: int
+    basis: str
+    src: str
+    detail: int | None = None
+
+    def resolve(self, boot_us: int) -> int:
+        return max(0, min((1 << 64) - 1, self.utc_us + (boot_us - self.t_us)))
+
+    @property
+    def label(self) -> str:
+        if self.detail is None:
+            return f"{self.basis}/{self.src}"
+        return f"{self.basis}/{self.src}:{self.detail}"
+
+
+@dataclass
+class ClockCorrection:
+    """A reading that arrived after a worse statement: how far that statement was off at the
+    moment of the reading. For `est` it is how long the device was really off, beyond what the
+    floor assumed; for `drift` it is what the RC slow clock gained or lost while asleep."""
+
+    t_us: int
+    was: ClockPoint
+    delta_us: int
+
+    @property
+    def backwards(self) -> bool:
+        """C8: a reading below a lower bound. Either the clock source is wrong or the floor was."""
+        return self.was.basis == "est" and self.delta_us < -CLOCK_SLACK_US
+
+
+def parse_clock_line(line: str) -> ClockPoint:
+    """Strict, like the writer's parser: anything `format_clock()` cannot produce is refused."""
+    fields = line.split(",")
+    if fields[0] != "#clock" or len(fields) not in (5, 6):
+        raise ValueError("#clock needs @t, utc_us, basis, src[, detail]")
+    t_us = _parse_abs_stamp(fields[1])
+    utc_us = _parse_u64_x(fields[2])
+    basis, src = fields[3], fields[4]
+    if basis not in CLOCK_BASES or CLOCK_SOURCES.get(src) != basis:
+        raise ValueError(f"#clock basis/src {basis}/{src} is not a pairing the writer emits")
+    detail = None
+    if len(fields) == 6:
+        if src not in ("card", "sleep"):
+            raise ValueError(f"#clock src {src} carries no detail")
+        detail = _parse_u(fields[5])
+    elif src == "card":
+        raise ValueError("#clock card floor without the seq it came from")
+    return ClockPoint(t_us, utc_us, basis, src, detail)
+
+
+class ClockState:
+    """The best clock statement in scope, by the spec's reading rule: a later line overrides an
+    earlier one of the same or a worse basis, never a better one. `#utc` counts as `utc/sync`, so
+    files written before `#clock` existed read exactly as they did."""
+
+    def __init__(self) -> None:
+        self.current: ClockPoint | None = None
+        self.first: ClockPoint | None = None
+        self.corrections: list[ClockCorrection] = []
+        self.lines = 0
+
+    def offer(self, point: ClockPoint, from_clock_line: bool) -> None:
+        if from_clock_line:
+            self.lines += 1
+            if self.first is None:
+                self.first = point
+        current = self.current
+        if current is not None and CLOCK_BASES[point.basis] < CLOCK_BASES[current.basis]:
+            return
+        if current is not None and point.basis == "utc" and current.basis != "utc":
+            self.corrections.append(ClockCorrection(point.t_us, current, point.utc_us - current.resolve(point.t_us)))
+        self.current = point
+
+    def resolve(self, boot_us: int) -> tuple[int, str] | None:
+        if self.current is None:
+            return None
+        return self.current.resolve(boot_us), self.current.basis
 
 
 @dataclass
@@ -255,6 +409,8 @@ class Report:
     first_utc_us: int | None = None
     last_utc_us: int | None = None
     origin: str | None = None
+    idents: list[Ident] = field(default_factory=list)
+    clock: ClockState = field(default_factory=ClockState)
     utc_anchor_count: int = 0
     total_lines: int = 0
     legacy: bool = False
@@ -590,6 +746,11 @@ def _parse_meta(report: Report, line: str, utc_anchor: UtcAnchor) -> None:
         # `_parse_abs_stamp()`: `@` belongs exclusively to the stamp column.
         utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
         report.utc_anchor_count += 1
+        report.clock.offer(ClockPoint(utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"), from_clock_line=False)
+    elif head == "#clock":
+        report.clock.offer(parse_clock_line(line), from_clock_line=True)
+    elif head == "#ident":
+        report.idents.append(parse_ident_line(line))
     elif head == "#origin":
         if len(fields) != 2:
             raise ValueError("#origin needs one string field")
@@ -648,6 +809,56 @@ def _utc_iso8601(utc_us: int) -> str:
     return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _seconds(us: int) -> str:
+    return f"{us / 1e6:+.3f} s"
+
+
+def _print_clock(clock: ClockState) -> None:
+    """The file's time basis (clock spec C10). Only for files that carry `#clock`: one written
+    before it existed keeps exactly the report it always had."""
+    if not clock.lines or clock.first is None or clock.current is None:
+        return
+    shown = clock.first.label
+    if clock.current.label != clock.first.label:
+        shown += f" -> {clock.current.label}"
+    if clock.first.src != "sync" or clock.current.basis != "utc":
+        start = _utc_iso8601(clock.first.resolve(clock.first.t_us))
+        bound = " (at least)" if clock.first.basis == "est" else ""
+        shown += f", opened {start}{bound}"
+    print(f"  clock  {shown}")
+    for corr in clock.corrections:
+        detail = f"  correction {_seconds(corr.delta_us)} against {corr.was.label}"
+        if corr.was.src == "sleep" and corr.was.detail:
+            per_day = corr.delta_us / 1e6 / corr.was.detail * 86400
+            detail += f" ({per_day:+.1f} s per day slept)"
+        elif corr.was.basis == "est" and not corr.backwards:
+            detail += " (time the floor could not see: power off, or a clock not yet synced)"
+        print(detail)
+        if corr.backwards:
+            print(
+                f"  CLOCK  a reading landed {_seconds(-corr.delta_us)} before the lower bound"
+                " — the clock source or the card floor is wrong"
+            )
+
+
+# The order `check` prints identity keys in; `date`/`clock` get their own line, and any key
+# a newer writer adds is shown after these rather than dropped.
+_IDENT_SHOWN = ("mac", "build", "elf", "cfg", "project", "card")
+
+
+def _print_idents(idents: list[Ident]) -> None:
+    """Which device and which build wrote the file, and when (spec F1j). One file
+    normally has one `#ident`; a file that was appended to by a later boot has one
+    per header, and each is shown — they may name different builds."""
+    for ident in idents:
+        shown = [ident.get("id") or "-"]
+        shown += [f"{key}={ident.get(key)}" for key in _IDENT_SHOWN if ident.get(key) is not None]
+        known = (*_IDENT_SHOWN, "id", "date", "clock")
+        shown += [f"{key}={value}" for key, value in ident.fields.items() if key not in known]
+        print(f"  ident  {' '.join(shown)}")
+        print(f"  date   {ident.date_label}")
+
+
 def print_report(report: Report, verbose: bool) -> None:
     name = report.path.name
     if report.legacy:
@@ -679,6 +890,8 @@ def print_report(report: Report, verbose: bool) -> None:
     # identity in the less common origin-only configuration.
     if report.origin is not None and not report.utc_anchor_count:
         print(f"  origin {report.origin}")
+    _print_idents(report.idents)
+    _print_clock(report.clock)
 
     if verbose and report.sources:
         for src in report.sources:
@@ -783,7 +996,8 @@ class StreamLine:
     """One `C`/`L`/`U`/`I`/`X` line with its stamp resolved.
 
     `t_us` is absolute boot-time µs, `utc_us` the UTC axis when a preceding `#utc`
-    anchor resolves it, else None. `fields` and `line` are the raw text, so a
+    anchor resolves it, else None — readings only, never a `#clock` estimate.
+    `fields` and `line` are the raw text, so a
     caller decides what a well-formed record is (extract and the decoder agree
     because they share this, not because they each re-implement the chain)."""
 
@@ -792,6 +1006,9 @@ class StreamLine:
     utc_us: int | None
     fields: list[str]
     line: str
+    # (utc_us, basis) from the best `#clock`/`#utc` statement in scope; only filled in
+    # by a reader built with `estimates=True` (clock spec C10), else None.
+    utc_best: tuple[int, str] | None = None
 
 
 class StreamReader:
@@ -805,8 +1022,11 @@ class StreamReader:
     terminator), and raises `ReadError` where continuing would print wrong numbers.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, estimates: bool = False) -> None:
         self.path = path
+        # `#clock` is only parsed when asked for: a reader after readings (`extract`
+        # without `--estimates`, the decoder) is not stopped by a line it never uses.
+        self.estimates = estimates
         # tag -> label, filled in from `#src` as the header streams past. The record
         # lines carry the tag; the name lives in the header now.
         self.labels: dict[int, str] = {}
@@ -818,6 +1038,7 @@ class StreamReader:
         path = self.path
         chain = Chain()
         utc_anchor = UtcAnchor()
+        clock = ClockState()
         with path.open("r", encoding="latin-1") as handle:
             for line in handle:
                 # A line with no terminator is the one line a power cut can tear, and
@@ -848,6 +1069,12 @@ class StreamReader:
                             utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
                         except ValueError:
                             raise ReadError(f"{path.name}: unreadable #utc line, extract stops here") from None
+                        clock.offer(ClockPoint(utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"), False)
+                    elif line.startswith("#clock,") and self.estimates:
+                        try:
+                            clock.offer(parse_clock_line(line), True)
+                        except ValueError:
+                            raise ReadError(f"{path.name}: unreadable #clock line, extract stops here") from None
                     continue
                 fields = line.split(",")
                 kind = fields[0][0] if fields[0] else ""
@@ -864,7 +1091,8 @@ class StreamReader:
                     raise ReadError(f"{path.name}: unreadable stamp column, extract stops here") from None
                 if t_us is None:
                     continue
-                yield StreamLine(kind, t_us, utc_anchor.resolve(t_us), fields, line)
+                best = clock.resolve(t_us) if self.estimates else None
+                yield StreamLine(kind, t_us, utc_anchor.resolve(t_us), fields, line, best)
 
 
 def cmd_extract(args) -> int:
@@ -878,6 +1106,7 @@ def cmd_extract(args) -> int:
     """
     path = Path(args.file)
     wanted = args.type.upper()
+    estimates = getattr(args, "estimates", False)
     record_header = "t_us,label,id_hex,flags,dlc,data_hex,utc_us"
     header = {
         "C": record_header,
@@ -889,14 +1118,21 @@ def cmd_extract(args) -> int:
     if header is None:
         print(f"unknown type {args.type!r} (use C, L, U, I or X)", file=sys.stderr)
         return 2
+    if estimates:
+        # Opt-in, appended: `utc_us` stays readings only, so no existing consumer starts reading
+        # a lower bound or a minutes-off sleep clock as a measurement (clock spec C10).
+        header += ",utc_best_us,utc_basis"
     printed_header = False
-    reader = StreamReader(path)
+    reader = StreamReader(path, estimates=estimates)
     try:
         for stream in reader:
             if stream.kind != wanted:
                 continue
             fields = stream.fields
             utc_column = "" if stream.utc_us is None else str(stream.utc_us)
+            if estimates:
+                best = stream.utc_best
+                utc_column += ",," if best is None else f",{best[0]},{best[1]}"
             label = None
             if wanted in RECORD_KINDS:
                 if len(fields) != RECORD_FIELDS:
@@ -977,6 +1213,11 @@ def main(argv: list[str] | None = None) -> int:
     extract.add_argument("--label", help="only this source label")
     extract.add_argument("--shed", action="store_true", help="only frames carrying the shed flag")
     extract.add_argument("--no-header", action="store_true")
+    extract.add_argument(
+        "--estimates",
+        action="store_true",
+        help="append utc_best_us,utc_basis: the best #clock statement (utc, drift or est lower bound)",
+    )
     extract.set_defaults(func=cmd_extract)
 
     head = sub.add_parser("head", help="print the file's own #src/#types header")

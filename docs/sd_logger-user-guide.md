@@ -213,6 +213,41 @@ stamp column is delta-coded against the previous line to keep the file small
 (§5's `#layout`), so decoding needs every stream line before it. That's what
 `extract`/`check` are for; they walk the chain and print absolute decimal µs.
 
+**When was it written?** Every file opens with a `#clock` line that states
+the wall clock and what it is worth
+([`sd_logger-clock-spec.md`](sd_logger-clock-spec.md)):
+
+| `#clock` says | meaning |
+|---|---|
+| `utc/sync` | a `time_id:` clock synced this boot — a reading |
+| `utc/warm` | the ESP's clock survived a warm reset (OTA, crash) after a sync — a reading |
+| `drift/sleep:<s>` | the clock ran through `<s>` seconds of deep sleep on the internal RC — a reading that may be minutes off, either way |
+| `est/card:<seq>` | cold boot, no clock: at least the end of file `<seq>`, plus this boot's uptime |
+| `est/build` | nothing better: at least the firmware's build time |
+
+`check` prints it, and once a real clock syncs it prints how far the
+earlier statement was off — for `drift` as seconds per day slept, the number
+that sizes the RC drift on your board. The `utc_us` column of `extract` stays
+readings only; `extract --estimates` adds `utc_best_us,utc_basis`.
+
+**Which device, which firmware?** The file name is not an answer: the number
+in `L0000113.LOG` counts per *card*, starts again on a fresh card, and a card
+can move between devices. So the second line of every file says it
+([spec §6 F1j](sd_logger-spec.md)):
+
+```
+#ident,id=logger-bench,mac=02:00:5e:10:20:30,date=2026-10-11T12:00:03Z,clock=utc/sync,build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234
+```
+
+`id` is the ESPHome node name, `mac` the device MAC (the WiFi `Local MAC`),
+`build`/`elf`/`cfg` the firmware's build time, a 16-digit ELF SHA-256 prefix
+(the boot log shows the first digits of the same hash) and config hash;
+`dump_config` shows the same values as `ident:`. `project=` appears
+when `esphome: project:` is set, `card=` when the card reports a CID. `date`
+is the wall clock at file open and always comes with its `clock` basis — with
+`est/…` it is only a lower bound. `check` prints both as `ident` and `date`
+lines. Nothing to configure.
+
 ### 3.5 Collect chunks over WiFi (optional)
 
 Rotation seals a file into a chunk (SEALED); a private `esp_http_server`
@@ -331,6 +366,7 @@ compiles on every change.
 | `vcc_monitor` | the close-file emergency on rail sag — see below |
 | `collection` | chunk lifecycle + optional serving over WiFi — see below |
 | `statistics.log_interval` | default `60s`; periodic `records=… dropped=…` line (§3.3) |
+| `time_id` | optional; one ESPHome `time:` id or a list (e.g. an RTC chip and SNTP). Each sync moves the files' `#clock` to `utc/sync`. Without it files still get `#clock`, but only `warm`/`drift`/`est` |
 
 ### `can_ports:` (native CAN tap, S2)
 
@@ -454,6 +490,9 @@ being deliberate about anyway:
   ring/writer split, why SD-over-SPI and never internal flash, the write
   format grammar (`#`-prefixed meta lines, the delta-coded stamp column),
   rotation, and the VCC emergency-close layers.
+- [`sd_logger-clock-spec.md`](sd_logger-clock-spec.md) — the `#clock`
+  line: which clock a file trusts after a sync, a warm reset, a deep-sleep
+  wake and a cold boot, and what a car needs in hardware for real UTC.
 - [`sdlog-collection-design.md`](sdlog-collection-design.md) — the chunk
   lifecycle (OPEN → SEALED → CONFIRMED → GONE), retention policy, and the
   ownership/locking rules behind the collection server.

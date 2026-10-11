@@ -764,7 +764,9 @@ CONFIG_SCHEMA = cv.All(
             # compile-time constant so an external component needs no core edit.
             cv.Optional(CONF_CONFINE_BYTES): _validate_confine_bytes,
             cv.Optional(CONF_FORMAT_IF_MOUNT_FAILED, default=False): cv.boolean,
-            cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+            # One clock or several (an RTC chip and SNTP): every one of them that syncs moves the
+            # file's basis (docs/sd_logger-clock-spec.md C9). A single id is still accepted as is.
+            cv.Optional(CONF_TIME_ID): cv.ensure_list(cv.use_id(time.RealTimeClock)),
             cv.Optional(CONF_ORIGIN): cv.string,
             cv.Optional(CONF_CAN_PORTS): cv.All(
                 cv.ensure_list(
@@ -1146,17 +1148,11 @@ async def to_code(config):
         cg.add_define("SD_LOG_CONFINE_BYTES", confine_bytes)
     if (origin := config.get(CONF_ORIGIN)) is not None:
         cg.add(var.set_origin(origin))
-    if (time_id := config.get(CONF_TIME_ID)) is not None:
+    for time_id in config.get(CONF_TIME_ID, []):
         clock = await cg.get_variable(time_id)
-        cg.add(
-            clock.add_on_time_sync_callback(
-                cg.RawExpression(
-                    f"[]() {{ {var}->set_utc_anchor("
-                    f"static_cast<uint64_t>({clock}->utcnow().timestamp) * 1000000ULL, "
-                    f"static_cast<uint64_t>(esp_timer_get_time())); }}"
-                )
-            )
-        )
+        # on_time_sync() reads gettimeofday() itself, so the anchor keeps the µs a source like SNTP
+        # supplies rather than truncating to `utcnow().timestamp` seconds (clock spec C7).
+        cg.add(clock.add_on_time_sync_callback(cg.RawExpression(f"[]() {{ {var}->on_time_sync(); }}")))
 
     # M6 rotation and collection. Both keys are read by the firmware as of the
     # Phase A wiring: `max_file_seconds` is the second rotation bound (whichever

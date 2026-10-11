@@ -22,6 +22,9 @@ sd_logger:
   # V29: a compile-time safety cap; it never repartitions automatically. The
   # one-shot action below is the only destructive path and is not invoked here.
   confine_bytes: 400MB
+  # Clock spec C9: the list form. A car adds its RTC chip here next to SNTP; any
+  # clock that syncs moves the files' `#clock` basis.
+  time_id: [sntp_time]
   # M6: rotation is bounded by time as well as size, whichever fires first. An
   # OPEN file is never servable, so without this a quiet bus traps the newest
   # records indefinitely (docs/sdlog-collection-design.md §4). 1-4 MB chunks are
@@ -108,6 +111,10 @@ switch:
 wifi:
   ssid: "espcars-bench"
   password: "espcars-bench-pw"
+
+time:
+  - platform: sntp
+    id: sntp_time
 
 # Exercise the generic producer action from a periodic automation.
 interval:

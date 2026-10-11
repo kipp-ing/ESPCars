@@ -544,8 +544,10 @@ eras apart on a card that holds both, without sniffing.
   |---|---|
   | `#sdlog,<fmtver>,<seq>,<t_us>,<esphome_ver>` | file open |
   | `#src,<K>,<label>,<tag>,<origin>,<detail>` | file open, one per declared source |
+  | `#ident,id=…,mac=…,date=…,clock=…,build=…,elf=…,cfg=…[,project=…][,card=…]` | file open, **always**, directly after `#sdlog`; which device, which build, when — see F1j |
   | `#origin,<string>` | file open, once when `origin:` is configured; board/bench identity |
   | `#utc,<boot_us_anchor_hex>,<utc_us_hex>` | file open after a time sync, and immediately on each later sync; boot-to-UTC correspondence |
+  | `#clock,@<t>,<utc_us_hex>,<basis>,<src>[,<detail>]` | file open, every 32 KiB / 10 s, after each sync, before `#close`; the wall clock and what it is worth — see [`sd_logger-clock-spec.md`](sd_logger-clock-spec.md) |
   | `#types,…` / `#flags,…` / `#layout,…` | file open — the legend, so a card found on a bench is self-describing |
   | `#pad,<spaces>` | file open — pads the header block to a 512-byte boundary (D6) |
   | `#drop,<t_us>,<what>,<delta>,<total>` | only when a drop counter moves; `what` ∈ `ring` \| `tap:<label>` \| `text` |
@@ -752,6 +754,65 @@ eras apart on a card that holds both, without sniffing.
   > those: decoding needs every stream line before it, whatever type it is. That is
   > what `extract` is for — it walks the whole chain and prints absolute decimal µs
   > with the label, flags and `dlc` columns put back.
+- **F1j — `#ident`: every file names its device, its build and its date
+  (2026-10-11).** A chunk name is not an identity. `seq` is per *card* and starts
+  again at 0 on a fresh or reformatted card, a card moves between devices, a
+  device is re-flashed between two files, and a clock that never synced leaves
+  only an estimate. So `L0000113.LOG` on a desk says nothing about where it came
+  from, and the only place that can say it is the file itself. Every file opens
+  with one line that does (fictional values):
+
+  ```
+  #sdlog,2,113,@64960,2026.7.0
+  #ident,id=logger-bench,mac=02:00:5e:10:20:30,date=2026-10-11T12:00:03Z,clock=utc/sync,build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234,project=acme.logger@1.2.0,card=03-5344-0badcafe
+  ```
+
+  | key | value | source on the device |
+  |---|---|---|
+  | `id` | the ESPHome node name (escaped, `,`→`_`) | `App.get_name()` |
+  | `mac` | the device's MAC-48 (six octets), lowercase `aa:bb:cc:dd:ee:ff` — the MAC ESPHome logs as WiFi `Local MAC` | `get_mac_address_raw()` (ESPHome). **Not** `esp_efuse_mac_get_default()`: on chips with IEEE 802.15.4 (ESP32-C6, -H2) that returns the 8-byte EUI-64 (`aa:bb:cc:ff:fe:dd:ee:ff`), whose first six bytes are not the MAC |
+  | `date` | wall clock at file open, UTC, whole seconds, `YYYY-MM-DDTHH:MM:SSZ`; `-` when there is no statement at all | the same `ClockPoint` the header's `#clock` line states |
+  | `clock` | `<basis>/<src>` of that date (`utc/sync`, `utc/warm`, `drift/sleep`, `est/card`, `est/build`); `none` with `date=-` | as `#clock` (clock spec §3) |
+  | `build` | firmware build time, UTC, same spelling as `date`; `-` if unknown | `App.get_build_time()` |
+  | `elf` | first 16 hex digits of the app ELF SHA-256, lowercase; `-` if unknown | `esp_app_get_description()->app_elf_sha256` (the binary digest). The boot log's `ELF file SHA256` shows a shorter prefix of it. **Not** `esp_app_get_elf_sha256()`: IDF cuts that string to `CONFIG_APP_RETRIEVE_LEN_ELF_SHA` digits (default 9) whatever buffer it is given |
+  | `cfg` | ESPHome config hash, 8 lowercase hex digits | `App.get_config_hash()` |
+  | `project` | `<name>@<version>` (escaped), **only** when `esphome: project:` is set | `ESPHOME_PROJECT_NAME` / `ESPHOME_PROJECT_VERSION` |
+  | `card` | `<MID>-<OID>-<PSN>` from the card's CID, lowercase hex (2/4/8 digits), **only** when the card reported one | `sdmmc_card_t::cid`, captured at mount |
+
+  **`date` is only as good as `clock` says.** The pair is one statement: with
+  `clock=est/…` the date is a *lower bound* (the true time is at least this), with
+  `drift/sleep` it is a reading that may be minutes off, and only `utc/…` is a
+  reading in the ordinary sense. The writer never writes a date without its basis
+  next to it, and never a date it does not have (`date=-,clock=none`). The exact
+  µs value and its later corrections stay with `#clock`; `#ident` is the
+  human-readable copy taken at file open, and it is not restated when a sync
+  arrives mid-file.
+
+  The ESPHome version is not repeated — it is `#sdlog`'s last field. Together the
+  two lines answer "which firmware wrote this" (ESPHome version, `build` time,
+  `elf` digest, `cfg` hash), "on which device" (`id`, `mac`), "on which card"
+  (`card`, plus `#sdlog`'s `seq`) and "when" (`date` with its `clock`). `#origin`
+  stays what it was: an optional, free-text label on top.
+
+  **Radix and spelling.** The values that are names rather than quantities — MAC,
+  ELF digest, config hash, CID — are lowercase hex, the way the tools that print
+  them elsewhere spell them (ESP-IDF boot log, `esptool`, ESPHome's own log), so
+  a grep for the string from one of those finds the file. That is F1d's rule: a
+  meta line matches the outside thing it names.
+
+  **Key=value, not positional**, like `#types` and `#layout`: the line has
+  optional fields, and a reader that knows only some keys must still read the
+  ones it knows. Keys may be added; an existing key never changes meaning.
+  Additive, so `fmtver` stays 2 and older readers skip the line (F1d).
+
+  | ID | requirement | test |
+  |---|---|---|
+  | I1 | Every file the writer opens — the first after boot (a wake from deep sleep is a boot), every rotation, every file after a recovery remount — carries exactly one `#ident` line, directly after `#sdlog`. It does not depend on config: `id`, `mac`, `date`, `clock`, `build`, `elf` and `cfg` are always there (`-`/`none` when unknown). | host: `ident_*` golden lines; source test `tests/sd_logger/test_ident.py` (the header writer emits it unconditionally, right after `#sdlog`); HIL: `sdlog.py check` on a card after a boot, a rotation and a deep-sleep wake shows an `ident` line for every file |
+  | I2 | Field order and spelling exactly as in the table; the untrusted strings (`id`, `project`) go through the F1e escape pass with `,`→`_`; an over-long line is cut with `~` like every other line and stays terminated. `mac` is the six-byte MAC-48 and equals `Local MAC`; `elf` has 16 digits. Both were wrong in the first field test (2026-10-11, ESP32-C6: `mac=20:6e:f1:ff:fe:0a` from the EUI-64, `elf=` 9 digits). | host: golden lines, escaping, truncation, `ident_i2_mac_is_the_six_byte_mac_48`, `ident_i2_elf_is_sixteen_digits_of_the_binary_digest`; source test: the MAC and digest sources (`test_ident.py`); HIL (with I1): `dump_config`'s `ident: mac=` equals the WiFi `Local MAC` |
+  | I3 | `date`/`clock` are the header's `#clock` statement at file-open time, rounded down to whole seconds; `est` stays `est`. No statement → `date=-,clock=none`. | host: a golden line per basis; epoch, leap-day and year-end dates |
+  | I4 | Cheap: MAC, ELF digest, config hash, build time and project are captured once in `setup()`, the CID once per mount; the line is built without heap and without `snprintf`. | review; `esphome compile` of `tests/build/sd_logger/*` |
+  | I5 | Readers: `parse_file` exposes it (`Report.idents`) and `sdlog.py check` prints it (`ident` line); a file without `#ident` (written before 2026-10-11) reads exactly as before; unknown keys are kept, not refused; a field without `=` is a malformed line. | `tests/sd_logger/test_sdlog_reader.py` |
+
 - **F2 — Rotation:** new file at `max_file_size` and at each boot. Filename =
   `L<7-digit seq>.LOG`, an 8.3 name so it is safe under FatFs with long names
   disabled (`CONFIG_FATFS_LFN_NONE`, which is what ESPHome builds).

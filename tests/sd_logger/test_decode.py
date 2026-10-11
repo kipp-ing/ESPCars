@@ -163,6 +163,58 @@ def test_reader_yields_frames_with_utc(tmp_path: Path) -> None:
     assert [k for k, _, _ in lines] == ["C", "C", "X", "L", "C", "C", "C", "C"]
 
 
+# FIXTURE as a writer with `#ident` (spec F1j) and `#clock` (clock spec) writes it: the
+# identity right after `#sdlog`, a card floor at boot, and the reading next to `#utc`.
+# Fictional values throughout.
+STATED = [
+    FIXTURE[0],
+    "#ident,id=mr-orange,mac=02:00:5e:10:20:30,date=1970-01-01T00:00:01Z,clock=est/card:6,"
+    "build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234",
+    "#clock,@0,F4240,est,card,6",
+    *FIXTURE[1:6],
+    "#clock,@1010,F4240,utc,sync",
+    *FIXTURE[6:],
+]
+
+
+def _rows(sink, table: str) -> list[dict]:
+    # The chunk key carries the file's sha, which the extra header lines change.
+    return [{k: v for k, v in row.items() if k != "chunk"} for row in sink.tables[table]]
+
+
+def test_ident_and_clock_lines_change_no_frame(setup) -> None:
+    """The decoder reads readings only: `#ident` and `#clock` pass through, and a card
+    floor (a lower bound) never becomes a `utc_us`."""
+    archive, _, config = setup
+    plain = dec.FakeSink()
+    assert run(config, plain) == 0
+    write_chunk(archive / "mr-orange", "L0000007.LOG", STATED)
+    stated = dec.FakeSink()
+    assert run(config, stated) == 0
+    (marker,) = stated.tables["chunks"]
+    assert marker["result"] == "ok", marker["detail"]
+    assert _rows(stated, "frames") == _rows(plain, "frames")
+    assert _rows(stated, "signals") == _rows(plain, "signals")
+    assert stated.tables["frames"][0]["utc_us"] is None
+
+
+def test_reader_estimates_are_opt_in(tmp_path: Path) -> None:
+    """`utc_best` (extract --estimates) only when asked for; a reader after readings is
+    not stopped by a `#clock` line it never uses, one that asks for it is."""
+    path = write_chunk(tmp_path, "L0000007.LOG", STATED)
+    reference = write_chunk(tmp_path / "plain", "L0000007.LOG", FIXTURE)
+    plain = list(sdlog.StreamReader(path))
+    assert {s.utc_best for s in plain} == {None}
+    assert [(s.t_us, s.utc_us) for s in plain] == [(s.t_us, s.utc_us) for s in sdlog.StreamReader(reference)]
+    best = list(sdlog.StreamReader(path, estimates=True))
+    assert (best[0].utc_us, best[0].utc_best) == (None, (1_004_096, "est"))  # floor 1 s + boot 4096 µs
+    assert (best[1].utc_us, best[1].utc_best) == (1_000_016, (1_000_016, "utc"))
+    bad = write_chunk(tmp_path / "bad", "L0000007.LOG", [*STATED[:2], "#clock,@0,F4240,utc,card,6", *STATED[3:]])
+    assert len(list(sdlog.StreamReader(bad))) == len(plain)
+    with pytest.raises(sdlog.ReadError, match="#clock"):
+        list(sdlog.StreamReader(bad, estimates=True))
+
+
 # ------------------------------------------------------------------ D3/D4 frames and decode
 
 
