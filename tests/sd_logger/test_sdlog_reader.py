@@ -985,3 +985,127 @@ def test_extract_estimates_is_opt_in_and_keeps_utc_us_for_readings(tmp_path: Pat
     # Without the flag the columns are what every consumer already parses.
     assert sdlog.main(["extract", str(path), "--type", "C", "--no-header"]) == 0
     assert capsys.readouterr().out.splitlines()[1] == "272,C1,1A2,x,1,01,"
+
+
+# ------------------------------------------------------------- #ident (spec §6 F1j, I5)
+#
+# IDENT is the golden line of tests/host/test_file_ident.cpp's
+# `ident_i2_full_line_is_the_documented_one` — fictional values throughout.
+IDENT = (
+    "#ident,id=logger-bench,mac=02:00:5e:10:20:30,date=2026-10-11T12:00:03Z,clock=utc/sync,"
+    "build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234,project=acme.logger@1.2.0,"
+    "card=03-5344-0badcafe"
+)
+
+
+def ident_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.startswith(("ident", "date"))]
+
+
+def test_ident_is_parsed_into_its_keys(tmp_path: Path) -> None:
+    report = parse(tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@F3ED0,clean"])
+    assert report.clean
+    assert len(report.idents) == 1
+    ident = report.idents[0]
+    assert ident.fields == {
+        "id": "logger-bench",
+        "mac": "02:00:5e:10:20:30",
+        "date": "2026-10-11T12:00:03Z",
+        "clock": "utc/sync",
+        "build": "2026-10-04T09:12:33Z",
+        "elf": "1a2b3c4d5e6f7a8b",
+        "cfg": "5eed1234",
+        "project": "acme.logger@1.2.0",
+        "card": "03-5344-0badcafe",
+    }
+    # The records around it are untouched: `#ident` is outside the stamp chain like every meta line.
+    assert report.counts == {"C": 2, "X": 1, "L": 1}
+
+
+def test_check_prints_the_identity_and_the_date_with_its_basis(tmp_path: Path, capsys) -> None:
+    lines = check_lines(tmp_path, [HEADER[0], IDENT, *HEADER[1:], "#close,@1,clean"], capsys)
+    assert ident_lines(lines) == [
+        "ident logger-bench mac=02:00:5e:10:20:30 build=2026-10-04T09:12:33Z elf=1a2b3c4d5e6f7a8b"
+        " cfg=5eed1234 project=acme.logger@1.2.0 card=03-5344-0badcafe",
+        "date 2026-10-11T12:00:03Z (utc/sync)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("date", "clock", "shown"),
+    [
+        (
+            "2026-10-11T12:00:03Z",
+            "est/card",
+            "date 2026-10-11T12:00:03Z at least (est/card: a lower bound, not a reading)",
+        ),
+        (
+            "2026-10-04T09:12:33Z",
+            "est/build",
+            "date 2026-10-04T09:12:33Z at least (est/build: a lower bound, not a reading)",
+        ),
+        (
+            "2026-10-11T12:00:03Z",
+            "drift/sleep",
+            "date 2026-10-11T12:00:03Z (drift/sleep: ran through deep sleep, may be minutes off)",
+        ),
+        ("2026-10-11T12:00:03Z", "utc/warm", "date 2026-10-11T12:00:03Z (utc/warm)"),
+        ("-", "none", "date unknown (no clock statement)"),
+    ],
+)
+def test_an_estimated_date_never_reads_as_a_reading(
+    tmp_path: Path, capsys, date: str, clock: str, shown: str
+) -> None:
+    line = f"#ident,id=n,mac=-,date={date},clock={clock},build=-,elf=-,cfg=-"
+    lines = check_lines(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys)
+    assert ident_lines(lines) == ["ident n mac=- build=- elf=- cfg=-", shown]
+
+
+def test_a_file_without_ident_reads_exactly_as_before(tmp_path: Path, capsys) -> None:
+    """Every card written before 2026-10-11: no `#ident`, no `ident` line, no defect."""
+    report = parse(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
+    assert report.clean
+    assert report.idents == []
+    assert ident_lines(check_lines(tmp_path, HEADER + RECORDS + ["#close,@1,clean"], capsys)) == []
+
+
+def test_an_unknown_ident_key_is_kept_not_refused(tmp_path: Path, capsys) -> None:
+    line = IDENT + ",boot=deadbeef,note=a=b"
+    report = parse(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"])
+    assert report.clean
+    assert report.idents[0].get("boot") == "deadbeef"
+    assert report.idents[0].get("note") == "a=b"  # a value may itself contain `=`
+    lines = check_lines(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys)
+    assert ident_lines(lines)[0].endswith(" card=03-5344-0badcafe boot=deadbeef note=a=b")
+
+
+def test_each_header_of_an_appended_file_keeps_its_own_ident(tmp_path: Path) -> None:
+    second = IDENT.replace("elf=1a2b3c4d5e6f7a8b", "elf=8b7a6f5e4d3c2b1a")
+    report = parse(tmp_path, [HEADER[0], IDENT, *HEADER[1:], HEADER[0], second, "#close,@1,clean"])
+    assert [ident.get("elf") for ident in report.idents] == ["1a2b3c4d5e6f7a8b", "8b7a6f5e4d3c2b1a"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "#ident",  # no fields at all
+        "#ident,id=n,mac",  # a field without `=`
+        "#ident,id=n,=x",  # an empty key
+        "#ident,id=n,id=m",  # a key twice
+    ],
+)
+def test_a_malformed_ident_line_is_a_defect(tmp_path: Path, line: str) -> None:
+    report = parse(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"])
+    assert not report.clean
+    assert len(report.bad_lines) == 1
+
+
+def test_extract_and_head_pass_ident_through_untouched(tmp_path: Path, capsys) -> None:
+    path = write_log(tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@1,clean"])
+    assert sdlog.main(["extract", str(path), "--type", "C", "--no-header"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "412345,C1,1A2,x,8,0011223344556677,",
+        "412388,C2,1A2,xs,8,0011223344556677,",
+    ]
+    assert sdlog.main(["head", str(path)]) == 0
+    assert capsys.readouterr().out.splitlines()[:2] == [HEADER[0], IDENT]

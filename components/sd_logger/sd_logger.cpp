@@ -27,7 +27,9 @@ extern "C" {
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
+#include "esp_app_desc.h"   // esp_app_get_elf_sha256(), for `#ident`'s build digest
 #include "esp_attr.h"       // RTC_NOINIT_ATTR, for the clock state that must outlive a deep sleep
+#include "esp_mac.h"        // esp_efuse_mac_get_default(), for `#ident`'s factory MAC
 #include "esp_system.h"     // esp_reset_reason()
 #include "esp_heap_caps.h"  // heap_caps_get_free_size / heap_caps_get_largest_free_block, for MountFailureFacts
 #include "esp_timer.h"
@@ -492,6 +494,8 @@ void SdLogger::setup() {
   // guards against is a file that never rotates at all, which on a card looks exactly like a bus
   // that never produced enough to fill one.
   this->apply_rotation_bounds_();
+  // Before the first file can open: every header carries it (spec F1j, I1).
+  this->capture_ident_();
 
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
   // Before anything touches the chunk index — the boot scan below is the first thing that does, and
@@ -1040,6 +1044,8 @@ bool SdLogger::mount_card_(bool allow_format) {
 
   this->capacity_state_ = CapacityState::HEALTHY;
   this->mounts_ok_++;
+  // Per mount, not per boot: the card may be a different one (the same reason the seq is rescanned).
+  this->capture_card_ident_();
   this->write_recovery_stopped_ = false;
   this->mounted_card_sectors_ = this->card_ != nullptr ? this->card_->csd.capacity : 0;
   this->mounted_volume_first_lba_ = 0;
@@ -1603,6 +1609,19 @@ void SdLogger::write_file_header_() {
   if (this->ensure_room_(SD_LOG_MAX_LINE))
     this->commit_line_(format_header(this->block_.cursor(), this->block_.room(), this->seq_, now, ESPHOME_VERSION));
 
+  // Which device, which build, when (spec F1j) — unconditionally, and right under `#sdlog` so it
+  // also sits inside the collector's 256-byte head window. The date is the same statement the
+  // `#clock` line below makes, projected to this instant, so the two cannot disagree.
+  {
+    ClockPoint best;
+    portENTER_CRITICAL(&this->utc_mux_);
+    best = this->clock_best_;
+    portEXIT_CRITICAL(&this->utc_mux_);
+    const ClockPoint at_open = best.valid() ? clock_at(best, now) : ClockPoint{};
+    if (this->ensure_room_(SD_LOG_MAX_LINE))
+      this->commit_line_(format_ident(this->block_.cursor(), this->block_.room(), this->ident_, at_open));
+  }
+
   if (!this->origin_.empty() && this->ensure_room_(SD_LOG_MAX_LINE))
     this->commit_line_(format_origin(this->block_.cursor(), this->block_.room(), this->origin_.c_str()));
 
@@ -1679,6 +1698,33 @@ void SdLogger::write_file_header_() {
   // last writable file must be stated by the next one. On an ordinary rotation they have not
   // moved, so retaining them emits nothing.
   this->marked_text_dropped_ = this->text_dropped_.load(std::memory_order_relaxed);
+}
+
+void SdLogger::capture_ident_() {
+  // Everything here is fixed for the life of the firmware, so it is read once and the header only
+  // copies it. Borrowed strings: the node name lives in a static buffer, the project in flash.
+  this->ident_.id = App.get_name().c_str();
+  this->ident_.has_mac = esp_efuse_mac_get_default(this->ident_.mac) == ESP_OK;
+  const time_t built = App.get_build_time();
+  this->ident_.build_s = built > 0 ? static_cast<uint64_t>(built) : 0;
+  // The size includes the terminator: 16 hex digits, the prefix the boot log's `ELF file SHA256` shows.
+  esp_app_get_elf_sha256(this->ident_.elf, sizeof(this->ident_.elf));
+  this->ident_.cfg = App.get_config_hash();
+  this->ident_.has_cfg = true;
+#ifdef ESPHOME_PROJECT_NAME
+  this->ident_.project = ESPHOME_PROJECT_NAME;
+  this->ident_.project_version = ESPHOME_PROJECT_VERSION;
+#endif
+}
+
+void SdLogger::capture_card_ident_() {
+  // The CID is read during card init (SEND_CID works in SPI mode too); a card that reported none
+  // leaves the field out rather than writing zeros that look like an identity.
+  const sdmmc_card_t *card = this->card_;
+  this->ident_.has_card = card != nullptr && (card->cid.mfg_id != 0 || card->cid.serial != 0);
+  this->ident_.card_mid = card != nullptr ? static_cast<uint8_t>(card->cid.mfg_id) : 0;
+  this->ident_.card_oid = card != nullptr ? static_cast<uint16_t>(card->cid.oem_id) : 0;
+  this->ident_.card_psn = card != nullptr ? static_cast<uint32_t>(card->cid.serial) : 0;
 }
 
 void SdLogger::on_time_sync() {
@@ -3860,6 +3906,11 @@ void SdLogger::dump_config() {
                 this->buffer_depth_, this->sync_interval_ms_);
   ESP_LOGCONFIG(TAG, "  max_file_size=%" PRIu32 " B  mounted=%s", this->max_file_size_,
                 this->mounted_ ? "yes" : "NO (logging disabled)");
+  // The same values every file's `#ident` line carries (spec F1j), so a card can be matched to the
+  // device it came from without pulling a file first.
+  const uint8_t *mac = this->ident_.mac;
+  ESP_LOGCONFIG(TAG, "  ident: mac=%02x:%02x:%02x:%02x:%02x:%02x elf=%s cfg=%08" PRIx32, mac[0], mac[1], mac[2], mac[3],
+                mac[4], mac[5], this->ident_.elf[0] != '\0' ? this->ident_.elf : "-", this->ident_.cfg);
 #ifdef SD_LOG_CONFINE_BYTES
   ESP_LOGCONFIG(TAG, "  confine_bytes=%" PRIu64 " B (writer requires a volume at or below this cap)",
                 static_cast<uint64_t>(SD_LOG_CONFINE_BYTES));
