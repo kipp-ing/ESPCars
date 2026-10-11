@@ -154,6 +154,13 @@ def unclosed_chunk(seq: int) -> bytes:
     return sealed_chunk(seq, close=False)
 
 
+def recovered_chunk(seq: int) -> bytes:
+    """A file torn by a power cut and sealed by the next boot (spec F2c): the torn
+    tail cut back to the last complete line, then `#close,@<t>,recovered`."""
+    base = seq * 1000
+    return sealed_chunk(seq, close=False) + f"#close,@{base:X},recovered\n".encode("latin-1")
+
+
 # ------------------------------------------------------------------ fake device
 
 
@@ -403,6 +410,7 @@ class FakeDevice:
             "discarded_bytes": 0,
             "oldest_uncollected": None,
             "index_refused": 0,
+            "torn_unsealed": 0,
             "mounted": True,
             "degraded": False,
             "capacity": "healthy",
@@ -538,6 +546,7 @@ def test_the_fake_device_serves_the_complete_status_contract(device: FakeDevice)
         "discarded_bytes",
         "oldest_uncollected",
         "index_refused",
+        "torn_unsealed",
         "mounted",
         "degraded",
         "capacity",
@@ -1223,6 +1232,23 @@ def test_a_chunk_without_a_close_line_is_treated_as_short(device: FakeDevice, de
     assert device.confirms(name) == []
     assert [n for n, _ in outcome.failed] == [name]
     assert stored(dest, "mr-orange") == []
+
+
+def test_a_chunk_sealed_by_the_next_boot_is_collected_like_a_clean_one(
+    device: FakeDevice, dest: Path
+) -> None:
+    """F2c R5: `recovered` is the device's own statement that the chunk is complete
+    — a power cut cut it, and the boot after it sealed what was on the card. It is
+    stored, verified and confirmed exactly like `rotate` or `clean`."""
+    name = device.add(431, recovered_chunk(431))
+
+    outcome = collector(device, dest).collect()
+
+    assert outcome.failed == []
+    assert outcome.confirmed == [name]
+    assert device.confirms(name) != []
+    assert (dest / "mr-orange" / name).read_bytes() == recovered_chunk(431)
+    assert sdlog_collect.verify_chunk(dest / "mr-orange" / name) is None
 
 
 def test_a_failed_confirm_leaves_the_chunk_for_the_next_run(

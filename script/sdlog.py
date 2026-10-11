@@ -16,6 +16,13 @@ WHAT IT DECIDES, AND WHY EACH ONE IS A DECISION AND NOT A STATISTIC
                             line") becomes something a script can answer. This is
                             what makes the §10.7 power-loss procedure mechanical.
 
+                            Since F2c the next boot seals such a file itself:
+                            the torn tail cut back, then `#close,…,recovered`.
+                            That is a closed file — reported as `close recovered
+                            (power cut)` — and only one the boot could not reach
+                            (older than the three newest, or a failed seal) still
+                            reads as MISSING.
+
     a torn trailing line    Expected after a power cut, and harmless: the
                             formatter never emits a bare newline except the line
                             terminator, so exactly one partial line can exist and
@@ -159,6 +166,11 @@ HEX_DIGITS = set("0123456789ABCDEF")
 
 # `data` holds at most 8 bytes, so at most 16 hex characters (F1a).
 MAX_DATA_HEX = 16
+
+# The `#close` reason the boot writes when it seals a file a power cut left
+# without one (spec F2c, components/sd_logger/torn_seal.h). A complete, closed
+# file — only the run that wrote it was cut.
+CLOSE_RECOVERED = "recovered"
 
 # `seq` wraps here (components/sd_logger/collection_policy.h SD_LOG_SEQ_MODULUS),
 # which is why a `#gap` window's width is modular arithmetic and not subtraction.
@@ -939,6 +951,9 @@ def print_report(report: Report, verbose: bool) -> None:
 
     if report.close_reason is not None:
         extra = f" -> {report.rotate_to}" if report.rotate_to else ""
+        if report.close_reason == CLOSE_RECOVERED:
+            # Sealed by the next boot (spec F2c): a closed file, but the run itself was cut.
+            extra += " (power cut)"
         print(f"  close  {report.close_reason}{extra}")
     else:
         # The one finding this whole file format gained a line for.
