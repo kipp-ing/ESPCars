@@ -213,6 +213,23 @@ stamp column is delta-coded against the previous line to keep the file small
 (§5's `#layout`), so decoding needs every stream line before it. That's what
 `extract`/`check` are for; they walk the chain and print absolute decimal µs.
 
+**When was it written?** Every file opens with a `#clock` line that states
+the wall clock and what it is worth
+([`sd_logger-clock-spec.md`](sd_logger-clock-spec.md)):
+
+| `#clock` says | meaning |
+|---|---|
+| `utc/sync` | a `time_id:` clock synced this boot — a reading |
+| `utc/warm` | the ESP's clock survived a warm reset (OTA, crash) after a sync — a reading |
+| `drift/sleep:<s>` | the clock ran through `<s>` seconds of deep sleep on the internal RC — a reading that may be minutes off, either way |
+| `est/card:<seq>` | cold boot, no clock: at least the end of file `<seq>`, plus this boot's uptime |
+| `est/build` | nothing better: at least the firmware's build time |
+
+`check` prints it, and once a real clock syncs it prints how far the
+earlier statement was off — for `drift` as seconds per day slept, the number
+that sizes the RC drift on your board. The `utc_us` column of `extract` stays
+readings only; `extract --estimates` adds `utc_best_us,utc_basis`.
+
 ### 3.5 Collect chunks over WiFi (optional)
 
 Rotation seals a file into a chunk (SEALED); a private `esp_http_server`
@@ -331,6 +348,7 @@ compiles on every change.
 | `vcc_monitor` | the close-file emergency on rail sag — see below |
 | `collection` | chunk lifecycle + optional serving over WiFi — see below |
 | `statistics.log_interval` | default `60s`; periodic `records=… dropped=…` line (§3.3) |
+| `time_id` | optional; one ESPHome `time:` id or a list (e.g. an RTC chip and SNTP). Each sync moves the files' `#clock` to `utc/sync`. Without it files still get `#clock`, but only `warm`/`drift`/`est` |
 
 ### `can_ports:` (native CAN tap, S2)
 
@@ -454,6 +472,9 @@ being deliberate about anyway:
   ring/writer split, why SD-over-SPI and never internal flash, the write
   format grammar (`#`-prefixed meta lines, the delta-coded stamp column),
   rotation, and the VCC emergency-close layers.
+- [`sd_logger-clock-spec.md`](sd_logger-clock-spec.md) — the `#clock`
+  line: which clock a file trusts after a sync, a warm reset, a deep-sleep
+  wake and a cold boot, and what a car needs in hardware for real UTC.
 - [`sdlog-collection-design.md`](sdlog-collection-design.md) — the chunk
   lifecycle (OPEN → SEALED → CONFIRMED → GONE), retention policy, and the
   ownership/locking rules behind the collection server.

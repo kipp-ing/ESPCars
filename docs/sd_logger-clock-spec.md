@@ -1,6 +1,8 @@
 # sd_logger — a wall-clock basis in every file
 
-2026-10-11, **draft for review (rev 2: deep sleep on KL30)**. Extends
+2026-10-11, **approved by Jan (rev 2: deep sleep on KL30)**; decisions: "+x" is
+the measured uptime only, a sync below the floor is accepted and flagged, the
+build time is the last floor, full scope including H1–H8. Extends
 `docs/sd_logger-spec.md` §6 (F1d meta lines) and §8 (schema). Every requirement
 has an ID and the test that proves it. **A requirement without a test is not
 done.**
@@ -148,16 +150,16 @@ reusing `#utc`. Older readers skip unknown `#` lines by design, so they ignore
 
 | ID | Requirement | Test |
 |---|---|---|
-| C1 | **T2 plausibility.** The system clock counts as `warm`/`sleep` only if `now ≥ build_time` **and** `now ≥ card_floor − 2 s`. Otherwise it is rejected with a `W` log line, and T3/T4 apply. The reset reason picks `sleep` (deep-sleep wake) or `warm` (everything else). | host: `clock_basis` cases *warm / sleep / before build / before card floor / 1970 after power-on* |
+| C1 | **T2 plausibility.** A warm reset that follows a wake before any sync keeps the `drift` label: whether the clock has slept since its last sync is kept in RTC memory (`RTC_NOINIT_ATTR`), which survives exactly what the RTC timer survives. The system clock counts as `warm`/`sleep` only if `now ≥ build_time` **and** `now ≥ card_floor − 2 s`. Otherwise it is rejected with a `W` log line, and T3/T4 apply. The reset reason picks `sleep` (deep-sleep wake) or `warm` (everything else). | host: `clock_basis` cases *warm / sleep / before build / before card floor / 1970 after power-on* |
 | C2 | Every file opened while mounted starts with exactly one `#clock` header line. `basis`/`src` follow the tier table in §3. | host: `format_clock` golden lines; HIL H1–H4 |
 | C3 | The card floor is `max(build, prev_end)` at boot µs 0, so at file-open time `t` it is `floor + t`. This is the "+x", and nothing else is added. | host: floor arithmetic, incl. saturation |
 | C4 | `prev_end` = the newest valid `#clock` in the tail of the newest file, projected to the latest `@`-timed meta line after it (`#close`, `#rotate`, `#drop`, a later `#clock`). A torn last line (no `\n`) and any line that fails to parse are ignored, never guessed. | host: tail parser — clean close, power-cut tail, torn line, garbage, no `#clock` (old v2 file), `est` chained from `est` |
 | C5 | The boot read is bounded: up to 3 newest files (`.LOG`/`.UPL`), the last 64 KiB of each, read only once per boot and before the first file opens. It never fails logging. A read error means "no card floor" plus one `W` line. | host: bounds; HIL H5: `dropped=0` across boot under load |
 | C6 | **No estimate ever reaches the system clock.** The logger never calls `settimeofday()`. Otherwise T2 would launder a T3 guess into a "real" time after the next reset or wake. | grep test in `tests/sd_logger` |
 | C7 | A sync sets the anchor from `gettimeofday()` (µs), not `timestamp * 1e6`. Any second-resolution error then comes from the clock source, not from the logger. | compile; HIL H2 |
-| C8 | A sync that lands **before** the current floor by more than 2 s is still accepted, because a real clock outranks an estimate. It is logged `W` and counted (`clock_back=` in the stats line). `sdlog.py check` reports it. | host + reader test |
+| C8 | A sync that lands **before** the current floor by more than 2 s is still accepted, because a real clock outranks an estimate. It is logged `W` and counted (a `clock_back=` sub-line under the stats line, printed only once it is non-zero, so the stats line keeps its shape). `sdlog.py check` reports it. | host + reader test |
 | C9 | `time_id:` accepts one id **or a list** (e.g. an RTC chip plus SNTP). Each clock's `on_time_sync` updates the anchor. A single id keeps working unchanged. | schema test |
-| C10 | `sdlog.py`: `check` and `head` print the file's time basis (`utc sync/warm`, `drift sleep <s>`, `est card:<seq>`/`build`, or none). When a `utc` line follows a `drift` or `est` line, they print the measured correction. For `drift` they also print it as a rate (s per day slept). `extract` keeps the `utc_us` column **from `#utc` only**. A new opt-in `--estimates` adds `utc_best_us,utc_basis`. | `tests/sd_logger/test_sdlog_reader.py` |
+| C10 | `sdlog.py`: `check` prints the file's time basis (`head` shows the raw header `#clock` line) (`utc sync/warm`, `drift sleep <s>`, `est card:<seq>`/`build`, or none). When a `utc` line follows a `drift` or `est` line, they print the measured correction. For `drift` they also print it as a rate (s per day slept). `extract` keeps the `utc_us` column **from `#utc` only**. A new opt-in `--estimates` adds `utc_best_us,utc_basis`. | `tests/sd_logger/test_sdlog_reader.py` |
 | C11 | Spec, user guide and the F1d table in `sd_logger-spec.md` describe `#clock`, and the recipe in §6. | review |
 
 ## 6. "It needs a clock": hardware and config

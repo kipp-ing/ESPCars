@@ -546,6 +546,7 @@ eras apart on a card that holds both, without sniffing.
   | `#src,<K>,<label>,<tag>,<origin>,<detail>` | file open, one per declared source |
   | `#origin,<string>` | file open, once when `origin:` is configured; board/bench identity |
   | `#utc,<boot_us_anchor_hex>,<utc_us_hex>` | file open after a time sync, and immediately on each later sync; boot-to-UTC correspondence |
+  | `#clock,@<t>,<utc_us_hex>,<basis>,<src>[,<detail>]` | file open, every 32 KiB / 10 s, after each sync, before `#close`; the wall clock and what it is worth — see [`sd_logger-clock-spec.md`](sd_logger-clock-spec.md) |
   | `#types,…` / `#flags,…` / `#layout,…` | file open — the legend, so a card found on a bench is self-describing |
   | `#pad,<spaces>` | file open — pads the header block to a 512-byte boundary (D6) |
   | `#drop,<t_us>,<what>,<delta>,<total>` | only when a drop counter moves; `what` ∈ `ring` \| `tap:<label>` \| `text` |
