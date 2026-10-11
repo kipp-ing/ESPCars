@@ -22,6 +22,7 @@ struct StatusFields {
   bool has_oldest_uncollected;
   uint32_t oldest_uncollected;
   uint32_t index_refused;
+  uint32_t torn_unsealed;  ///< F2c R3: torn files the boot could not seal (lifetime)
   bool mounted;
   bool degraded;
   const char *capacity;
@@ -78,7 +79,8 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
         out, len,
         "{\"device\":\"%s\",\"sealed\":%" PRIu32 ",\"confirmed\":%" PRIu32
         ",\"card_percent\":%s,\"discarded_chunks\":%" PRIu32 ",\"discarded_bytes\":%" PRIu64
-        ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"mounted\":%s,\"degraded\":%s"
+        ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"torn_unsealed\":%" PRIu32
+        ",\"mounted\":%s,\"degraded\":%s"
         ",\"capacity\":\"%s\""
         ",\"records\":%" PRIu32 ",\"dropped\":%" PRIu32 ",\"card_dropped\":%" PRIu32 ",\"write_lost\":%" PRIu32
         ",\"tap_shutdown_lost\":%" PRIu32 ",\"tap_accepted\":%" PRIu32 ",\"tap_drained\":%" PRIu32
@@ -94,17 +96,18 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
         ",\"last_write_heap_dma_free\":null,\"last_write_heap_dma_largest\":null"
         ",\"writer_stack_free\":%" PRIu32 "}",
         fields.device, fields.sealed, fields.confirmed, fill_text, fields.discarded_chunks, fields.discarded_bytes,
-        oldest_text, fields.index_refused, fields.mounted ? "true" : "false", fields.degraded ? "true" : "false",
-        fields.capacity, fields.records, fields.dropped, fields.card_dropped, fields.write_lost,
-        fields.tap_shutdown_lost, fields.tap_accepted, fields.tap_drained, fields.tap_record_ring_accepted,
-        fields.recovery_state, fields.writer_stack_free);
+        oldest_text, fields.index_refused, fields.torn_unsealed, fields.mounted ? "true" : "false",
+        fields.degraded ? "true" : "false", fields.capacity, fields.records, fields.dropped, fields.card_dropped,
+        fields.write_lost, fields.tap_shutdown_lost, fields.tap_accepted, fields.tap_drained,
+        fields.tap_record_ring_accepted, fields.recovery_state, fields.writer_stack_free);
   }
 
   return snprintf(
       out, len,
       "{\"device\":\"%s\",\"sealed\":%" PRIu32 ",\"confirmed\":%" PRIu32
       ",\"card_percent\":%s,\"discarded_chunks\":%" PRIu32 ",\"discarded_bytes\":%" PRIu64
-      ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"mounted\":%s,\"degraded\":%s"
+      ",\"oldest_uncollected\":%s,\"index_refused\":%" PRIu32 ",\"torn_unsealed\":%" PRIu32
+      ",\"mounted\":%s,\"degraded\":%s"
       ",\"capacity\":\"%s\""
       ",\"records\":%" PRIu32 ",\"dropped\":%" PRIu32 ",\"card_dropped\":%" PRIu32 ",\"write_lost\":%" PRIu32
       ",\"tap_shutdown_lost\":%" PRIu32 ",\"tap_accepted\":%" PRIu32 ",\"tap_drained\":%" PRIu32
@@ -121,17 +124,17 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
       ",\"last_write_heap_dma_free\":%" PRIu32 ",\"last_write_heap_dma_largest\":%" PRIu32
       ",\"writer_stack_free\":%" PRIu32 "}",
       fields.device, fields.sealed, fields.confirmed, fill_text, fields.discarded_chunks, fields.discarded_bytes,
-      oldest_text, fields.index_refused, fields.mounted ? "true" : "false", fields.degraded ? "true" : "false",
-      fields.capacity, fields.records, fields.dropped, fields.card_dropped, fields.write_lost, fields.tap_shutdown_lost,
-      fields.tap_accepted, fields.tap_drained, fields.tap_record_ring_accepted, fields.recovery_state,
-      fields.write_failures, fields.last_write_action, fields.last_write_errno, fields.last_write_result,
-      fields.last_write_offset, fields.last_write_derived_offset, fields.last_write_lseek_errno,
-      fields.last_write_committed_end, fields.last_write_len, fields.last_write_elapsed_us, fields.last_write_spi_begin,
-      fields.last_write_spi_end, fields.last_write_spi_commands, fields.last_write_spi_available,
-      fields.last_write_spi_missing, fields.last_write_spi_worst_err, fields.last_write_card_sectors,
-      fields.last_write_volume_first_lba, fields.last_write_volume_sectors, fields.last_write_heap_default_free,
-      fields.last_write_heap_default_largest, fields.last_write_heap_dma_free, fields.last_write_heap_dma_largest,
-      fields.writer_stack_free);
+      oldest_text, fields.index_refused, fields.torn_unsealed, fields.mounted ? "true" : "false",
+      fields.degraded ? "true" : "false", fields.capacity, fields.records, fields.dropped, fields.card_dropped,
+      fields.write_lost, fields.tap_shutdown_lost, fields.tap_accepted, fields.tap_drained,
+      fields.tap_record_ring_accepted, fields.recovery_state, fields.write_failures, fields.last_write_action,
+      fields.last_write_errno, fields.last_write_result, fields.last_write_offset, fields.last_write_derived_offset,
+      fields.last_write_lseek_errno, fields.last_write_committed_end, fields.last_write_len,
+      fields.last_write_elapsed_us, fields.last_write_spi_begin, fields.last_write_spi_end,
+      fields.last_write_spi_commands, fields.last_write_spi_available, fields.last_write_spi_missing,
+      fields.last_write_spi_worst_err, fields.last_write_card_sectors, fields.last_write_volume_first_lba,
+      fields.last_write_volume_sectors, fields.last_write_heap_default_free, fields.last_write_heap_default_largest,
+      fields.last_write_heap_dma_free, fields.last_write_heap_dma_largest, fields.writer_stack_free);
 }
 
 }  // namespace sd_logger

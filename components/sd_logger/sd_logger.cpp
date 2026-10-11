@@ -1875,48 +1875,178 @@ void SdLogger::write_clock_line_(uint64_t now64) {
   this->clock_bytes_since_ = 0;
 }
 
-bool SdLogger::read_card_clock_end_(ClockPoint *end, uint32_t *seq_out) {
-  // Bounded by construction (clock spec C5): at most SD_LOG_CLOCK_TAIL_FILES names, each read from
-  // SD_LOG_CLOCK_TAIL_BYTES before its end in 4 KiB pieces. Heap, not stack: this runs on the main
-  // task at setup and on the writer task after a recovery, and neither stack has 4.5 KiB to spare.
+namespace {
+
+// F2c's seal I/O on the card (torn_seal.h). The file is opened for writing only here, after the read
+// side has decided it is torn, so a file that ends cleanly is never opened with write access at all.
+// O_WRONLY with neither O_CREAT nor O_TRUNC: FatFs opens an existing file and changes nothing until
+// the truncate. The destructor closes; after a successful fsync there is nothing a close can lose.
+class FdSealIo {
+ public:
+  explicit FdSealIo(const char *path) : path_(path) {}
+  ~FdSealIo() {
+    if (this->fd_ >= 0)
+      ::close(this->fd_);
+  }
+  FdSealIo(const FdSealIo &) = delete;
+  FdSealIo &operator=(const FdSealIo &) = delete;
+
+  bool open() {
+    this->fd_ = ::open(this->path_, O_WRONLY);
+    return this->note_(this->fd_ >= 0);
+  }
+  bool truncate(uint64_t length) { return this->note_(::ftruncate(this->fd_, static_cast<off_t>(length)) == 0); }
+  bool write_at(uint64_t offset, const char *data, size_t n) {
+    const off_t at = static_cast<off_t>(offset);
+    if (::lseek(this->fd_, at, SEEK_SET) != at)
+      return this->note_(false);
+    return this->note_(::write(this->fd_, data, n) == static_cast<ssize_t>(n));
+  }
+  bool sync() { return this->note_(::fsync(this->fd_) == 0); }
+  int err() const { return this->err_; }
+
+ private:
+  bool note_(bool ok) {
+    if (!ok)
+      this->err_ = errno;
+    return ok;
+  }
+  const char *path_;
+  int fd_{-1};
+  int err_{0};
+};
+
+}  // namespace
+
+bool SdLogger::read_card_tails_(ClockPoint *end, uint32_t *seq_out) {
+  // Bounded by construction (clock spec C5, F2c R4): at most SD_LOG_CLOCK_TAIL_FILES names, each read
+  // once, from at most SD_LOG_CLOCK_TAIL_BYTES before its end. Two consumers share that one read:
+  //  * the clock scan wants the newest tail that states a clock, and nothing after it;
+  //  * the F2c classifier wants every `.LOG` among the three. A file the clock scan does not need is
+  //    read over its last SD_LOG_SEAL_PROBE_BYTES only, and over the full window only when that
+  //    probe does not end in `#close` — so a card of cleanly closed files costs ~1 KiB per file more
+  //    than before, and the 64 KiB is spent only on a file that is actually torn.
+  //
+  // The 4 KiB piece and the clock scanner come from the heap: this runs on the main task at setup and
+  // on the writer task after a recovery, and neither stack has 4.5 KiB to spare. Without them there is
+  // no card floor, but the seal still runs, off a 256-byte stack buffer — F2c must not hinge on the
+  // one allocation a fragmented heap is most likely to refuse.
   static const size_t READ_CHUNK = 4096;
-  char *buf = static_cast<char *>(malloc(READ_CHUNK));
+  char *heap_buf = static_cast<char *>(malloc(READ_CHUNK));
   ClockTailScanner *scanner = new (std::nothrow) ClockTailScanner(false);
-  bool found = false;
-  if (buf == nullptr || scanner == nullptr) {
+  char stack_buf[256];
+  const bool clock_ok = heap_buf != nullptr && scanner != nullptr;
+  if (!clock_ok)
     ESP_LOGW(TAG, "clock: no memory for the card tail scan — no card floor this boot");
-  } else {
-    for (uint32_t back = 1; back <= SD_LOG_CLOCK_TAIL_FILES && back <= this->seq_ && !found; back++) {
-      const uint32_t seq = this->seq_ - back;
-      for (ChunkState state : {ChunkState::SEALED, ChunkState::CONFIRMED}) {
-        char name[SD_LOG_NAME_LEN];
-        format_chunk_name(name, seq, state);
-        const std::string path = this->mount_point_ + "/" + name;
-        const int fd = open(path.c_str(), O_RDONLY);
-        if (fd < 0)
-          continue;
-        const off_t size = lseek(fd, 0, SEEK_END);
-        const off_t start = size > static_cast<off_t>(SD_LOG_CLOCK_TAIL_BYTES) ? size - SD_LOG_CLOCK_TAIL_BYTES : 0;
-        if (size > 0 && lseek(fd, start, SEEK_SET) == start) {
-          *scanner = ClockTailScanner(start > 0);
-          ssize_t got;
-          while ((got = read(fd, buf, READ_CHUNK)) > 0)
-            scanner->feed(buf, static_cast<size_t>(got));
-          if (got < 0)
-            ESP_LOGW(TAG, "clock: reading %s failed (errno %d) — using what was read", name, errno);
-          if (scanner->end(end)) {
-            *seq_out = seq;
-            found = true;
-          }
+  char *buf = heap_buf != nullptr ? heap_buf : stack_buf;
+  const size_t buf_len = heap_buf != nullptr ? READ_CHUNK : sizeof(stack_buf);
+
+  bool found = false;
+  for (uint32_t back = 1; back <= SD_LOG_CLOCK_TAIL_FILES && back <= this->seq_; back++) {
+    const uint32_t seq = this->seq_ - back;
+    for (ChunkState state : {ChunkState::SEALED, ChunkState::CONFIRMED}) {
+      // R2: a `.UPL` is read for the clock and never written, so once the clock is found it is not
+      // even opened.
+      const bool is_log = state == ChunkState::SEALED;
+      const bool want_clock = clock_ok && !found;
+      if (!is_log && !want_clock)
+        break;
+      char name[SD_LOG_NAME_LEN];
+      format_chunk_name(name, seq, state);
+      const std::string path = this->mount_point_ + "/" + name;
+      const int fd = open(path.c_str(), O_RDONLY);
+      if (fd < 0)
+        continue;
+      const off_t size = lseek(fd, 0, SEEK_END);
+      // One pass over the last `window` bytes: always into the classifier, into the clock scanner
+      // when it is passed. `false` once a read failed; the scanners keep what they were fed.
+      auto read_window = [&](uint32_t window, ClockTailScanner *clock, TornTailScanner *tail) -> bool {
+        const off_t start = size > static_cast<off_t>(window) ? size - static_cast<off_t>(window) : 0;
+        *tail = TornTailScanner(static_cast<uint64_t>(start));
+        if (clock != nullptr)
+          *clock = ClockTailScanner(start > 0);
+        if (size < 0 || lseek(fd, start, SEEK_SET) != start) {
+          tail->read_failed();
+          return false;
         }
-        close(fd);
-        break;  // one name per seq exists; the other extension is not a second file
+        ssize_t got;
+        while ((got = read(fd, buf, buf_len)) > 0) {
+          tail->feed(buf, static_cast<size_t>(got));
+          if (clock != nullptr)
+            clock->feed(buf, static_cast<size_t>(got));
+        }
+        if (got < 0) {
+          tail->read_failed();
+          return false;
+        }
+        return true;
+      };
+      TornTailScanner tail;
+      if (want_clock) {
+        if (!read_window(SD_LOG_CLOCK_TAIL_BYTES, scanner, &tail))
+          ESP_LOGW(TAG, "clock: reading %s failed (errno %d) — using what was read", name, errno);
+        if (scanner->end(end)) {
+          *seq_out = seq;
+          found = true;
+        }
+      } else if (read_window(SD_LOG_SEAL_PROBE_BYTES, nullptr, &tail) && tail.kind() != TailKind::CLOSED) {
+        // Not closed, or not decidable from the probe: the full window, for the cut and the stamp.
+        read_window(SD_LOG_CLOCK_TAIL_BYTES, nullptr, &tail);
       }
+      close(fd);
+      if (is_log)
+        this->seal_torn_file_(seq, path, tail);
+      break;  // one name per seq exists; the other extension is not a second file
     }
   }
-  free(buf);
+  free(heap_buf);
   delete scanner;
   return found;
+}
+
+void SdLogger::seal_torn_file_(uint32_t seq, const std::string &path, const TornTailScanner &tail) {
+  // F2c: a `.LOG` without `#close` is the power-cut signature, and the collector rightly refuses one
+  // as SEALED. Sealed here, before the first file of this boot opens. At setup that is also before
+  // the collection server starts (loop() starts it), so no client is offered the torn file; after a
+  // first-mount recovery the server may already list it, at its old size, for the few ms until the
+  // restate below — a fetch in that window is refused by the collector and retried next pass.
+  if (tail.kind() == TailKind::CLOSED)
+    return;
+  if (!this->logging_permitted_()) {
+    // A card mounted read-only (capacity self-test) gets no writes at all, this one included.
+    this->torn_unsealed_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(TAG, "boot: L%07" PRIu32 ".LOG has no #close and stays unsealed: card is read-only (capacity=%s)", seq,
+             this->capacity_status());
+    return;
+  }
+  SealResult result;
+  int err;
+  {
+    FdSealIo io(path.c_str());
+    result = seal_torn_tail(io, tail);
+    err = io.err();
+  }  // closed before the stat below reads the directory entry
+  if (result == SealResult::SEALED) {
+    ESP_LOGI(TAG,
+             "boot: L%07" PRIu32 ".LOG had no #close (power cut) — sealed: %" PRIu64
+             " B torn tail dropped, #close,@%" PRIX64 ",recovered",
+             seq, tail.end() - tail.cut(), tail.stamp());
+  } else {
+    // R3: never a reason to stop. The file is indexed as it is, the collector keeps refusing it, and
+    // this counter is what keeps it visible from the device side.
+    this->torn_unsealed_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(TAG, "boot: L%07" PRIu32 ".LOG has no #close and stays unsealed (%s, errno %d) — indexed as it is", seq,
+             seal_result_str(result), err);
+  }
+  if (result == SealResult::NO_CUT || result == SealResult::READ_FAILED || result == SealResult::OPEN_FAILED)
+    return;  // nothing was written
+  // The scan indexed this file at its old size. Sealed — or cut back by a step that then failed — it
+  // has a new one, and `/sdlog/index` advertises the entry's size as the chunk's `bytes`.
+  struct stat st;
+  if (::stat(path.c_str(), &st) == 0 && st.st_size >= 0) {
+    IndexLock lock(this->index_mux_);
+    this->collection_.restate_sealed_bytes(seq, static_cast<uint64_t>(st.st_size));
+  }
 }
 
 void SdLogger::learn_clock_() {
@@ -1934,7 +2064,7 @@ void SdLogger::learn_clock_() {
   in.sys_drifted = s_clock_state == CLOCK_STATE_DRIFTED;
   const time_t build = App.get_build_time();
   in.build_utc_us = build > 0 ? static_cast<uint64_t>(build) * 1000000ULL : 0;
-  in.card_valid = this->read_card_clock_end_(&in.card_end, &in.card_seq);
+  in.card_valid = this->read_card_tails_(&in.card_end, &in.card_seq);
   const BootClockDecision d = decide_boot_clock(in);
   const int64_t took_ms = (esp_timer_get_time() - t0) / 1000;
 
@@ -3890,6 +4020,12 @@ void SdLogger::loop() {
   if (this->clock_back_.load(std::memory_order_relaxed) > 0) {
     ESP_LOGW(TAG, "  clock_back=%" PRIu32 " — a clock sync landed before the card floor; check the clock source",
              this->clock_back_.load(std::memory_order_relaxed));
+  }
+  // F2c R3, same rule: torn files the boot read could not seal. Each one is a chunk the collector
+  // refuses on every pass, so the device says how many it left behind rather than only the boot log.
+  if (this->torn_unsealed_.load(std::memory_order_relaxed) > 0) {
+    ESP_LOGW(TAG, "  torn_unsealed=%" PRIu32 " — file(s) without #close the boot could not seal; see the boot log",
+             this->torn_unsealed_.load(std::memory_order_relaxed));
   }
   if (this->degraded_identification_)
     ESP_LOGW(TAG, "  card mounted with a latched idle bit masked — working, but still owed a power cycle");

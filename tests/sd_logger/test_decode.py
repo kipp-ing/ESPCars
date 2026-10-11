@@ -424,6 +424,20 @@ def test_a_torn_last_line_is_not_a_defect(setup) -> None:
     assert run(config, sink) == 0
 
 
+def test_a_chunk_sealed_by_the_next_boot_decodes_like_a_clean_one(setup) -> None:
+    """F2c R5: `#close,…,recovered` is a sealed chunk, written by the boot after a
+    power cut. It decodes in full and is marked ok, exactly like `rotate`."""
+    archive, _, config = setup
+    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:-1], "#close,@1100,recovered"])
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    (marker,) = sink.tables["chunks"]
+    assert marker["result"] == "ok"
+    assert len(sink.tables["frames"]) == 7
+    got = {s["signal"]: s["value"] for s in sink.tables["signals"] if s["signal"] != "DEMO_MUX.Mux"}
+    assert got == pytest.approx(EXPECTED_SIGNALS)
+
+
 def test_gaps_are_recorded(setup) -> None:
     archive, _, config = setup
     write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:5], "#gap,@1005,3,12000,2,4", *FIXTURE[5:]])

@@ -48,6 +48,36 @@ moved); on the next flash a warm restart must stay `utc/warm` and a wake
 clock was ~12.8 s off after ~15 min of deep sleep (~1 %); the fixed image
 measures it as `drift` + correction.
 
+**1.0b F2c (the next boot seals a torn file, `#close,…,recovered`) has no hardware
+run.** Branch `feat/sdlog-torn-recover`: `torn_seal.h` (host: 17 cases incl. fault
+injection on every step), `read_card_tails_()` seals inside the C5 boot read,
+`torn_unsealed` in the stats lines and `/sdlog/status`, readers accept `recovered`.
+`check.sh` and `esphome compile` of the sd_logger test were green. Owed: the spec's
+HIL row — power-cut a board while logging, reboot, `sdlog.py check` on the fetched
+chunk shows `close recovered (power cut)`, the fleet pass is `ok`, a second reboot
+leaves the file byte-identical (R2), and H5 `dropped=0` across that boot (R4), then
+`verify.py` exit 0. Found on a car device on 2026-10-11: a torn chunk with no
+`#close` made every fleet pass report an error. A torn file older than the three
+newest, like that one, is not reached (R4). Clear it by hand: fetch
+`GET /sdlog/f/<name>`, archive the copy, then `POST /sdlog/done/<name>`. Do not
+loosen the collector's "no `#close` = short transfer" rule.
+
+**1.0c `on_shutdown()` can lose `#close` on an OTA reboot. Open, not fixed.** The
+torn file above was most likely the one open across an OTA (timer wake, OTA about
+3 min later). `on_shutdown()` waits at most 20 × 10 ms for the writer, and
+sd_logger has no `teardown()`. So `App.safe_reboot()` →
+`teardown_components(1000 ms)` does not wait for it before `arch_restart()`. The
+writer checks `dying_` only at the end of a full pass, which includes the ring
+drain, retention and `sync_file_()`. Only then does `emergency_close_()` drain
+again and write `#clock`/`#close`, then flush, fsync and unmount. A backlog, an
+fsync or a card stall (1672 ms measured, spec F1h) longer than 200 ms means the restart
+cuts the close. Deep sleep has the same 200 ms, but it survives more often: other
+components' teardown under its 5 s budget lends the writer time, and the bus is
+quiet before sleep. Proposed fix: `bool teardown() override { return
+this->writer_task_ == nullptr; }`, plus `xTaskNotifyGive(writer_task_)` in
+`on_shutdown()`. Bench test: OTA under ring load, then the file shows `close
+clean`. F2c seals what this leaves, but each such file still loses its unsynced tail.
+
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real
 device attached to the bench for testing transmits in the same range at

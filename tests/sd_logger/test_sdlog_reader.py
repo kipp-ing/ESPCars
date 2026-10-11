@@ -167,9 +167,29 @@ def test_a_torn_trailing_line_is_expected_not_corrupt(tmp_path: Path) -> None:
 
 
 def test_each_close_reason_is_read_back(tmp_path: Path) -> None:
-    for reason in ("clean", "rotate", "emergency"):
+    for reason in ("clean", "rotate", "emergency", "recovered"):
         report = parse(tmp_path, HEADER + RECORDS + [f"#close,@F3ED0,{reason}"])
         assert report.close_reason == reason
+
+
+def test_a_boot_sealed_file_is_closed_and_says_it_was_cut(tmp_path: Path, capsys) -> None:
+    """F2c R5: the boot after a power cut seals the torn file with
+    `#close,@<t>,recovered`. That is a closed file — `--strict` passes it — but the
+    report still names the power cut, because the run did not end in order."""
+    path = write_log(tmp_path, HEADER + RECORDS + ["#close,@64AB9,recovered"])
+    report = sdlog.parse_file(path)
+    assert report.close_reason == "recovered"
+    assert report.clean and not report.torn_tail
+    assert sdlog.main(["check", "--strict", str(path)]) == 0
+    out = [" ".join(line.split()) for line in capsys.readouterr().out.splitlines()]
+    assert "close recovered (power cut)" in out
+
+
+def test_an_orderly_close_prints_its_reason_alone(tmp_path: Path, capsys) -> None:
+    path = write_log(tmp_path, HEADER + RECORDS + ["#close,@F3ED0,clean"])
+    sdlog.main(["check", str(path)])
+    out = [" ".join(line.split()) for line in capsys.readouterr().out.splitlines()]
+    assert "close clean" in out
 
 
 def test_a_rotation_names_its_successor(tmp_path: Path) -> None:

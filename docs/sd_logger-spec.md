@@ -552,7 +552,7 @@ eras apart on a card that holds both, without sniffing.
   | `#pad,<spaces>` | file open — pads the header block to a 512-byte boundary (D6) |
   | `#drop,<t_us>,<what>,<delta>,<total>` | only when a drop counter moves; `what` ∈ `ring` \| `tap:<label>` \| `text` |
   | `#rotate,<t_us>,<next-file>` | immediately before rotation |
-  | `#close,<t_us>,<clean\|rotate\|emergency>` | last line of a file |
+  | `#close,<t_us>,<clean\|rotate\|emergency\|recovered>` | last line of a file; `recovered` is written by the next boot for a torn file (F2c), never by the writer |
 
   Every `t_us` above is an **anchor-marked absolute** `@<hex>`, and outside the
   delta chain of F1h. Outside, because that is what lets a reader skip the markers
@@ -854,6 +854,33 @@ eras apart on a card that holds both, without sniffing.
   start emitting names wider than 8.3. At the M2 rotation rate (one 32 MB file
   per ~3 min at 171 KB/s) that is years away, and cards are wiped long before —
   but it is unbounded by design, so it is written down rather than assumed safe.
+- **F2c — A torn file is sealed by the next boot.** A file without `#close` is the
+  power-cut signature (F1d), and a power cut is the *normal* end of a run in a car: the
+  writer always holds one file OPEN until shutdown, and a hard power-off leaves it torn.
+  The boot scan lists every `.LOG` as SEALED (`sdlog-collection-design.md` §3), and a
+  collector must refuse a SEALED chunk without `#close` (it cannot tell short bytes from a
+  torn file over HTTP). Without this rule every hard power-off leaves one chunk that is
+  never collected, never confirmed and never reclaimed (found 2026-10-11, `L0000012`).
+
+  | ID | requirement | test |
+  |---|---|---|
+  | R1 | Before the first file of this boot opens, every `.LOG` among the boot read's files (C5: the 3 newest, the same single read, no second pass) whose last line is not `#close` is sealed: truncate it to just after its last `\n` (drops the torn line, F1e), append `#close,@<t>,recovered\n` and fsync. `t` = the newest `@`-timed line kept (C4's projection), `@0` if there is none. Only then is the file served: the boot scan's index entry is restated to the sealed size, and at setup the collection server has not started yet. | host: tail classifier + seal line — clean close, power-cut tail, torn line, NUL tail, no timed line; HIL: power-cut the board while logging, reboot, `sdlog.py check` on the fetched chunk shows `close recovered` and the fleet pass is `ok` |
+  | R2 | A file whose last line is `#close` is never written; a `.UPL` never. Running the boot twice changes nothing (the second boot finds `#close`). | host: idempotence |
+  | R3 | A failure (read, truncate, write, fsync) never stops logging: the file is indexed as it is, one `W` line, and `torn_unsealed` counts it in the stats line. The collector keeps refusing it, so it stays visible. | host: fault injection on each step |
+  | R4 | Bounded like C5: at most 3 files, one truncate + one ≤ 64 B append each, before the writer starts. A torn file older than the 3 newest (written by firmware before F2c) is left as it is; a card erase clears it. | review; HIL H5 `dropped=0` across boot |
+  | R5 | Readers: `recovered` is a valid reason. `sdlog.py check` reports it as `close recovered (power cut)`; collector and decoder treat it like `clean`. | `tests/sd_logger/test_sdlog_reader.py`, collector and decoder tests |
+  | R6 | The deep-sleep path (`on_shutdown`) keeps writing `#close,…,clean`; F2c is only the fallback for a power cut. | review |
+
+  Implementation (`components/sd_logger/torn_seal.h`, `SdLogger::read_card_tails_()`): the
+  classifier rides along in the clock scan's read and keeps only each line's first 48 bytes. A
+  file the clock scan does not need is probed over its last 1 KiB and read over the full 64 KiB
+  window only when that probe does not end in `#close`. `t` counts meta lines only, never record
+  anchors, so a sealed file projects exactly as it did torn and the next boot's card floor does not
+  move. A window that starts mid-file and holds no `\n` (64 KiB of NUL) has no known cut point and
+  is left as it is (R3). A file with no complete line at all is cut to 0 and holds only the
+  `#close` line: the collector still refuses it, as headerless. The `W` line names the failed step;
+  `torn_unsealed` is a second stats line and a key of `GET /sdlog/status`.
+
 - **F3 — Partition:** one card-spanning FAT32 partition. **Small partitions are
   explicitly discouraged** (they restrict wear distribution). Use
   `format_if_mount_failed` as *recovery only*, never as routine.

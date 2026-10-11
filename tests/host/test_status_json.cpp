@@ -3,8 +3,9 @@
 //
 // writer_stack_free remains the last key in the JSON object: 0 means "never sampled", and the
 // existing clients that append-read the tail keep that simple invariant. The write-failure fields
-// inserted before it push the maximum-value object to 1430 bytes; the boundary cases below pin the
-// exact byte where a too-small caller buffer truncates.
+// inserted before it, and F2c's `torn_unsealed` after `index_refused`, push the maximum-value object
+// to 1457 bytes; the boundary cases below pin the exact byte where a too-small caller buffer
+// truncates.
 
 #include "harness.h"
 #include "status_json.h"
@@ -21,7 +22,7 @@ using esphome::sd_logger::StatusFields;
 namespace {
 
 StatusFields representative_fields(uint32_t writer_stack_free = 47) {
-  return StatusFields{"mr-orange", 3u,  2u,  41u, 7u,  9ull, true, 123u, 11u, true, false,
+  return StatusFields{"mr-orange", 3u,  2u,  41u, 7u,  9ull, true, 123u, 11u, 13u, true, false,
                       "healthy",   17u, 19u, 23u, 29u, 31u,  37u,  41u,  43u,
                       "retrying", 53u, "retry_recovery", 5, -1, 736u, 700u, 0, 1248u, 512u, 42u,
                       100u, 103u, 3u, 3u, 0u, -7, 62500000u, 63u, 62499937u,
@@ -55,6 +56,7 @@ TEST(status_json_has_the_complete_additive_wire_contract) {
       "\"discarded_bytes\":",
       "\"oldest_uncollected\":",
       "\"index_refused\":",
+      "\"torn_unsealed\":",
       "\"mounted\":",
       "\"degraded\":",
       "\"capacity\":",
@@ -163,7 +165,7 @@ TEST(status_json_writer_stack_free_zero_means_never_sampled) {
 
   static const char kExpected[] =
       "{\"device\":\"mr-orange\",\"sealed\":3,\"confirmed\":2,\"card_percent\":41,\"discarded_chunks\":7,"
-      "\"discarded_bytes\":9,\"oldest_uncollected\":123,\"index_refused\":11,\"mounted\":true,"
+      "\"discarded_bytes\":9,\"oldest_uncollected\":123,\"index_refused\":11,\"torn_unsealed\":13,\"mounted\":true,"
       "\"degraded\":false,\"capacity\":\"healthy\",\"records\":17,\"dropped\":19,\"card_dropped\":23,"
       "\"write_lost\":29,\"tap_shutdown_lost\":31,\"tap_accepted\":37,\"tap_drained\":41,"
       "\"tap_record_ring_accepted\":43,\"recovery_state\":\"retrying\",\"write_failures\":53,"
@@ -191,7 +193,7 @@ TEST(status_json_writer_stack_free_full_object_exact_string) {
 
   static const char kExpected[] =
       "{\"device\":\"mr-orange\",\"sealed\":3,\"confirmed\":2,\"card_percent\":41,\"discarded_chunks\":7,"
-      "\"discarded_bytes\":9,\"oldest_uncollected\":123,\"index_refused\":11,\"mounted\":true,"
+      "\"discarded_bytes\":9,\"oldest_uncollected\":123,\"index_refused\":11,\"torn_unsealed\":13,\"mounted\":true,"
       "\"degraded\":false,\"capacity\":\"healthy\",\"records\":17,\"dropped\":19,\"card_dropped\":23,"
       "\"write_lost\":29,\"tap_shutdown_lost\":31,\"tap_accepted\":37,\"tap_drained\":41,"
       "\"tap_record_ring_accepted\":43,\"recovery_state\":\"retrying\",\"write_failures\":53,"
@@ -224,6 +226,7 @@ TEST(status_json_maximum_values_fit_the_status_response_buffer) {
                             true,
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
+                            std::numeric_limits<uint32_t>::max(),
                             false,
                             true,
                             "self_test_failed",
@@ -262,9 +265,9 @@ TEST(status_json_maximum_values_fit_the_status_response_buffer) {
                             std::numeric_limits<uint32_t>::max()};
   const int n = format_status_json(body, sizeof(body), fields);
 
-  CHECK_EQ(n, 1430);
+  CHECK_EQ(n, 1457);
   CHECK(static_cast<size_t>(n) < sizeof(body));
-  CHECK_EQ(std::strlen(body), 1430u);
+  CHECK_EQ(std::strlen(body), 1457u);
   CHECK(std::strstr(body, "\"mounted\":false") != nullptr);
   CHECK(std::strstr(body, "\"degraded\":true") != nullptr);
   CHECK(std::strstr(body, "\"recovery_state\":\"stopped_no_bus_traffic\"") != nullptr);
@@ -277,7 +280,7 @@ TEST(status_json_buffer_exactly_the_required_capacity_does_not_truncate) {
   // snprintf always writes when len > 0) is the smallest buffer that holds the maximum-value
   // object whole. Exercised at the exact figure, not just "some generously large buffer", so a
   // future off-by-one in whoever sizes a real caller's buffer has a test to check itself against.
-  constexpr size_t kRequiredCapacity = 1431;  // 1430 content bytes + NUL
+  constexpr size_t kRequiredCapacity = 1458;  // 1457 content bytes + NUL
   char body[kRequiredCapacity];
   const std::string device(39, 'x');
   const StatusFields fields{device.c_str(),
@@ -287,6 +290,7 @@ TEST(status_json_buffer_exactly_the_required_capacity_does_not_truncate) {
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint64_t>::max(),
                             true,
+                            std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
                             false,
@@ -327,10 +331,10 @@ TEST(status_json_buffer_exactly_the_required_capacity_does_not_truncate) {
                             std::numeric_limits<uint32_t>::max()};
   const int n = format_status_json(body, sizeof(body), fields);
 
-  CHECK_EQ(n, 1430);
+  CHECK_EQ(n, 1457);
   CHECK_EQ(static_cast<size_t>(n), sizeof(body) - 1);  // exact fit, zero bytes to spare
-  CHECK_EQ(std::strlen(body), 1430u);
-  CHECK(body[1429] == '}');  // the object's own closing brace, not a truncated digit
+  CHECK_EQ(std::strlen(body), 1457u);
+  CHECK(body[1456] == '}');  // the object's own closing brace, not a truncated digit
 }
 
 TEST(status_json_buffer_one_byte_short_of_the_new_object_truncates) {
@@ -345,7 +349,7 @@ TEST(status_json_buffer_one_byte_short_of_the_new_object_truncates) {
   // too-small buffer drops here is `}`, not a digit, which is the more dangerous failure — a
   // parser reading char-by-char sees a well-formed-looking number with no terminator rather than
   // an obviously broken document.
-  constexpr size_t kOneByteShort = 1430;  // 1431 required - 1
+  constexpr size_t kOneByteShort = 1457;  // 1458 required - 1
   char body[kOneByteShort];
   const std::string device(39, 'x');
   const StatusFields fields{device.c_str(),
@@ -355,6 +359,7 @@ TEST(status_json_buffer_one_byte_short_of_the_new_object_truncates) {
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint64_t>::max(),
                             true,
+                            std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
                             std::numeric_limits<uint32_t>::max(),
                             false,
@@ -395,7 +400,7 @@ TEST(status_json_buffer_one_byte_short_of_the_new_object_truncates) {
                             std::numeric_limits<uint32_t>::max()};
   const int n = format_status_json(body, sizeof(body), fields);
 
-  CHECK_EQ(n, 1430);                              // snprintf still reports the full length
+  CHECK_EQ(n, 1457);                              // snprintf still reports the full length
   CHECK(static_cast<size_t>(n) >= sizeof(body));  // ...which is how a caller detects this
   CHECK_EQ(std::strlen(body), sizeof(body) - 1);  // 547 bytes actually written, then NUL
   CHECK(body[sizeof(body) - 2] != '}');           // the closing brace is exactly what got dropped

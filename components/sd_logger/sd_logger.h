@@ -19,6 +19,7 @@
 #include "recovery_policy.h"
 #include "sd_diagnostics.h"
 #include "sd_confine_policy.h"
+#include "torn_seal.h"
 #include "utc_anchor.h"
 
 #ifdef USE_SD_LOGGER_CAN_TAP
@@ -357,6 +358,10 @@ class SdLogger : public Component {
   // current shortfall: a remount rescans and the same file can be refused again. The fix is
   // `collection: max_chunks:`, and the number this reports is what it has to clear.
   uint32_t get_index_refused() const { return index_refused_.load(std::memory_order_relaxed); }
+  // F2c: torn files the boot read could not seal (spec R3) — a read, truncate, write or fsync that
+  // failed, a tail with no line boundary, or a card mounted read-only. Each stays without `#close`,
+  // so the collector keeps refusing it; this is where that becomes visible on the device. Lifetime.
+  uint32_t get_torn_unsealed() const { return torn_unsealed_.load(std::memory_order_relaxed); }
 
   // The logger callback (S4). Public because it is reached through a plain
   // function pointer from the logger's callback table, not through a member.
@@ -566,9 +571,13 @@ class SdLogger : public Component {
   void write_utc_marker_();
   // `#clock` (docs/sd_logger-clock-spec.md): the current best clock restated at `now64`.
   void write_clock_line_(uint64_t now64);
-  // Once per boot, before the first file opens: read the card's newest tail, decide the boot clock.
+  // Once per boot, before the first file opens: read the card's newest tails, decide the boot clock.
   void learn_clock_();
-  bool read_card_clock_end_(ClockPoint *end, uint32_t *seq_out);
+  // The boot read (clock spec C5): the clock floor from the newest tail that has one, and in the
+  // same read the F2c seal of every torn `.LOG` among the three newest files.
+  bool read_card_tails_(ClockPoint *end, uint32_t *seq_out);
+  // F2c for one `.LOG` the boot read classified: seal it if torn, count and say so if that failed.
+  void seal_torn_file_(uint32_t seq, const std::string &path, const TornTailScanner &tail);
   // `#drop` markers, emitted only when a counter actually moves (spec D4/F1d).
   void write_drop_markers_(uint64_t now64);
 
@@ -682,6 +691,9 @@ class SdLogger : public Component {
   // is full. Written by the writer task (and setup's scan), read from loop() — atomic for the same
   // reason the drop counters are, not because it is hot. It moves once per rotation at worst.
   std::atomic<uint32_t> index_refused_{0};
+  // F2c R3. Written once per boot read (setup, or the writer task after a first-mount recovery),
+  // read from loop() and the httpd task.
+  std::atomic<uint32_t> torn_unsealed_{0};
   // Last values written into a `#drop` marker, so a marker costs nothing on a
   // healthy run and appears the moment a counter moves.
   uint32_t marked_dropped_{0};
