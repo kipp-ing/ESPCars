@@ -54,7 +54,7 @@ import time
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -121,6 +121,7 @@ class PassResult:
     exit: int | None = None
     reason: str | None = None
     summary: str | None = None
+    torn: list[tuple[str, str]] = field(default_factory=list)  # (name, reason), collector C12
 
 
 @dataclass
@@ -243,6 +244,19 @@ def _compact(text: str, limit: int = 500) -> str:
 def _last_line(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-1] if lines else ""
+
+
+_TORN_LINE = re.compile(r"^TORN (\S+): (.+)$")
+
+
+def _torn_lines(text: str) -> list[tuple[str, str]]:
+    """The collector's `TORN <name>: <reason>` lines (sdlog-fleet-spec C12, F17)."""
+    found = []
+    for line in text.splitlines():
+        match = _TORN_LINE.match(line.strip())
+        if match:
+            found.append((match.group(1), match.group(2)))
+    return found
 
 
 def _human_age(days: float) -> str:
@@ -392,7 +406,8 @@ class Fleet:
         except Exception as err:  # noqa: BLE001 - any failure to run is an error, never "offline"
             return PassResult(device.name, "error", reason=f"collector could not run: {err}")
         if code == 0:
-            return PassResult(device.name, "ok", exit=0, summary=_last_line(output))
+            # A torn chunk the collector accepted is a warning: the pass stays ok (F17).
+            return PassResult(device.name, "ok", exit=0, summary=_last_line(output), torn=_torn_lines(output))
         if code == EX_TEMPFAIL:
             return PassResult(device.name, "offline", exit=code, reason=_last_line(output))
         return PassResult(
@@ -428,6 +443,10 @@ class Fleet:
             state["last_success"] = at.isoformat()
             state["verdict"] = "ok"
             state["summary"] = result.summary
+        if result.torn:
+            state["torn_accepted"] = int(state.get("torn_accepted") or 0) + len(result.torn)
+            name, reason = result.torn[-1]
+            state["last_torn"] = {"at": at.isoformat(), "name": name, "reason": reason}
         elif result.result == "error":
             state["verdict"] = "error"
             state["last_error"] = {"at": at.isoformat(), "exit": result.exit, "reason": result.reason}
