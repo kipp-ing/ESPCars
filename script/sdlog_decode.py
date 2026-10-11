@@ -5,10 +5,14 @@
 puts every one of them into three tables, and keeps them in step with the archive
 and with the decode rules:
 
-    frames    every record, lossless — the raw bus, queryable without any DBC
+    frames    every record, lossless up to the ms — the raw bus, queryable without any DBC
     signals   every CAN frame a DBC message matches, decoded to physical values
     chunks    one row per archive file: what was loaded, under which catalog, and
               whether it was ok or a defect. Written last, so it is the commit marker.
+
+Time is one column, ``utc``, in ms (spec §2). A chunk never spans a boot, so its
+first UTC anchor (``#utc`` or a ``#clock`` with basis ``utc``) also places the
+records before it; a chunk without one has ``utc`` NULL.
 
 The archive is the truth and the database is derived from it. A chunk is pending
 when it has no ``chunks`` row or one written under a different catalog (a sha256
@@ -19,7 +23,7 @@ anywhere in there leaves no marker, so the next run does the chunk again.
 Usage:
     script/sdlog_decode.py init   --config decode.toml   # create the tables
     script/sdlog_decode.py run    --config decode.toml   # every pending chunk
-    script/sdlog_decode.py status --config decode.toml   # per device: ok / defect / pending
+    script/sdlog_decode.py status --config decode.toml   # per device: ok / defect / pending, coverage
 
 Exit status of ``run``: 0 every pending chunk loaded; 1 at least one defect was
 found in this run; 2 usage or config error; 75 the database is unreachable
@@ -37,6 +41,7 @@ import hashlib
 import importlib.util
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -69,10 +74,10 @@ _TOP_KEYS = {"archive", "sink", "clickhouse_url", "database", "lock", "batch_row
 _DEVICE_KEYS = {"name", "vehicle", "dbc"}
 _SINKS = {"clickhouse", "fake"}
 
-FRAME_COLUMNS = ("device", "chunk", "kind", "label", "t_us", "utc_us", "id", "flags", "dlc", "data")
-SIGNAL_COLUMNS = ("vehicle", "device", "chunk", "signal", "t_us", "utc_us", "value")
+FRAME_COLUMNS = ("device", "chunk", "kind", "label", "utc", "id", "flags", "dlc", "data")
+SIGNAL_COLUMNS = ("vehicle", "device", "chunk", "signal", "utc", "value")
 CHUNK_COLUMNS = (
-    "device", "chunk", "file", "seq", "sha256", "bytes", "frames", "signals",
+    "device", "chunk", "file", "seq", "sha256", "bytes", "frames", "can_frames", "matched", "signals",
     "utc_min", "utc_max", "gaps", "catalog", "result", "detail", "decoded_at",
 )
 
@@ -198,35 +203,42 @@ class Decoder:
                 )
             except Exception as err:  # noqa: BLE001 - cantools raises several types
                 raise ConfigError(f"device {device.name!r}: DBC for {label!r} does not load: {err}") from None
-        self._cache: dict[tuple[str, int, bool, str], list[tuple[str, float]]] = {}
+        # (matched, signals, failed): a failed decode is cached too, and counted per frame (D4a)
+        self._cache: dict[tuple[str, int, bool, str], tuple[bool, list[tuple[str, float]], bool]] = {}
         self.errors = 0
 
     def reset_cache(self) -> None:
         self._cache.clear()
 
-    def decode(self, label: str, can_id: int, extended: bool, data_hex: str) -> list[tuple[str, float]]:
+    def decode(self, label: str, can_id: int, extended: bool, data_hex: str) -> tuple[bool, list[tuple[str, float]]]:
+        """(a DBC message matched, its signals). Matched counts toward coverage (D16)
+        even when the decode itself fails."""
         db = self.dbs.get(label)
         if db is None:
-            return []
+            return False, []
         key = (label, can_id, extended, data_hex)
         hit = self._cache.get(key)
         if hit is not None:
-            return hit
+            self.errors += hit[2]
+            return hit[0], hit[1]
         out: list[tuple[str, float]] = []
+        failed = False
         try:
             message = db.get_message_by_frame_id(can_id)
         except KeyError:
             message = None
-        if message is not None and bool(message.is_extended_frame) == extended:
+        matched = message is not None and bool(message.is_extended_frame) == extended
+        if matched:
             try:
                 values = message.decode(
                     bytes.fromhex(data_hex), decode_choices=False, scaling=True, allow_truncated=True
                 )
                 out = [(f"{message.name}.{name}", float(value)) for name, value in values.items()]
             except Exception:  # noqa: BLE001 - one undecodable frame must not stop the chunk
+                failed = True
                 self.errors += 1
-        self._cache[key] = out
-        return out
+        self._cache[key] = (matched, out, failed)
+        return matched, out
 
 
 # ------------------------------------------------------------------------ sinks
@@ -260,6 +272,17 @@ class FakeSink:
                 latest[row["file"]] = row
         return {file: (row["result"], row["catalog"]) for file, row in latest.items()}
 
+    def coverage(self, device: str, catalog: str) -> tuple[int, int]:
+        """(Σ matched, Σ can_frames) over the device's ok chunks under `catalog` (D16)."""
+        self._check()
+        latest: dict[str, dict] = {}
+        for row in self.tables["chunks"]:
+            prev = latest.get(row["file"])
+            if row["device"] == device and (prev is None or row["decoded_at"] >= prev["decoded_at"]):
+                latest[row["file"]] = row
+        ok = [r for r in latest.values() if r["result"] == "ok" and r["catalog"] == catalog]
+        return sum(r["matched"] for r in ok), sum(r["can_frames"] for r in ok)
+
     def delete_chunk(self, device: str, chunk: str) -> None:
         self._check()
         for table in ("frames", "signals"):
@@ -283,6 +306,24 @@ def _tsv_field(value) -> str:
     if isinstance(value, float):
         return repr(value)
     return str(value)
+
+
+# Time columns travel as epoch ms in Python (FakeSink, tests) and as text over TSV: a bare
+# integer is not read as ms by a DateTime64(3) column, an ISO string is unambiguous.
+TIME_COLUMNS = frozenset({"utc", "utc_min", "utc_max"})
+_SECONDS: dict[int, str] = {}
+
+
+def _tsv_time(ms: int | None) -> str:
+    if ms is None:
+        return "\\N"
+    seconds, millis = divmod(ms, 1000)
+    text = _SECONDS.get(seconds)
+    if text is None:
+        if len(_SECONDS) > 100_000:
+            _SECONDS.clear()
+        text = _SECONDS[seconds] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(seconds))
+    return f"{text}.{millis:03d}"
 
 
 class ClickHouseSink:
@@ -329,6 +370,17 @@ class ClickHouseSink:
             state[file] = (result, catalog)
         return state
 
+    def coverage(self, device: str, catalog: str) -> tuple[int, int]:
+        text = self._query(
+            "SELECT sum(m), sum(c) FROM (SELECT argMax(matched, decoded_at) AS m, argMax(can_frames, decoded_at) AS c,"
+            " argMax(result, decoded_at) AS r, argMax(catalog, decoded_at) AS k"
+            f" FROM {self.db}.chunks WHERE device = {{device:String}} GROUP BY file)"
+            " WHERE r = 'ok' AND k = {catalog:String} FORMAT TSV",
+            params={"device": device, "catalog": catalog},
+        ).strip()
+        matched, can = text.split("\t") if text else ("0", "0")
+        return int(matched), int(can)
+
     def delete_chunk(self, device: str, chunk: str) -> None:
         for table in ("frames", "signals"):
             self._query(
@@ -339,14 +391,18 @@ class ClickHouseSink:
     def insert(self, table: str, columns: tuple[str, ...], rows: list[tuple]) -> None:
         if not rows:
             return
-        body = "".join("\t".join(_tsv_field(v) for v in row) + "\n" for row in rows).encode()
+        timed = [c in TIME_COLUMNS for c in columns]
+        body = "".join(
+            "\t".join(_tsv_time(v) if t else _tsv_field(v) for v, t in zip(row, timed)) + "\n" for row in rows
+        ).encode()
         self._query(f"INSERT INTO {self.db}.{table} ({', '.join(columns)}) FORMAT TSV", body=body)
 
 
 def clickhouse_ddl(db: str) -> list[str]:
-    """The three tables (spec §2). Codecs as measured: timestamps delta-coded,
-    payloads ZSTD, ids T64."""
-    utc_alias = "Nullable(DateTime64(6, 'UTC')) ALIAS fromUnixTimestamp64Micro(toInt64(utc_us), 'UTC')"
+    """The three tables (spec §2). Codecs as measured: the one time column, in ms,
+    delta-coded; payloads ZSTD; ids T64. `utc` is NULL in a chunk without a UTC
+    anchor, so it is a nullable sort key."""
+    utc = "Nullable(DateTime64(3, 'UTC')) CODEC(DoubleDelta, ZSTD(3))"
     return [
         f"CREATE DATABASE IF NOT EXISTS {db}",
         f"""CREATE TABLE IF NOT EXISTS {db}.frames (
@@ -354,24 +410,22 @@ def clickhouse_ddl(db: str) -> list[str]:
             chunk String CODEC(ZSTD(3)),
             kind LowCardinality(String),
             label LowCardinality(String),
-            t_us UInt64 CODEC(DoubleDelta, ZSTD(3)),
-            utc_us Nullable(UInt64) CODEC(DoubleDelta, ZSTD(3)),
+            utc {utc},
             id UInt32 CODEC(T64, ZSTD(3)),
             flags LowCardinality(String),
             dlc UInt8 CODEC(ZSTD(3)),
-            data UInt64 CODEC(ZSTD(3)),
-            utc {utc_alias}
-        ) ENGINE = MergeTree PARTITION BY device ORDER BY (device, label, id, t_us)""",
+            data UInt64 CODEC(ZSTD(3))
+        ) ENGINE = MergeTree PARTITION BY device ORDER BY (device, label, id, utc)
+        SETTINGS allow_nullable_key = 1""",
         f"""CREATE TABLE IF NOT EXISTS {db}.signals (
             vehicle LowCardinality(String),
             device LowCardinality(String),
             chunk String CODEC(ZSTD(3)),
             signal LowCardinality(String),
-            t_us UInt64 CODEC(DoubleDelta, ZSTD(3)),
-            utc_us Nullable(UInt64) CODEC(DoubleDelta, ZSTD(3)),
-            value Float64 CODEC(Gorilla, ZSTD(3)),
-            utc {utc_alias}
-        ) ENGINE = MergeTree PARTITION BY vehicle ORDER BY (vehicle, signal, t_us)""",
+            utc {utc},
+            value Float64 CODEC(Gorilla, ZSTD(3))
+        ) ENGINE = MergeTree PARTITION BY vehicle ORDER BY (vehicle, signal, utc)
+        SETTINGS allow_nullable_key = 1""",
         f"""CREATE TABLE IF NOT EXISTS {db}.chunks (
             device LowCardinality(String),
             chunk String,
@@ -380,9 +434,11 @@ def clickhouse_ddl(db: str) -> list[str]:
             sha256 String,
             bytes UInt64,
             frames UInt64,
+            can_frames UInt64,
+            matched UInt64,
             signals UInt64,
-            utc_min Nullable(UInt64),
-            utc_max Nullable(UInt64),
+            utc_min Nullable(DateTime64(3, 'UTC')),
+            utc_max Nullable(DateTime64(3, 'UTC')),
             gaps UInt32,
             catalog String,
             result LowCardinality(String),
@@ -408,6 +464,24 @@ class ChunkResult:
     detail: str = ""
     frames: int = 0
     signals: int = 0
+
+
+def first_utc_anchor(path: Path):
+    """The chunk's first UTC anchor (`#utc`, or a `#clock` with basis `utc`) as a
+    `sdlog.ClockPoint`, or None. `t` is monotonic within a boot and a chunk never
+    spans one, so this anchor places the records before it too (spec §2)."""
+    with path.open("r", encoding="latin-1") as handle:
+        for line in handle:
+            if not line.endswith("\n"):
+                break
+            if line.startswith("#utc,"):
+                fields = line.rstrip("\n").split(",")
+                return sdlog.ClockPoint(sdlog._parse_u64_x(fields[1]), sdlog._parse_u64_x(fields[2]), "utc", "sync")
+            if line.startswith("#clock,"):
+                point = sdlog.parse_clock_line(line.rstrip("\n"))
+                if point.basis == "utc":
+                    return point
+    return None
 
 
 def _defect_reason(report, device: Device) -> str | None:
@@ -439,15 +513,19 @@ def load_chunk(path: Path, device: Device, catalog: str, decoder: Decoder | None
     chunk = f"{seq if seq is not None else 'x'}-{sha[:12]}"
     marker = {
         "device": device.name, "chunk": chunk, "file": path.name, "seq": seq, "sha256": sha,
-        "bytes": len(raw), "frames": 0, "signals": 0, "utc_min": report.first_utc_us,
-        "utc_max": report.last_utc_us, "gaps": len(report.gaps), "catalog": catalog,
+        "bytes": len(raw), "frames": 0, "can_frames": 0, "matched": 0, "signals": 0, "utc_min": None,
+        "utc_max": None, "gaps": len(report.gaps), "catalog": catalog,
         "result": "ok", "detail": "",
     }
     sink.delete_chunk(device.name, chunk)
     reason = _defect_reason(report, device)
-    frames = signals = 0
+    frames = signals = can_frames = matched = 0
+    utc_min = utc_max = None
     if reason is None:
-        reader = sdlog.StreamReader(path)
+        # Forward from the newest UTC anchor in scope (`utc_best` with basis utc),
+        # backwards from the first one before it; est/drift never fill `utc`.
+        first = first_utc_anchor(path)
+        reader = sdlog.StreamReader(path, estimates=True)
         frame_rows: list[tuple] = []
         signal_rows: list[tuple] = []
         if decoder is not None:
@@ -461,13 +539,26 @@ def load_chunk(path: Path, device: Device, catalog: str, decoder: Decoder | None
                 label = reader.label(tag, stream.fields[0])
                 id_hex, data_hex = stream.fields[2], stream.fields[3]
                 can_id = int(id_hex, 16)
+                if stream.utc_best is not None and stream.utc_best[1] == "utc":
+                    utc = stream.utc_best[0] // 1000
+                elif first is not None:
+                    utc = first.resolve(stream.t_us) // 1000
+                else:
+                    utc = None
+                if utc is not None:
+                    utc_min = utc if utc_min is None else min(utc_min, utc)
+                    utc_max = utc if utc_max is None else max(utc_max, utc)
                 frame_rows.append((
-                    device.name, chunk, stream.kind, label, stream.t_us, stream.utc_us, can_id,
+                    device.name, chunk, stream.kind, label, utc, can_id,
                     flags or "-", len(data_hex) // 2, int(data_hex, 16) if data_hex else 0,
                 ))
-                if decoder is not None and stream.kind == "C":
-                    for name, value in decoder.decode(label, can_id, "x" in flags, data_hex):
-                        signal_rows.append((device.vehicle, device.name, chunk, name, stream.t_us, stream.utc_us, value))
+                if stream.kind == "C":
+                    can_frames += 1
+                    if decoder is not None:
+                        hit, values = decoder.decode(label, can_id, "x" in flags, data_hex)
+                        matched += hit
+                        for name, value in values:
+                            signal_rows.append((device.vehicle, device.name, chunk, name, utc, value))
                 if len(frame_rows) >= batch_rows:
                     sink.insert("frames", FRAME_COLUMNS, frame_rows)
                     frames += len(frame_rows)
@@ -488,11 +579,14 @@ def load_chunk(path: Path, device: Device, catalog: str, decoder: Decoder | None
         else:
             # A defect writes nothing but its marker: drop whatever a batch already put in.
             sink.delete_chunk(device.name, chunk)
-            frames = signals = 0
+            frames = signals = can_frames = matched = 0
+            utc_min = utc_max = None
     if reason is not None:
         marker["result"] = "defect"
         marker["detail"] = reason
     marker["frames"], marker["signals"] = frames, signals
+    marker["can_frames"], marker["matched"] = can_frames, matched
+    marker["utc_min"], marker["utc_max"] = utc_min, utc_max
     marker["decoded_at"] = _now()
     sink.insert("chunks", CHUNK_COLUMNS, [tuple(marker[c] for c in CHUNK_COLUMNS)])
     return ChunkResult(path.name, marker["result"], marker["detail"], frames, signals)
@@ -557,12 +651,21 @@ def device_status(config: Config, sink, device: Device) -> tuple[int, int, int]:
     return ok, defect, len(pending)
 
 
+def device_coverage(sink, device: Device) -> float | None:
+    """Share of CAN frames a DBC message matched, over the ok chunks under the
+    current catalog (D16); None when there are no CAN frames yet."""
+    matched, can = sink.coverage(device.name, catalog_hash(device))
+    return matched / can if can else None
+
+
 def cmd_status(config: Config, sink) -> int:
     any_defect = False
     for device in config.devices:
         ok, defect, pending = device_status(config, sink, device)
         any_defect |= defect > 0
-        print(f"{device.name}: {ok} ok, {defect} defect, {pending} pending")
+        share = device_coverage(sink, device)
+        coverage = "-" if share is None else f"{100 * share:.1f} %"
+        print(f"{device.name}: {ok} ok, {defect} defect, {pending} pending, coverage {coverage}")
     return EX_DEFECT if any_defect else 0
 
 

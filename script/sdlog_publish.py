@@ -189,7 +189,7 @@ class ClickHouseDb:
 
     def last_utc(self, device: str) -> int | None:
         text = self.sink.query(
-            f"SELECT max(utc_us) FROM {self.db}.frames WHERE device = {{d:String}} AND utc_us IS NOT NULL",
+            f"SELECT toUnixTimestamp64Micro(max(utc)) FROM {self.db}.frames WHERE device = {{d:String}} AND utc IS NOT NULL",
             {"d": device},
         ).strip()
         return None if text in ("", "\\N", "0") else int(text)
@@ -197,15 +197,16 @@ class ClickHouseDb:
     def gaps_since(self, device: str, since_us: int) -> int:
         text = self.sink.query(
             f"SELECT sum(gaps) FROM (SELECT argMax(gaps, decoded_at) AS gaps, argMax(utc_max, decoded_at) AS u"
-            f" FROM {self.db}.chunks WHERE device = {{d:String}} GROUP BY file) WHERE u >= {{s:UInt64}}",
+            f" FROM {self.db}.chunks WHERE device = {{d:String}} GROUP BY file)"
+            " WHERE u >= fromUnixTimestamp64Micro({s:Int64}, 'UTC')",
             {"d": device, "s": since_us},
         ).strip()
         return int(text or 0)
 
     def latest(self, vehicle: str, signal: str) -> tuple[float, int] | None:
         text = self.sink.query(
-            f"SELECT argMax(value, utc_us), max(utc_us), count() FROM {self.db}.signals"
-            " WHERE vehicle = {v:String} AND signal = {s:String} AND utc_us IS NOT NULL FORMAT TSV",
+            f"SELECT argMax(value, utc), toUnixTimestamp64Micro(max(utc)), count() FROM {self.db}.signals"
+            " WHERE vehicle = {v:String} AND signal = {s:String} AND utc IS NOT NULL FORMAT TSV",
             {"v": vehicle, "s": signal},
         ).strip()
         value, utc, count = text.split("\t")
@@ -226,8 +227,9 @@ class FakeSinkDb:
 
     def last_utc(self, device):
         self.sink._check()
-        values = [f["utc_us"] for f in self.sink.tables["frames"] if f["device"] == device and f["utc_us"] is not None]
-        return max(values) if values else None
+        # The tables hold ms (decode spec §2); this class answers in µs like the real one.
+        values = [f["utc"] for f in self.sink.tables["frames"] if f["device"] == device and f["utc"] is not None]
+        return max(values) * 1000 if values else None
 
     def gaps_since(self, device, since_us):
         self.sink._check()
@@ -235,15 +237,15 @@ class FakeSinkDb:
         for c in self.sink.tables["chunks"]:
             if c["device"] == device and (c["file"] not in latest or c["decoded_at"] >= latest[c["file"]]["decoded_at"]):
                 latest[c["file"]] = c
-        return sum(c["gaps"] for c in latest.values() if (c["utc_max"] or 0) >= since_us)
+        return sum(c["gaps"] for c in latest.values() if (c["utc_max"] or 0) * 1000 >= since_us)
 
     def latest(self, vehicle, signal):
         self.sink._check()
-        rows = [r for r in self.sink.tables["signals"] if r["vehicle"] == vehicle and r["signal"] == signal and r["utc_us"] is not None]
+        rows = [r for r in self.sink.tables["signals"] if r["vehicle"] == vehicle and r["signal"] == signal and r["utc"] is not None]
         if not rows:
             return None
-        best = max(rows, key=lambda r: r["utc_us"])
-        return best["value"], best["utc_us"]
+        best = max(rows, key=lambda r: r["utc"])
+        return best["value"], best["utc"] * 1000
 
 
 # ------------------------------------------------------------------------ collect
