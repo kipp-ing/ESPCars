@@ -1,0 +1,17 @@
+# Long-running: MQTT last will and the "collect now" button need a connection.
+[Unit]
+Description=sd_logger pipeline state to Home Assistant (MQTT)
+After=network-online.target clickhouse-server.service
+Wants=network-online.target
+
+[Service]
+User=sdlog
+ExecStart=/opt/espcars/.venv/bin/python /opt/espcars/script/sdlog_publish.py run --config /etc/sdlog-publish/publish.toml
+Restart=always
+RestartSec=30
+# The button's trigger file lives here; the fleet's .path unit watches it.
+RuntimeDirectory=sdlog-fleet
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
