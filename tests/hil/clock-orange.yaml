@@ -1,0 +1,55 @@
+# Mr. Orange — the `#clock` bench (docs/sd_logger-clock-spec.md §7, H1-H8).
+#
+# The production configuration in the car (stress-orange-collect.yaml: gateway + LIN + native CAN
+# taps + logging + chunks served over WiFi) plus the three things the clock tests need:
+#
+#   * an SNTP clock wired into `time_id:` — H2/H5/H6, and the correction `check` prints;
+#   * a web_server with two buttons, the only control channel a bench run needs:
+#       POST http://<ip>/button/restart/press             H3 (warm reset) and H7 (SW restart)
+#       POST http://<ip>/button/deep_sleep_10_min/press   H4 (deep-sleep wake)
+#   * nothing else. Everything is read back off the card over the collection server:
+#       .venv/bin/python script/sdlog_collect.py pull http://<ip>:8080 --into <dir>
+#       .venv/bin/python script/sdlog.py check <dir>/<device>/L*.{LOG,UPL}
+#
+# Flash:
+#   .venv/bin/esphome run --no-logs tests/hil/clock-orange.yaml \
+#     --device "$(.venv/bin/python script/hil/ports.py orange)"
+#
+# H1 (no clock at all) and the cold path of H5 build the same file with the clock taken away:
+#   --substitution sntp_server 192.0.2.1    (TEST-NET-1: never answers, so nothing ever syncs)
+#
+# The deep sleep drops GPIO7 and with it the +5 V domain: CAN is dark for those 10 minutes and the
+# ring partners will log it. That is the expected cost of H4, not a finding.
+#
+# NEEDS tests/hil/secrets.yaml (copy secrets.yaml.example).
+
+substitutions:
+  sntp_server: pool.ntp.org
+
+packages:
+  collect: !include stress-orange-collect.yaml
+
+time:
+  - platform: sntp
+    id: sntp_time
+    servers:
+      - ${sntp_server}
+
+sd_logger:
+  time_id: [sntp_time]
+
+web_server:
+  port: 80
+
+deep_sleep:
+  id: clock_sleep
+
+button:
+  - platform: restart
+    name: Restart
+  - platform: template
+    name: Deep sleep 10 min
+    on_press:
+      - deep_sleep.enter:
+          id: clock_sleep
+          sleep_duration: 10min
