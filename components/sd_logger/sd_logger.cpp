@@ -495,6 +495,11 @@ void SdLogger::setup() {
   // guards against is a file that never rotates at all, which on a card looks exactly like a bus
   // that never produced enough to fill one.
   this->apply_rotation_bounds_();
+  // Before any time-sync callback can run (they come from loop()): the clock as this boot found it,
+  // for C12. Back to back, esp_timer first, like on_time_sync().
+  this->setup_clock_.boot_us = static_cast<uint64_t>(esp_timer_get_time());
+  this->setup_clock_.utc_us = gettimeofday_us();
+  this->setup_clock_.valid = this->setup_clock_.utc_us != 0;
   // Before the first file can open: every header carries it (spec F1j, I1).
   this->capture_ident_();
 
@@ -1742,6 +1747,14 @@ void SdLogger::on_time_sync() {
   const uint64_t utc_us = gettimeofday_us();
   if (utc_us == 0)
     return;
+  // C12: nobody set the clock since setup(), so this is no sync — ESPHome's sntp fires its callbacks
+  // from its first loop() whenever the clock already reads valid, i.e. after every warm reset and
+  // every wake. Taking it would relabel a warm or slept clock `utc/sync` and lose the drift state.
+  if (clock_unstepped_since(this->setup_clock_, utc_us, boot_us)) {
+    if (this->clock_unstepped_syncs_++ == 0)
+      ESP_LOGI(TAG, "clock: a time-sync callback left the clock where it was — not a sync, the basis stands");
+    return;
+  }
   this->set_utc_anchor(utc_us, boot_us);
 }
 

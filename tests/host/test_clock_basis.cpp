@@ -16,6 +16,7 @@ using esphome::sd_logger::clock_at;
 using esphome::sd_logger::clock_contradicts_floor;
 using esphome::sd_logger::clock_project;
 using esphome::sd_logger::clock_restate_due;
+using esphome::sd_logger::clock_unstepped_since;
 using esphome::sd_logger::ClockBasis;
 using esphome::sd_logger::ClockPoint;
 using esphome::sd_logger::ClockSrc;
@@ -28,6 +29,7 @@ using esphome::sd_logger::SD_LOG_CLOCK_MIN_EPOCH_US;
 using esphome::sd_logger::SD_LOG_CLOCK_RESTATE_BYTES;
 using esphome::sd_logger::SD_LOG_CLOCK_RESTATE_US;
 using esphome::sd_logger::SD_LOG_MAX_LINE;
+using esphome::sd_logger::SysClockSample;
 using esphome::sd_logger::WakeKind;
 
 namespace {
@@ -433,4 +435,47 @@ TEST(restatement_is_owed_by_bytes_or_by_time) {
   CHECK(clock_restate_due(0, SD_LOG_CLOCK_RESTATE_US, 0));
   CHECK(!clock_restate_due(0, SD_LOG_CLOCK_RESTATE_US - 1, 0));
   CHECK(!clock_restate_due(0, 5, 10));  // a clock that went backwards owes nothing
+}
+
+// C12, from the car field test (2026-10-11, ESP32-C6, `time: sntp` as `time_id:`): the first file after
+// an OTA restart opened `utc/warm` from the system clock, and 0.13 s later ESPHome's sntp first loop()
+// fired on_time_sync with WiFi still down. The logger wrote `#utc` + `#clock,…,utc,sync` for a clock
+// nobody had set; the real SNTP sync at 32 s then stepped it back 12.8 s. The boot-µs/UTC pairs
+// below are the ones from that file.
+TEST(c12_a_sync_callback_that_finds_the_clock_untouched_is_no_sync) {
+  SysClockSample setup;
+  setup.boot_us = 0x39AE9;
+  setup.utc_us = 0x65D904B143071;
+  setup.valid = true;
+  // The spurious callback: 132 335 µs later the clock has moved 132 298 µs. Not a sync.
+  CHECK(clock_unstepped_since(setup, 0x65D904B16353B, 0x59FD8));
+  // The real SNTP sync at 32 s: 12.8 s behind where the untouched clock would be. A sync.
+  CHECK(!clock_unstepped_since(setup, 0x65D904C1CDFE0, 0x1EE8897));
+  // A step forward is a sync just the same.
+  CHECK(!clock_unstepped_since(setup, 0x65D904B143071 + 1000000ull + 0x20000, 0x39AE9 + 0x20000));
+}
+
+TEST(c12_the_tolerance_is_two_ms_plus_100_ppm) {
+  SysClockSample setup;
+  setup.boot_us = 1000;
+  setup.utc_us = T_2026;
+  setup.valid = true;
+  // 0.5 s in: 2 ms of slack, no more.
+  CHECK(clock_unstepped_since(setup, T_2026 + 500000 + 2000, 1000 + 500000));
+  CHECK(clock_unstepped_since(setup, T_2026 + 500000 - 2000, 1000 + 500000));
+  CHECK(!clock_unstepped_since(setup, T_2026 + 500000 + 2001, 1000 + 500000));
+  // 100 s in: 2 ms + 10 ms. A whole-second RTC sync (synchronize_epoch_) always steps further.
+  CHECK(clock_unstepped_since(setup, T_2026 + 100000000 + 12000, 1000 + 100000000));
+  CHECK(!clock_unstepped_since(setup, T_2026 + 100000000 + 12001, 1000 + 100000000));
+  CHECK(!clock_unstepped_since(setup, T_2026 + 100000000 - 1000000, 1000 + 100000000));
+}
+
+TEST(c12_without_a_setup_sample_every_callback_is_a_sync) {
+  SysClockSample none;  // a callback before setup() sampled the clock
+  CHECK(!clock_unstepped_since(none, T_2026, 5000));
+  SysClockSample setup;
+  setup.boot_us = 9000;
+  setup.utc_us = T_2026;
+  setup.valid = true;
+  CHECK(!clock_unstepped_since(setup, T_2026, 8000));  // boot µs before the sample: not comparable
 }

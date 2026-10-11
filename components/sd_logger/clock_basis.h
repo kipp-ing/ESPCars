@@ -446,6 +446,40 @@ inline bool clock_contradicts_floor(const ClockPoint &floor, uint64_t utc_us, ui
   return utc_us + SD_LOG_CLOCK_SLACK_US < floor_now;
 }
 
+/// C12: how far the system clock may wander from its own boot-time reading without anyone having
+/// set it. Both readings are esp_timer + gettimeofday() pairs, and with IDF's default time source
+/// (RTC + high-resolution timer) both run off the same timer while awake, so an untouched clock
+/// matches to within a few µs (field test 2026-10-11: 37 µs). 2 ms plus 100 ppm of the time between
+/// the two is far above that and far below any step a real sync makes.
+static const uint64_t SD_LOG_CLOCK_NO_STEP_US = 2000;
+static const uint64_t SD_LOG_CLOCK_NO_STEP_PPM = 100;
+
+/// The system clock as `setup()` found it: what a later sync callback is compared against (C12).
+struct SysClockSample {
+  uint64_t boot_us{0};
+  uint64_t utc_us{0};
+  bool valid{false};
+};
+
+/// C12: true when a time-sync callback finds the system clock exactly where it would be had nobody
+/// set it since `at_setup` — then the callback is not a sync, whatever fired it, and the basis the
+/// boot decided (`warm`, `drift`) stands. The case that needs it: ESPHome's sntp component calls its
+/// sync callbacks from its first `loop()` whenever the clock already reads as valid, which after a
+/// warm reset or a deep-sleep wake it always does (esphome/components/sntp/sntp_component.cpp,
+/// `SNTPComponent::loop()` -> `time_synced()`, ESPHome 2026.7.0). Generic for every `time:`
+/// platform: a real sync sets the clock (SNTP to the µs, `RealTimeClock::synchronize_epoch_()` to
+/// the second), and a callback with no step is evidence of none. The cost is conservative only: a
+/// real sync that agrees with the running clock to within the tolerance keeps the lower label.
+/// No sample (a callback before `setup()` took one) is never called unstepped.
+inline bool clock_unstepped_since(const SysClockSample &at_setup, uint64_t utc_us, uint64_t boot_us) {
+  if (!at_setup.valid || boot_us < at_setup.boot_us)
+    return false;
+  const uint64_t elapsed = boot_us - at_setup.boot_us;
+  const uint64_t expected = at_setup.utc_us + elapsed;
+  const uint64_t diff = utc_us > expected ? utc_us - expected : expected - utc_us;
+  return diff <= SD_LOG_CLOCK_NO_STEP_US + elapsed / 1000000ull * SD_LOG_CLOCK_NO_STEP_PPM;
+}
+
 /// When the restatement is owed (spec §4 item 2).
 inline bool clock_restate_due(uint32_t bytes_since, uint64_t now_us, uint64_t last_us) {
   return bytes_since >= SD_LOG_CLOCK_RESTATE_BYTES ||

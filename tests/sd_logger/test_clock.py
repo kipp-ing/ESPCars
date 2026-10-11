@@ -2,6 +2,7 @@
 
 C9  `time_id:` takes one clock or a list of them.
 C6  no estimate ever reaches the system clock: the component never calls settimeofday().
+C12 a time-sync callback that finds the clock untouched since setup() is not a sync.
 """
 
 from __future__ import annotations
@@ -49,3 +50,27 @@ def test_c6_the_component_never_sets_the_system_clock() -> None:
             if re.search(r"\b(settimeofday|clock_settime|sntp_sync_time)\s*\(", code):
                 offenders.append(f"{path.name}:{number}: {line.strip()}")
     assert not offenders, "\n".join(offenders)
+
+
+def _body(name: str) -> str:
+    """The text of `SdLogger::<name>(...) { ... }`, by brace counting from its definition."""
+    text = (COMPONENT / "sd_logger.cpp").read_text(encoding="utf-8")
+    match = re.search(rf"^\S[^\n]*SdLogger::{name}\([^)]*\)\s*\{{", text, re.MULTILINE)
+    assert match, f"SdLogger::{name} not found"
+    depth, i = 1, match.end()
+    while depth:
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        i += 1
+    return text[match.end() : i - 1]
+
+
+def test_c12_an_unstepped_callback_returns_before_it_can_upgrade_the_basis() -> None:
+    # Field test 2026-10-11: ESPHome's sntp first loop() fires on_time_sync after every warm reset
+    # and wake, and the logger wrote `utc/sync` for a clock nobody had set. The predicate is
+    # host-tested (c12_* in tests/host/test_clock_basis.cpp); this pins that it guards the anchor.
+    body = _body("on_time_sync")
+    guard = body.index("clock_unstepped_since(this->setup_clock_, utc_us, boot_us)")
+    assert body.index("return;", guard) < body.index("this->set_utc_anchor(")
+    # The sample is taken in setup(), before anything a loop() can fire.
+    setup = _body("setup")
+    assert setup.index("this->setup_clock_.utc_us = gettimeofday_us();") < setup.index("this->capture_ident_();")

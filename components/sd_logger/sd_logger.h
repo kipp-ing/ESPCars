@@ -657,6 +657,10 @@ class SdLogger : public Component {
   // Under utc_mux_ as well: the best clock the header states, and the T3/T4 floor kept for C8.
   ClockPoint clock_best_;
   ClockPoint clock_floor_;
+  // Main loop only (setup() and the time-sync callback): the system clock as setup() found it, so
+  // a callback that finds it unchanged is not taken for a sync (clock spec C12).
+  SysClockSample setup_clock_;
+  uint32_t clock_unstepped_syncs_{0};
   std::atomic<uint32_t> clock_back_{0};
   // Writer-task only: the restatement cadence (clock spec §4), and whether learn_clock_() has run.
   uint32_t clock_bytes_since_{0};

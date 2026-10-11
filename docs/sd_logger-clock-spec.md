@@ -101,6 +101,41 @@ In deep sleep it counts on the slow clock.
 
 T3 and T4 are combined as `max()`. The `src` field names whichever one won.
 
+### A `time:` callback is not always a sync (field test, 2026-10-11)
+
+T1 starts at a clock's `on_time_sync`, and that callback can fire without any
+sync. ESPHome's sntp component (`esphome/components/sntp/sntp_component.cpp`,
+ESPHome 2026.7.0) runs `loop()` once on ESP32: it calls `disable_loop()` and,
+unless it already has time, `time_synced()`. That checks only
+`now().is_valid()` and then calls every sync callback. After a warm reset or a
+deep-sleep wake the system clock is always valid, so the callbacks fire in the
+first loop, before WiFi is up. The real IDF SNTP notification comes later and
+fires them again.
+
+Seen in the car, first file after an OTA restart: `#clock,…,utc,warm` at
+0.24 s, then `#utc` + `#clock,…,utc,sync` at 0.37 s, and the real SNTP sync at
+32 s stepped the clock back 12.8 s. After a wake the same quirk would relabel a
+`drift` clock `utc/sync` and clear the drift state, so in the car (no WiFi
+after a wake) every file would claim a reading it does not have.
+
+The guard is C12, and it is generic rather than an sntp special case: a real
+sync **sets** the system clock (SNTP to the µs, `RealTimeClock::
+synchronize_epoch_()` to the second), so a callback that finds the clock where
+it would be had nobody touched it since `setup()` is evidence of no sync,
+whichever platform fired it. Not chosen: `esp_sntp_get_sync_status()` (sntp
+only, and reading it resets it), or "ignore callbacks before the first loop"
+(timing, not evidence). The cost is conservative: a real sync that agrees with
+the running clock within the tolerance keeps the lower label — including
+`synchronize_epoch_()`'s ±1 s "already synchronized" branch, which fires the
+callbacks without setting the clock.
+
+**A first number for the sleep clock (single observation, unconfirmed).** The
+same C6 woke from roughly 15 min of deep sleep on the internal RC slow clock
+with the clock about 12.8 s off — on the order of 1 %, far worse than the
+"several seconds per day" above. One run; the fixed image measures it properly:
+the wake's `drift/sleep:<s>` statement followed by the first real sync is what
+`sdlog.py check` turns into s per day slept (C10).
+
 ## 4. Format additions (additive — `fmtver` stays 2)
 
 ```
@@ -161,6 +196,7 @@ reusing `#utc`. Older readers skip unknown `#` lines by design, so they ignore
 | C9 | `time_id:` accepts one id **or a list** (e.g. an RTC chip plus SNTP). Each clock's `on_time_sync` updates the anchor. A single id keeps working unchanged. | schema test |
 | C10 | `sdlog.py`: `check` prints the file's time basis (`head` shows the raw header `#clock` line) (`utc sync/warm`, `drift sleep <s>`, `est card:<seq>`/`build`, or none). When a `utc` line follows a `drift` or `est` line, they print the measured correction. For `drift` they also print it as a rate (s per day slept). `extract` keeps the `utc_us` column **from `#utc` only**. A new opt-in `--estimates` adds `utc_best_us,utc_basis`. | `tests/sd_logger/test_sdlog_reader.py` |
 | C11 | Spec, user guide and the F1d table in `sd_logger-spec.md` describe `#clock`, and the recipe in §6. | review |
+| C12 | **A callback is a sync only if the clock moved.** `setup()` samples the system clock (esp_timer + `gettimeofday()`). A `time_id:` callback that finds it within 2 ms + 100 ppm of where that sample projects is not a sync: no anchor, no `utc/sync`, the RTC-memory drift state is kept, one `I` log line. So after a warm reset the basis stays `utc/warm`, after a wake `drift/sleep`, until a real sync steps the clock. A callback before the sample exists is a sync. See §3, *A `time:` callback is not always a sync*. | host: `c12_*` (the field-test pairs, the tolerance edges, no sample); source test `test_c12_*` (the guard returns before `set_utc_anchor`); HIL H3/H4 |
 
 ## 6. "It needs a clock": hardware and config
 
@@ -219,8 +255,8 @@ sd_logger:
 |---|---|---|
 | H1 | Fresh card (or one without `#clock`), no `time:` → boot | header `#clock,…,est,build`, `utc_us` = the build time |
 | H2 | `time: sntp` + `time_id` → boot with WiFi | `#utc` + `#clock,…,utc,sync`; the µs part ≠ 0 (C7) |
-| H3 | After H2, soft reset (OTA / `esphome` reboot) | new file: `#clock,…,utc,warm` **before** any sync line; difference to the following `sync` ≤ 1 s |
-| H4 | After H2, `deep_sleep` for 10 min with SNTP blocked, wake | old file ends `#clock` + `#close,clean`; new file opens `#clock,…,drift,sleep,~600`; after unblocking SNTP, `check` prints the correction and the rate in s/day |
+| H3 | After H2, soft reset (OTA / `esphome` reboot) | new file: `#clock,…,utc,warm` **before** any sync line; no `utc,sync` until SNTP really syncs (none in the first second, C12); difference to the following `sync` ≤ 1 s |
+| H4 | After H2, `deep_sleep` for 10 min with SNTP blocked, wake | old file ends `#clock` + `#close,clean`; new file opens `#clock,…,drift,sleep,~600` and states **no** `utc,sync` (nor `#utc`) while SNTP is blocked (C12); after unblocking SNTP, `check` prints the correction and the rate in s/day |
 | H5 | Cold start with no time source reachable (WiFi off / SNTP blocked) | `#clock,…,est,card,<prev seq>`; floor ≥ the previous file's last `#clock` projection; `dropped=0` under load |
 | H6 | WiFi back → sync | `#utc` + `#clock,…,utc,sync`; `sdlog.py check` prints the correction ≥ 0 |
 | H7 | Reset matrix: SW restart, esptool/EN reset, a 12 V **and** USB re-plug | the table of which reasons kept the clock goes into §3. C1 behaves correctly for each |

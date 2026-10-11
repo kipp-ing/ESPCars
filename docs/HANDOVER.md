@@ -39,7 +39,14 @@ matching `dump_config`'s `ident:` line, and that `mac` equal to the WiFi `Local
 MAC`. A field test on a car device started 2026-10-11; it is evidence, not the
 bench run. Its first finding is fixed on the branch: on the C6 `#ident` named the
 802.15.4 EUI-64's first six bytes as `mac` (`…:ff:fe:…`) and only 9 `elf`
-digits (spec F1j I2); re-check both on the next flash.
+digits (spec F1j I2); re-check both on the next flash. Its second finding is
+fixed too: ESPHome's sntp fires `on_time_sync` from its first `loop()` whenever
+the clock is already valid, so every warm reset and every wake was relabelled
+`utc/sync` 0.37 s after boot (clock spec C12 now requires the clock to have
+moved); on the next flash a warm restart must stay `utc/warm` and a wake
+`drift/sleep` until SNTP really syncs. Unconfirmed, one run: that C6's RC sleep
+clock was ~12.8 s off after ~15 min of deep sleep (~1 %); the fixed image
+measures it as `drift` + correction.
 
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real
