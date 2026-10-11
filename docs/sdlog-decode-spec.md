@@ -1,6 +1,6 @@
 # sdlog_decode: archived chunks into a queryable database
 
-2026-10-11, **draft**. This is the host-side step after `script/sdlog_fleet.py`. The fleet
+2026-10-11. O1–O3 decided (cantools, HTTP via urllib, lightweight DELETE per chunk). This is the host-side step after `script/sdlog_fleet.py`. The fleet
 leaves sealed, verified chunks in `<archive>/<device>/`. This tool loads each
 chunk into a column store, once as raw frames and once as decoded signals. When the
 decode rules change, it replaces exactly that chunk's rows.
@@ -52,9 +52,9 @@ The tool creates these (`init`). They are written only by this tool.
 
 | Table | Columns | Engine / order |
 |---|---|---|
-| `frames` | device, chunk, t_us UInt64, utc DateTime64(6) NULL, label, id UInt32, flags, dlc, data UInt64 | MergeTree, ORDER BY (device, label, id, t_us), PARTITION BY (device, toYYYYMM(utc)) |
-| `signals` | vehicle, device, chunk, t_us, utc NULL, signal (`<Message>.<Signal>`), value Float64 | MergeTree, ORDER BY (vehicle, signal, t_us) |
-| `chunks` | device, chunk, file, seq, sha256, bytes, frames, signals, utc_min/max, gaps, catalog, result, detail, decoded_at | ReplacingMergeTree(decoded_at), ORDER BY (device, chunk) |
+| `frames` | device, chunk, kind (C/L/U/I), label, t_us UInt64, utc_us UInt64 NULL, id UInt32, flags, dlc, data UInt64 (the data hex as one big-endian number), `utc` alias | MergeTree, PARTITION BY device, ORDER BY (device, label, id, t_us) |
+| `signals` | vehicle, device, chunk, signal (`<Message>.<Signal>`), t_us, utc_us NULL, value Float64, `utc` alias | MergeTree, PARTITION BY vehicle, ORDER BY (vehicle, signal, t_us) |
+| `chunks` | device, chunk, file, seq, sha256, bytes, frames, signals, utc_min/max, gaps, catalog, result, detail, decoded_at | ReplacingMergeTree(decoded_at), ORDER BY (device, file) |
 
 - **`chunk` = `<seq>-<sha256[:12]>`.** A card that restarts its seq after an erase
   produces new chunk keys, not collisions (`sdlog-collection-design.md` §10 item 2: no boot id yet).
@@ -69,18 +69,20 @@ The tool creates these (`init`). They are written only by this tool.
 |---|---|---|
 | D1 | **Config.** Rejects an unknown key, a duplicate device, a missing DBC file, an unknown sink, with exit 2 naming the problem. | `test_config_rejects` (parametrized) |
 | D2 | **Shared reader.** Frames come from the same parser as `sdlog.py extract` (one generator, used by both). `extract`'s output is byte-identical before and after the refactor. | `test_extract_unchanged_after_refactor`, `test_reader_yields_frames_with_utc` |
-| D3 | **Frames are lossless.** Every C/L record in a clean chunk becomes one `frames` row with identical t_us/label/id/flags/data; utc is filled where a `#utc` anchor resolves it, NULL before it. | `test_frames_match_extract` |
-| D4 | **Decode.** With a DBC for the frame's label: every signal of the matched message becomes one `signals` row (physical value: factor/offset, signed, Intel and Motorola, multiplexed). Frames without a DBC message stay frames only. | `test_decode_against_reference` (mini.dbc, hand-computed values), `test_unknown_id_is_frames_only` |
+| D3 | **Frames are lossless.** Every C/L/U/I record in a clean chunk becomes one `frames` row with identical t_us/label/id/flags/data; utc is filled where a `#utc` anchor resolves it, NULL before it. | `test_frames_match_extract` |
+| D4 | **Decode.** With a DBC for the frame's label: every signal of the matched message becomes one `signals` row (physical value: factor/offset, signed, Intel and Motorola, multiplexed). A message matches only if standard/extended agrees with the `x` flag. Frames without a DBC message stay frames only; LIN is not DBC-decoded. | `test_decode_against_reference` (mini.dbc, hand-computed values), `test_unknown_id_is_frames_only`, `test_an_extended_flag_mismatch_does_not_match` |
+| D4a | **Real DBCs carry mistakes.** A DBC loads non-strict: a signal that does not fit its message fails only its own frames (counted in `chunks.detail`), the rest of the file decodes. A DBC that does not load at all exits 2. | `test_a_signal_that_does_not_fit_spares_the_rest_of_the_dbc`, `test_an_unloadable_dbc_exits_two` |
 | D5 | **Commit marker last.** For one chunk: delete its rows → insert frames → insert signals → write the `chunks` row. A chunk without a `chunks` row with `result=ok` and the current `catalog` is pending. | `test_a_crash_before_the_marker_redoes_the_chunk` |
-| D6 | **Idempotent.** Running `run` twice changes nothing: the row counts and the `chunks` rows stay the same. | `test_second_run_is_a_noop` |
+| D6 | **Idempotent.** Running `run` twice changes nothing: the row counts and the `chunks` rows stay the same. A chunk is pending iff it has no `chunks` row or one under another catalog; `.part` files are never loaded. | `test_second_run_is_a_noop`, `test_partials_are_not_loaded`, `test_a_reused_seq_is_a_new_chunk_key` |
 | D7 | **Catalog change.** If a device's DBC changes, all of its chunks become pending. A rerun replaces their signals with no duplicates, and the `frames` count is unchanged. | `test_dbc_edit_redecodes_without_duplicates` |
-| D8 | **Defect.** A chunk that `sdlog.py check` would reject (unknown version, unreadable stamp, missing `#close`): `chunks.result=defect` with the reason, no frames, no signals. Exit 1. A truncated last line is not a defect. | `test_a_bad_chunk_is_a_defect_and_writes_nothing` |
+| D8 | **Defect.** A chunk with a malformed line, an unknown write format, no `#close` (archived chunks are sealed) or an `#origin` naming another device: `chunks.result=defect` with the reason, no frames, no signals. A defect is not retried until the catalog changes (the file cannot change). A torn last line is not a defect. | `test_a_bad_chunk_is_a_defect_and_writes_nothing` (parametrized), `test_a_torn_last_line_is_not_a_defect` |
 | D9 | **Gaps.** `#gap` lines are counted into `chunks.gaps`; the frames around them load normally. | `test_gaps_are_recorded` |
 | D10 | **Archive is read-only** to this tool. | `test_archive_is_untouched` |
-| D11 | **Exit status**: 0 all ok; 1 at least one defect; 2 usage/config; 75 sink unreachable (nothing marked, retry next run). | `test_exit_status` |
+| D11 | **Exit status** of `run`: 0 all ok; 1 a defect found in this run; 2 usage/config; 75 sink unreachable (nothing marked, retry next run). `status` prints ok/defect/pending per device and exits 1 if any defect is on record. | `test_exit_status`, `test_status_counts` |
 | D12 | **One writer.** `flock` on a lock file next to the config, non-blocking; held → exit 0 with "busy", nothing written. | `test_a_held_lock_skips` |
 | D13 | **No new runtime dependency for the rest of the tooling.** `sdlog.py`, the collector and the fleet stay stdlib-only; only `sdlog_decode.py` imports the DBC library (§5). | `test_reader_imports_stdlib_only` |
-| D14 | Example config fictional, scanned by the private-data guard. | `script/check_no_private_data.py` |
+| D14 | Example config and units in `deploy/sdlog-decode/` fictional, scanned by the private-data guard. | `test_the_example_config_loads`, `script/check_no_private_data.py` |
+| D15 | **ClickHouse round trip** (only with `SDLOG_CLICKHOUSE_URL`): init, load, idempotent rerun, values, the `utc` alias, re-decode after a DBC edit. Uses a throwaway database and drops it. | `test_clickhouse_round_trip` |
 
 ## 4. Out of scope
 
@@ -90,10 +92,19 @@ The tool creates these (`init`). They are written only by this tool.
 - Retention, downsampling, dashboards, alerts. Those are queries over these tables.
 - UDS / `.dcat` decoding of ISO-TP records (`I`). Those load as frames only for now.
 
-## 5. Open decisions
+## 5. Decisions
 
-| ID | Question | Proposal |
+| ID | Decision | Why |
 |---|---|---|
-| O1 | DBC engine: [`cantools`](https://pypi.org/project/cantools/) (mature, multiplexing, both byte orders, a runtime dependency) or extend `dbc2yaml.py`'s stdlib parser (no dependency, but every edge case is ours to get right) | `cantools` at runtime for `sdlog_decode.py` only (D13). A wrong decode is the expensive failure here, and `dbc2yaml.py` already refuses signals the component cannot decode for exactly that reason |
-| O2 | Sink transport: ClickHouse HTTP via `urllib` (TSV inserts) or a driver | HTTP via `urllib`: no second dependency, and the interface is the official one |
-| O3 | Delete before re-insert: lightweight `DELETE` or partition replace | lightweight `DELETE … WHERE device=… AND chunk=…` per chunk; partition replace is for a full rebuild only |
+| O1 | [`cantools`](https://pypi.org/project/cantools/) at runtime, `sdlog_decode.py` only (D13) | A wrong decode is the expensive failure here; `dbc2yaml.py` refuses signals the component cannot decode for the same reason |
+| O2 | ClickHouse over its HTTP interface with `urllib`, TSV inserts | No second dependency; the interface is the official one |
+| O3 | Lightweight `DELETE … WHERE device=… AND chunk=…` per chunk | Partition replace is only for a full rebuild (drop the database and run) |
+
+## 6. Measured (real chunks, 2026-10-11)
+
+Two archived chunks, 229,300 CAN frames at about 580 frames/s, decoded with a real 400-message DBC
+on a laptop against ClickHouse 26.8 on a 2 GB container, over an SSH tunnel:
+
+- 2.2 s CPU, 8.3 s wall, 200 MB RSS for the decoder; ClickHouse peak 50 MB per query
+- 824,794 signal rows (172 signals); on disk before merges: frames 664 KiB, signals 1.8 MiB (about 2.2 B per signal row)
+- aggregate over all signals 58 ms, frames grouped by id 18 ms

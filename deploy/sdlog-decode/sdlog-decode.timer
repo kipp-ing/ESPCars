@@ -1,0 +1,10 @@
+[Unit]
+Description=sd_logger archive decode every 5 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
