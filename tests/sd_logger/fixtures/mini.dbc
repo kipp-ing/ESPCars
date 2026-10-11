@@ -1,0 +1,27 @@
+VERSION ""
+
+
+NS_ :
+
+BS_:
+
+BU_: DEMO
+
+
+BO_ 256 DEMO_STATUS: 8 DEMO
+ SG_ Speed : 0|16@1+ (0.01,0) [0|655.35] "km/h" Vector__XXX
+ SG_ Temp : 16|8@1- (0.5,0) [-64|63.5] "degC" Vector__XXX
+ SG_ Gear : 24|4@1+ (1,0) [0|15] "" Vector__XXX
+
+BO_ 512 DEMO_PACK: 8 DEMO
+ SG_ PackVoltage : 7|16@0+ (0.1,0) [0|6553.5] "V" Vector__XXX
+ SG_ PackCurrent : 23|16@0- (0.1,0) [-3276.8|3276.7] "A" Vector__XXX
+
+BO_ 768 DEMO_MUX: 3 DEMO
+ SG_ Mux M : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ CellA m0 : 8|16@1+ (0.001,0) [0|65.535] "V" Vector__XXX
+ SG_ CellB m1 : 8|16@1+ (0.001,0) [0|65.535] "V" Vector__XXX
+
+BO_ 2566848768 DEMO_EXT: 1 DEMO
+ SG_ Counter : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+

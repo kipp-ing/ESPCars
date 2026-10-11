@@ -23,6 +23,21 @@ still hit 19.4 laps/s), then a bench case for the new path — a rule with
 recompute, and `set_signal` toggling pass-through. The ISR change is confined to
 rules that declare `e2e` (8-byte copy + ≤8-byte bitwise CRC-8).
 
+**1.0a PR #8 (`sd_logger` `#clock` time basis, with PR #9's `#ident` merged
+into it) goes to main without any hardware run** — main (27abe14, new
+since the branch point: #10 sdlog_decode) merged into the branch, `StreamReader` now
+carries the opt-in `--estimates` clock and `sdlog_decode` was shown to read
+`#clock`/`#ident` files unchanged (`test_ident_and_clock_lines_change_no_frame`).
+`check.sh` (1108 pytest, 542 host cases, clang-format, config) and `esphome
+compile` of `tests/build/sd_logger/test.esp32-c6-idf.yaml` were green; nothing
+ran on a board. Owed, on Orange with `tests/hil/clock-orange.yaml`: the clock
+spec's H1–H8 (`docs/sd_logger-clock-spec.md` §7 — boot basis, SNTP, warm reset,
+deep sleep drift, card floor, resync correction, reset matrix, then `verify.py`
+exit 0), and #9's I1 riding along — `sdlog.py check` after a boot, a rotation
+and a deep-sleep wake shows an `ident` line for every file, its `mac`/`elf`
+matching `dump_config`'s `ident:` line. A field test on a car device started
+2026-10-11; it is evidence, not the bench run.
+
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real
 device attached to the bench for testing transmits in the same range at
@@ -89,11 +104,6 @@ has no exception → TEC to 256 → bus-off → recovery → flap ~1/s. Unblocks
   deliberate gap, not an oversight.
 - Ledger leftovers: Todo 7b (§3.7), Todo 4's counter and `reclaim_head` check
   (§3.4), Todo 8's two never-compiled config shapes (§3.8).
-- `sd_logger` `#ident` (spec §6 F1j, 2026-10-11): host, pytest and compile are
-  green; the I1 bench half is owed — `sdlog.py check` on a card after a boot,
-  a rotation and a deep-sleep wake must show an `ident` line for every file,
-  and its `mac`/`elf` must match `dump_config`'s `ident:` line. Ride it along
-  with the `#clock` H1–H8 run on Orange.
 
 ## 2. Where the detail lives
 
