@@ -9,6 +9,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 User=sdlog
+# A requested pass (sdlog-fleet.path) consumes its trigger; absent is fine.
+ExecStartPre=-/bin/rm -f /run/sdlog-fleet/trigger
 ExecStart=/usr/bin/python3 /opt/espcars/script/sdlog_fleet.py run --config /etc/sdlog-fleet/fleet.toml
 # A pass that hangs is killed by the fleet's own timeout_s first; this is the backstop.
 TimeoutStartSec=2h

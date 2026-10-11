@@ -1,0 +1,12 @@
+# "Collect now": sdlog_publish.py creates the trigger, this starts one fleet pass.
+# sdlog-fleet.service removes the trigger when it starts, so a press during a pass
+# gives exactly one more pass afterwards (PathExists re-triggers while it exists).
+[Unit]
+Description=sd_logger fleet collection on request
+
+[Path]
+PathExists=/run/sdlog-fleet/trigger
+Unit=sdlog-fleet.service
+
+[Install]
+WantedBy=paths.target

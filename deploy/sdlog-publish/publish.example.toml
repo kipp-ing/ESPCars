@@ -1,0 +1,24 @@
+# sdlog_publish — example config (docs/sdlog-publish-spec.md §1.1). Fictional.
+# The real instance config — broker, user, which signals a vehicle shows — lives with the deployment.
+
+node = "sdlog"                                   # HA device and topic root
+decode_config = "/etc/sdlog-decode/decode.toml"  # devices, vehicles and ClickHouse come from here
+fleet_state = "/var/lib/sdlog-fleet"
+archive_min_free_mb = 1024
+trigger = "/run/sdlog-fleet/trigger"             # watched by sdlog-fleet.path
+interval_s = 60
+expire_after_s = 1800
+
+[mqtt]
+host = "192.0.2.42"
+port = 1883
+user = "sdlog"
+password_file = "/etc/sdlog-publish/mqtt.pass"   # never inline
+
+[[vehicle]]
+name = "demo-car"
+[[vehicle.sensor]]
+key = "speed"
+name = "Speed"
+signal = "DEMO_STATUS.Speed"
+unit = "km/h"

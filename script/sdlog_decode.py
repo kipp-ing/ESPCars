@@ -293,6 +293,10 @@ class ClickHouseSink:
         self.db = database
         self.timeout_s = timeout_s
 
+    def query(self, sql: str, params: dict | None = None) -> str:
+        """A read query, for tools built on these tables (sdlog_publish.py)."""
+        return self._query(sql, params=params)
+
     def _query(self, sql: str, body: bytes | None = None, params: dict | None = None) -> str:
         query = {"query": sql}
         for key, value in (params or {}).items():
@@ -542,16 +546,23 @@ def cmd_run(config: Config, sink) -> int:
     return EX_DEFECT if defects else 0
 
 
+def device_status(config: Config, sink, device: Device) -> tuple[int, int, int]:
+    """(ok, defect, pending) for one device — what `status` prints, and what
+    sdlog_publish.py reports, from one place."""
+    catalog = catalog_hash(device)
+    state = sink.chunk_state(device.name)
+    pending = pending_files(config, device, state, catalog)
+    ok = sum(1 for result, cat in state.values() if result == "ok" and cat == catalog)
+    defect = sum(1 for result, _ in state.values() if result == "defect")
+    return ok, defect, len(pending)
+
+
 def cmd_status(config: Config, sink) -> int:
     any_defect = False
     for device in config.devices:
-        catalog = catalog_hash(device)
-        state = sink.chunk_state(device.name)
-        pending = pending_files(config, device, state, catalog)
-        ok = sum(1 for result, cat in state.values() if result == "ok" and cat == catalog)
-        defect = sum(1 for result, _ in state.values() if result == "defect")
+        ok, defect, pending = device_status(config, sink, device)
         any_defect |= defect > 0
-        print(f"{device.name}: {ok} ok, {defect} defect, {len(pending)} pending")
+        print(f"{device.name}: {ok} ok, {defect} defect, {pending} pending")
     return EX_DEFECT if any_defect else 0
 
 
