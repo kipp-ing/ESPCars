@@ -1,0 +1,50 @@
+# Template entities the portal tests bind to. Nothing here touches a bus or a pin: templates only.
+sensor:
+  - platform: template
+    id: supply_voltage
+    unit_of_measurement: V
+    accuracy_decimals: 2
+    lambda: "return 12.4;"
+    update_interval: 1s
+  - platform: template
+    id: logger_rate
+    unit_of_measurement: Hz
+    lambda: "return 10.0;"
+    update_interval: 1s
+
+text_sensor:
+  - platform: template
+    id: link_state
+    lambda: 'return std::string("idle");'
+    update_interval: 1s
+
+binary_sensor:
+  - platform: template
+    id: link_up
+    lambda: "return true;"
+
+switch:
+  - platform: template
+    id: logging_switch
+    optimistic: true
+
+button:
+  - platform: template
+    id: restart_button
+    on_press:
+      - logger.log: "restart requested (template button, nothing happens)"
+
+select:
+  - platform: template
+    id: mode_select
+    options: [idle, run, test]
+    optimistic: true
+
+number:
+  - platform: template
+    id: interval_number
+    min_value: 1
+    max_value: 60
+    step: 0.5
+    unit_of_measurement: s
+    optimistic: true

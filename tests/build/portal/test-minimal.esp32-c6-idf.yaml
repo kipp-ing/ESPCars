@@ -1,0 +1,15 @@
+esphome:
+  name: portal-minimal-c6
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+
+packages:
+  portal: !include common_minimal.yaml

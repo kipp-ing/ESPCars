@@ -38,6 +38,8 @@ UDS_DIR  := ../../components/uds
 # tier until 2026-07-30, when the bench found that no transfer needing a second
 # flow-control block had ever actually run — see test_isotp_core.cpp's header.
 ISOTP_DIR := ../../components/isotp
+# portal's core (resolver, envelope emitter, action parser) is ESPHome-free by construction.
+PORTAL_DIR := ../../components/portal
 BUILD    := build
 BIN      := $(BUILD)/run_tests
 
@@ -51,7 +53,7 @@ OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o)
 DEPS     := $(OBJS:.o=.d)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
-            -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -DSD_LOGGER_HOST_TEST
+            -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
 
 .PHONY: all test compile bench lockcheck clean
