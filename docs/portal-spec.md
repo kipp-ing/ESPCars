@@ -1,13 +1,14 @@
 # `portal` — specification v1
 
 One self-describing state tree per device, served as one web page plus a JSON API from
-ESPHome's shared `web_server_base`, with optional controls (actions) behind a login.
+ESPHome's shared `web_server_base`, with optional controls (actions) and an optional login
+that guards only those controls.
 
 This document is the contract between implementer and tester. Behaviour that is not here is
 not required; behaviour that contradicts it is a bug in one of the two, and the spec owner
 decides which (see §11).
 
-**Status:** v1, 2026-10-12. Origin: the `webui_node` component of a private bench-simulator
+**Status:** v1.1, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10). Origin: the `webui_node` component of a private bench-simulator
 project (wire format `schema_version: 2`), lifted here and made vehicle-neutral. Nothing in
 this repository may name that project, its boards, MACs, IPs or captures
 (`script/check_no_private_data.py`, `docs/CONVENTIONS.md`).
@@ -23,15 +24,19 @@ this repository may name that project, its boards, MACs, IPs or captures
   embedded HTML page at `GET /`.
 - G2 Wire format of `/api/v1/state` stays compatible with `schema_version: 2` consumers:
   every key and every rule of §5 that existed before still holds; new information is added
-  only as new keys inside `actions[]` entries.
+  only as new keys: inside `actions[]` entries and the envelope's `links` (both ignored by a
+  consumer that does not know them).
 - G3 Vehicle-neutral: nothing in the component, the asset or its tests names a specific
   vehicle, board or bench. Position (`owns`) is declared in YAML, never derived from which
   components are compiled.
 - G4 One httpd per device: the portal is an `AsyncWebHandler` on `web_server_base`, shared
   with `captive_portal` (§8).
 - G5 Actions: a node may carry controls bound to ESPHome `switch`, `button`, `select` and
-  `number` entities. Actions exist only when declared in YAML, are always behind a login, and
-  every invocation resolves into the tree (accepted / refused / running, with reason and age).
+  `number` entities. Actions exist only when declared in YAML (nothing is controllable by
+  default), and every invocation resolves into the tree (accepted / refused / running, with
+  reason and age).
+- G6 The device can never be locked out by its own configuration: viewing (`/`,
+  `/api/v1/state`) never needs a login, and the optional `auth:` guards only the actions (§6).
 
 **Non-goals (v1)**
 
@@ -87,10 +92,9 @@ portal:
   text_max: 48                 # optional 16..256, default 48; text value cap in bytes
   submodule_size: 12           # optional int >= 1; required iff any node declares submodule_position
   web_asset: my_page.html      # optional path (relative to the YAML); replaces index.html
-  auth:                        # optional; required as soon as any action is declared
+  auth:                        # optional, also with actions; guards only POST actions
     username: !secret web_username
     password: !secret web_password
-    protect: all               # all (default) | actions
   tree: [ <node>, ... ]        # required, >= 1 node; the children of the synthetic root
 ```
 
@@ -218,8 +222,10 @@ actions:
 
 - Exactly one entity key -> else error `an action needs exactly one of ...`.
 - `decimals` on a non-number action -> error.
-- Any action in the tree and no `auth:` -> error `actions require 'auth:' ...` (TX safety:
-  nothing that can transmit is reachable without a login).
+- Actions without `auth:` are valid. Codegen logs one config-time warning
+  (`actions are reachable without a login; access control is the network`), and
+  `dump_config` states `auth: none`. Access control for the device is the network it sits on
+  (AP password, protected LAN); `auth:` is an additional, optional layer for the actions only.
 - A domain's control code compiles only when that domain exists in the build
   (`USE_SWITCH`, `USE_BUTTON`, `USE_SELECT`, `USE_NUMBER`).
 - The portal never changes an entity's own state logic (`restore_mode`, optimistic, etc.).
@@ -232,7 +238,9 @@ actions:
   `web_server`.
 - `port` 32767 and 65535 -> error (they wedge `httpd_stop()`).
 - `web_asset` file missing -> error naming the path.
-- `auth.username` empty -> error. `auth.protect` not in {all, actions} -> error.
+- `auth:` present with an empty `username` or `password` -> error (a half-configured login
+  is caught at build time, never on the device). `auth:` has no other keys; `protect:` does
+  not exist.
 - Consumes 3 TCP sockets (`socket.consume_sockets(3, "portal")`); the listening socket is
   `web_server_base`'s.
 - Sizing defines from Python: `PORTAL_MAX_NODES` (tree nodes + root), `PORTAL_MAX_VALUES`,
@@ -250,7 +258,12 @@ never raises on malformed input.
 ### 5.1 Envelope
 
 Keys in this order: `schema_version` (2), `seq`, `series_legend`, `served_by`, `peers` (`[]`),
-then `path` and `ancestor_role` (only for `?path=`), then `tree`.
+`links`, then `path` and `ancestor_role` (only for `?path=`), then `tree`.
+
+- `links` (new, additive; a consumer that does not know it ignores it): list of
+  `{rel, label, href}`, all non-empty strings, `href` starting with `/`. Empty unless the AP
+  is active (§6.3). A change of `links` advances `seq`. The validator treats the key as
+  optional (older producers) and checks its shape when present.
 
 - `seq` advances (wraps 0 -> 1) when the fingerprint changes. The fingerprint covers every
   value's reading and derived state (not raw ages), and every action's emitted `value`,
@@ -343,13 +356,15 @@ any bound values.
 All routes are claimed by the portal's `canHandle()`; anything else falls through to other
 handlers on `web_server_base` (e.g. `captive_portal`) or to the server's 404.
 
-| route | method | auth (protect=all / actions / no auth) | responses |
+| route | method | login | responses |
 |---|---|---|---|
-| `/` | GET | yes / no / no | 200 `text/html; charset=utf-8`, `Content-Encoding: gzip`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, CSP as before |
-| `/api/v1/state` | GET | yes / no / no | 200 chunked JSON (`Cache-Control: no-store`), 204, 400, 404, 503 per §6.1 |
-| `/api/v1/actions/<node>/<key>` | POST | yes / yes / route not claimed | §6.2 |
+| `/` | GET | never | 200 `text/html; charset=utf-8`, `Content-Encoding: gzip`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, CSP as before |
+| `/api/v1/state` | GET | never | 200 chunked JSON (`Cache-Control: no-store`), 204, 400, 404, 503 per §6.1 |
+| `/api/v1/actions/<node>/<key>` | POST | only when `auth:` is set | §6.2; route not claimed when the build has no action |
+| AP-only routes | GET | never | §6.3 |
 
-Unauthenticated request to a protected route: `401` with
+No GET route ever answers 401, whatever `auth:` says. With `auth:` set, a POST without valid
+credentials gets `401` with
 `WWW-Authenticate: Digest realm="Login Required", qop="auth", nonce=..., opaque=...`, empty
 body, and **no side effect** (the tree and `seq` do not change). A valid Digest response
 (`curl --digest -u user:pass`) passes.
@@ -381,7 +396,7 @@ Body over 256 bytes -> refused `body_too_large`.
 | situation | HTTP | recorded in tree | response body |
 |---|---|---|---|
 | unknown node or key | 404 | no | empty |
-| auth missing/invalid | 401 | no | empty |
+| `auth:` set, credentials missing/invalid | 401 | no | empty |
 | action disabled | 409 | `refused` / `disabled` | result JSON |
 | previous invocation still `running` | 409 | no (the running result stays) | `{"error":"busy"}` |
 | body not parseable / no `value` (non-button) | 400 | `refused` / `invalid_body` | result JSON |
@@ -399,6 +414,23 @@ mutex); `loop()` performs `turn_on()/turn_off()`, `press()`, `make_call().set_op
 `make_call().set_value().perform()` and records `accepted`. **No entity method is called on
 the httpd task.**
 
+### 6.3 AP fallback and captive detection
+
+While `captive_portal` is active (`captive_portal::global_captive_portal->is_active()`, only
+compiled with `USE_CAPTIVE_PORTAL`):
+
+- The portal owns `/`, `/api/v1/state` and the actions route as always.
+- The captive portal's own routes stay with it: `/config.json`, `/wifisave`, and the WiFi setup
+  page at the fixed path **`/wifi`** (the portal never claims these three).
+- Every other GET is claimed by the portal and answered `302 Found` with
+  `Location: http://<soft-AP IP>/` (e.g. `/generate_204`, `/hotspot-detect.html`,
+  `/connecttest.txt`, `/ncsi.txt`). A phone's captive detection therefore opens the portal.
+- The envelope carries `links` (§5.1) with
+  `{"rel":"wifi_setup","label":"WiFi setup","href":"/wifi"}`; the page shows it as a link in
+  the header.
+
+While the AP is not active, the portal claims only its three routes and `links` is `[]`.
+
 ---
 
 ## 7. Page (`index.html`)
@@ -414,8 +446,10 @@ the httpd task.**
 - Actions render per `control`: switch -> toggle, button -> button, select -> dropdown,
   number -> number input + set button (min/max/step), plus a result chip (state, why code or
   detail, age). Disabled actions stay visible with their reason. Unknown `control` -> shown
-  disabled as unrecognised. Requests use `fetch` with JSON bodies; a 401 lets the browser's
-  own Digest prompt handle the login.
+  disabled as unrecognised. Requests use `fetch` with JSON bodies; a 401 on a POST lets the
+  browser's own Digest prompt handle the login. The page itself never needs a login.
+- Each entry of the envelope's `links` is shown as a link in the header (the WiFi setup link
+  while the AP is active).
 
 ---
 
@@ -435,13 +469,15 @@ the pinned ESPHome 2026.7.0 (`esphome/components/web_server_idf/web_server_idf.{
    then `handleRequest()`; form bodies arrive pre-parsed (`arg("value")`).
 4. Auth: `AsyncWebServerRequest::authenticate()` / `requestAuthentication()` exist when
    `USE_WEBSERVER_AUTH` (+ `_DIGEST`) is defined; the portal emits those defines itself. The
-   portal registers with `add_handler_without_auth()` and checks credentials per route (so
-   `protect: actions` is possible and the portal's credentials are not shared with other
-   handlers). This deviates from "set the base credentials" in the original plan on purpose.
+   portal registers with `add_handler_without_auth()` and checks credentials itself, on the
+   POST route only, so GET can never be locked and the portal's credentials are not shared
+   with other handlers. This deviates from "set the base credentials" in the original plan on
+   purpose.
 5. Handler order: the portal registers in `setup()` (priority `WIFI - 1`, like `web_server`),
-   `captive_portal` only when the AP starts, so the portal wins `/`, `/api/v1/state` and
-   `/api/v1/actions/...`; `captive_portal` serves every other GET while the AP is up
-   (`/config.json`, `/wifisave`, OS probes, any other path shows the WiFi page).
+   `captive_portal` only when the AP starts, so the portal is asked first. While the AP is
+   up the portal also claims every GET except `/wifi`, `/config.json` and `/wifisave` (§6.3);
+   `captive_portal`, whose `canHandle()` accepts any GET while active, gets exactly those
+   three and serves its WiFi page at `/wifi`.
 6. The raw path skips `init_response_()`, so the base's default
    `Access-Control-Allow-Origin: *` header is not sent: same-origin, as before.
 
@@ -451,9 +487,10 @@ the pinned ESPHome 2026.7.0 (`esphome/components/web_server_idf/web_server_idf.{
 element buffer are members), and the bench measures the httpd task's stack high-water mark
 after serving the largest test tree (PS-M2-07).
 
-**Fallback trigger:** if PS-M2-06 or PS-M2-07 fails on the bench and cannot be fixed inside
-the handler, the implementer switches to an own httpd (stack 6144, own Digest check) and the
-spec owner records the decision and its heap cost here.
+**Fallback trigger (D4):** the default stays `web_server_base`. Only if PS-M2-06 or PS-M2-07
+fails on the bench and cannot be fixed inside the handler does the spec owner decide, from the
+measured numbers, on an own httpd (stack 6144, own Digest check) and record the decision and
+its heap cost here.
 
 **Numbers** (filled in by M4/M5; tester reports, spec owner records):
 
@@ -508,13 +545,15 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M2-01 | No `httpd_start` in `components/portal/`; the portal registers via `web_server_base` (`init()` + `add_handler_without_auth`) | py (grep), rev |
 | PS-M2-02 | `portal` + `web_server` in one config is rejected with the §4.8 message | py |
 | PS-M2-03 | `port:` reaches `web_server_base::set_port`; with `captive_portal` + `wifi: ap:` the config compiles | py (codegen) or cc |
-| PS-M2-04 | `auth:` emits `USE_WEBSERVER_AUTH` and `USE_WEBSERVER_AUTH_DIGEST`; actions without `auth:` rejected; `protect` values validated | py |
-| PS-M2-05 | `canHandle()` claims exactly the three routes of §6 (POST route only when actions exist), nothing else | host (if the route matcher is in the core) or rev |
+| PS-M2-04 | `auth:` emits `USE_WEBSERVER_AUTH` and `USE_WEBSERVER_AUTH_DIGEST`, no `auth:` emits neither; actions without `auth:` are **valid** (warning only); `auth:` with empty username or password rejected; `protect:` is rejected as an unknown key | py |
+| PS-M2-05 | `canHandle()` claims exactly the three routes of §6 (POST route only when actions exist) while the AP is inactive, and additionally every GET except `/wifi`, `/config.json`, `/wifisave` while it is active | host (if the route matcher is in the core) or rev |
 | PS-M2-06 | On a board: `GET /api/v1/state` with the full test tree (> 4096 bytes) arrives with `Transfer-Encoding: chunked`, complete, and passes `script/portal_schema.py` | bench |
 | PS-M2-07 | On a board: httpd task stack high-water mark after serving the full state is >= 1024 bytes (logged at DEBUG by the portal) | bench |
 | PS-M2-08 | On a board: the §6.1 table (400 / 404 / 204 / 503-not-required) holds | bench; host for parsing |
-| PS-M2-09 | On a board, `protect: all`: `GET /` without credentials 401 with a Digest challenge, with `curl --digest` 200; `protect: actions`: GET 200 without credentials, POST 401 | bench |
-| PS-M2-10 | AP fallback (STA not reachable, AP up): `curl http://192.168.4.1/` returns the portal page, `/api/v1/state` validates, `/config.json` returns the captive portal's JSON | bench |
+| PS-M2-09 | On a board with `auth:`: `GET /` and `GET /api/v1/state` without credentials 200; POST without credentials 401 with a Digest challenge and `seq` unchanged; POST with `curl --digest` 202. On a board without `auth:`: POST without credentials 202 | bench |
+| PS-M2-10 | AP fallback (STA not reachable, AP up): `curl http://192.168.4.1/` returns the portal page; `/api/v1/state` validates and carries the `wifi_setup` link; `/wifi` returns the captive portal's WiFi page; `/config.json` returns its JSON | bench |
+| PS-M2-12 | Captive detection lands on the portal: with the AP up, `GET /generate_204`, `/hotspot-detect.html`, `/connecttest.txt` and an arbitrary path answer `302` with `Location: http://192.168.4.1/`; a phone joining the AP opens the portal page in its captive sheet; with the AP down those paths are not claimed and `links` is `[]` | bench (phone check optional, curl mandatory) |
+| PS-M2-13 | `links` emission: empty list without AP; the `wifi_setup` entry with AP; shape validated by `portal_schema` (rejecting cases for missing/empty fields and `href` without leading `/`); a change advances `seq` | host, py |
 | PS-M2-11 | §8 numbers table filled: static RAM of both builds, free heap and max block idle before/after on the bench board | cc, bench |
 
 ### M3 — actions
@@ -527,8 +566,8 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M3-04 | Request parsing per §6.2 (JSON and form, each control, type errors, range, options, size) yields the right outcome code; refusals record `refused` with the right `why.code`; busy is not recorded | host |
 | PS-M3-05 | Fingerprint/seq advances on action value, enabled or result change and not on `result.age_ms` alone; `?after=<old seq>` returns a body after a POST | host, bench |
 | PS-M3-06 | On a board: switch round-trip — POST `{"value":true}` -> 202 `running`; a following state shows `accepted`/`applied` and `value: true`; POST false reverts; same for one select or number | bench |
-| PS-M3-07 | On a board: unknown node/key 404; POST without credentials 401 and `seq` unchanged; out-of-range 422 recorded as refused | bench |
-| PS-M3-08 | Page renders toggle, button, dropdown, number input and the result chip; sends JSON via `fetch` (static checks; optional `node` smoke test skips without node) | py |
+| PS-M3-07 | On a board: unknown node/key 404; with `auth:` a POST without credentials 401 and `seq` unchanged; out-of-range 422 recorded as refused | bench |
+| PS-M3-08 | Page renders toggle, button, dropdown, number input, the result chip and the envelope's `links`; sends JSON via `fetch`; never requests credentials for GET (static checks; optional `node` smoke test skips without node) | py |
 | PS-M3-09 | No entity control call on the httpd task; pending slots and results guarded by the mutex | rev |
 
 ### M4 — docs and example
@@ -550,12 +589,14 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 
 ## 10. Open decisions
 
-| # | question | current default |
+All four were decided by the owner on 2026-10-12.
+
+| # | question | decision |
 |---|---|---|
-| D1 | Busy POST (409) is not recorded in the tree; is that acceptable under R28? | yes, the running result stays visible |
-| D2 | `protect: all` as default means the read-only state needs a login too | default `all`; `actions` opt-in |
-| D3 | With the AP up the WiFi page is reachable only at a path other than `/` | accepted, documented in the user guide |
-| D4 | Fallback to an own httpd only on bench evidence (§8) | not taken |
+| D1 | Busy POST (409) is not recorded in the tree | accepted: the running result stays visible |
+| D2 | Does viewing need a login? | no: `/` and `/api/v1/state` never need one; `auth:` is optional, also with actions, and guards only the POST route; `protect:` removed. Network access (AP password, protected LAN) is the access control |
+| D3 | Who owns `/` while the AP is up? | the portal; the WiFi setup page stays at `/wifi`, the portal links to it, and captive detection is redirected to the portal (§6.3) |
+| D4 | Own httpd? | default stays `web_server_base`; the spec owner decides from bench numbers (§8) |
 
 ---
 
