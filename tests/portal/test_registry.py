@@ -250,8 +250,15 @@ def test_codegen_emits_one_deduplicated_named_thunk_per_provider_and_args(tmp_pa
         defs = re.findall(rf"\b{name}\s*\([^;{{]*\)\s*{{", cpp)
         assert len(defs) == count, f"{name}: {len(defs)} definitions\n{gen.output}"
     assert len(re.findall(r"\bportal_prov_demo_absent_plain\b", cpp)) >= 1
-    # the body template arguments were substituted
+    # body contract (4.6): {n} replaced by the validated value, {{ }} become literal braces,
+    # `source` is the cast pointer, no placeholder text is left over
     assert "return 2 > 1;" in cpp and "return 3 > 1;" in cpp
+    assert "if (index >= 1) {" in cpp and "if (index >= 4) {" in cpp
+    assert "{n}" not in cpp and "{{" not in cpp and "}}" not in cpp.replace("}}}", "")
+    assert "source == nullptr" in cpp
+    # the thunk signatures of 4.6
+    assert re.search(r"bool portal_prov_demo_absent_n2\(void \*ctx\)", cpp)
+    assert re.search(r"bool portal_prov_demo_series_n1\(void \*ctx, uint16_t index,\s*(?:esphome::portal::core::)?SeriesElement \*out\)", cpp)
 
 
 def test_codegen_is_deterministic(tmp_path: Path) -> None:
@@ -273,3 +280,24 @@ def test_registry_leaves_no_provider_behind_without_the_ext_component(tmp_path: 
     gen = generate(tmp_path, text)
     assert gen.returncode != 0
     assert "demo_absent" in gen.output
+
+
+def test_unknown_body_placeholder_fails_codegen(tmp_path: Path) -> None:
+    """PS-M1-04 (4.6): no placeholder other than the declared args exists; an unknown one is an error at codegen."""
+    node = tree_node(segment="x", absent="entities_unavailable",
+                     absent_when={"provider": "demo_absent_bad", "source": "vcc_measured_sensor"})
+    text = portal_yaml(portal(tree=[node]), extra="portal_demo_providers:\n", extra_components=EXT)
+    gen = generate(tmp_path, text)
+    assert gen.returncode != 0
+    assert "zzz" in gen.output
+
+
+def test_series_thunk_returns_false_before_body_when_source_is_null(tmp_path: Path) -> None:
+    """PS-M1-04 (4.6): the series thunk guards a null source itself; absent thunks do not (body decides)."""
+    text = portal_yaml(portal(tree=_prov_tree()), extra="portal_demo_providers:\n", extra_components=EXT)
+    gen = generate(tmp_path, text)
+    assert gen.returncode == 0, gen.output
+    m = re.search(r"bool portal_prov_demo_series_n1\(.*?\n}\n", gen.main_cpp, re.S)
+    assert m, "series thunk not found"
+    body = m.group(0)
+    assert body.index("nullptr") < body.index("index >= 1"), body

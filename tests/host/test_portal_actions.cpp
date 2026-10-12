@@ -522,4 +522,75 @@ TEST(actions_ps_m2_08_parse_after_accepts_only_decimal_uint32) {
     CHECK(!parse_after(bad, &v));
 }
 
+// --- PS-M2-05 (AP part) / PS-M2-12 ---------------------------------------------------------
+
+TEST(actions_ps_m2_05_ap_inactive_matcher_is_unchanged_by_the_ap_flag_default) {
+  CHECK(match_route(false, "/generate_204", false, false).route == Route::NONE);
+  CHECK(match_route(false, "/wifi", false, false).route == Route::NONE);
+  CHECK(match_route(false, "/", false, false).route == Route::PAGE);
+}
+
+TEST(actions_ps_m2_05_ap_active_claims_the_three_routes_plus_every_other_get_as_redirect) {
+  for (bool actions : {false, true}) {
+    CHECK(match_route(false, "/", actions, true).route == Route::PAGE);
+    CHECK(match_route(false, "/api/v1/state", actions, true).route == Route::STATE);
+    CHECK(match_route(false, "/api/v1/state?after=2", actions, true).route == Route::STATE);
+    // the captive portal keeps exactly these three
+    CHECK(match_route(false, "/wifi", actions, true).route == Route::NONE);
+    CHECK(match_route(false, "/config.json", actions, true).route == Route::NONE);
+    CHECK(match_route(false, "/wifisave", actions, true).route == Route::NONE);
+    CHECK(match_route(false, "/wifisave?ssid=x&psk=y", actions, true).route == Route::NONE);
+    // everything else is redirected to the portal
+    for (const char *p : {"/generate_204", "/hotspot-detect.html", "/connecttest.txt", "/ncsi.txt", "/library/test/success.html",
+                          "/anything/else", "/index.html", "/api/v1/stat", "/api/v1/actions/dev/x", "/wifi/", "/config.json/x"})
+      CHECK(match_route(false, p, actions, true).route == Route::REDIRECT);
+  }
+}
+
+TEST(actions_ps_m2_12_post_is_never_redirected_and_the_action_route_keeps_working_in_ap_mode) {
+  CHECK(match_route(true, "/generate_204", true, true).route == Route::NONE);
+  CHECK(match_route(true, "/", true, true).route == Route::NONE);
+  CHECK(match_route(true, "/api/v1/actions/dev/x", true, true).route == Route::ACTION);
+  CHECK(match_route(true, "/api/v1/actions/dev/x", false, true).route == Route::NONE);
+}
+
+// --- PS-M2-13: links ----------------------------------------------------------------------
+
+TEST(actions_ps_m2_13_links_empty_without_ap_and_wifi_entry_with_ap) {
+  Tree t;
+  std::string none = emit(t.build());
+  CHECK(has(none, "\"peers\":[],\"links\":[],"));
+  const LinkDef wifi{"wifi_setup", "WiFi setup", "/wifi"};
+  Snapshot &s = t.build();
+  s.links = &wifi;
+  s.link_count = 1;
+  std::string j = emit(s);
+  CHECK(has(j, "\"peers\":[],\"links\":[{\"rel\":\"wifi_setup\",\"label\":\"WiFi setup\",\"href\":\"/wifi\"}],"));
+}
+
+TEST(actions_ps_m2_13_links_precede_path_and_tree_when_narrowed) {
+  Tree t;
+  const LinkDef wifi{"wifi_setup", "WiFi setup", "/wifi"};
+  Snapshot &s = t.build();
+  s.links = &wifi;
+  s.link_count = 1;
+  std::string j = emit(s, "dev");
+  size_t l = j.find("\"links\":"), p = j.find("\"path\":"), r = j.find("\"tree\":");
+  CHECK(l != std::string::npos && l < p && p < r);
+}
+
+TEST(actions_ps_m2_13_a_change_in_links_advances_the_fingerprint) {
+  Tree t;
+  uint32_t f0 = fingerprint(t.build());
+  const LinkDef wifi{"wifi_setup", "WiFi setup", "/wifi"};
+  Snapshot &s = t.build();
+  s.links = &wifi;
+  s.link_count = 1;
+  uint32_t f1 = fingerprint(s);
+  CHECK(f0 != f1);
+  const LinkDef other{"wifi_setup", "WiFi setup", "/wifi2"};
+  s.links = &other;
+  CHECK(fingerprint(s) != f1);
+}
+
 }  // namespace

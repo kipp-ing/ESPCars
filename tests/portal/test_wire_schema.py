@@ -85,11 +85,9 @@ RULES = [
     ("seq_negative", _set(["seq"], -1), "negative"),
     ("seq_type", _set(["seq"], "1"), "wrong_type"),
     ("envelope_missing_peers", _del(["peers"]), "missing_key"),
-    ("envelope_key_order", _rev, "key_order"),
     ("envelope_unknown_key", _set(["extra"], 1), "unknown_key"),
     ("node_missing_key", _del(["tree", "children", 0, "actions"]), "missing_key"),
     ("node_unknown_key", _set(["tree", "children", 0, "bogus"], 1), "unknown_key"),
-    ("node_key_order", lambda e: _rev(ecu(e)), "key_order"),
     ("node_state_vocab", _set(["tree", "children", 0, "state"], "weird"), "unknown_state"),
     ("why_null_iff_ok_1", _set(["tree", "children", 0, "state"], "degraded"), "why_state_mismatch"),
     ("why_null_iff_ok_2", _set(["tree", "children", 0, "why"], why()), "why_state_mismatch"),
@@ -126,7 +124,6 @@ RULES = [
     ("series_class_element", lambda e: (_legend_series(e), ecu(e)["series"].update({"class": "rrr"}))[1], "class_element_mismatch"),
     ("series_class_omitted_with_holes", lambda e: (_legend_series(e), ecu(e)["series"].update({"class": None}))[1], "class_omitted_with_holes"),
     ("series_frame_pattern", lambda e: (_legend_series(e), ecu(e)["series"].update({"index_frame": "Bad Frame"}))[1], "index_frame_not_canonical"),
-    ("series_key_order", lambda e: (_legend_series(e), _rev(ecu(e)["series"]))[1], "key_order"),
     ("series_index_length", lambda e: (_legend_series(e), ecu(e)["series"].update({"index": [1, 2]}))[1], "index_length_mismatch"),
     ("series_index_order", lambda e: (_legend_series(e), ecu(e)["series"].update({"index": [3, 2, 1]}))[1], "index_not_increasing"),
     ("legend_missing", lambda e: (_legend_series(e), e.update(series_legend=None))[1], "series_legend_missing"),
@@ -244,19 +241,21 @@ ACTION_RULES = [
     ("body_for_control", _act(lambda a: a.update(body={"value": "number"})), "action_body_mismatch"),
     ("button_body", lambda e: (ecu(e)["actions"].__setitem__(0, action("button", body={"value": "bool"})), None)[1], "action_body_mismatch"),
     ("missing_ext_key", _act(lambda a: a.pop("result")), "missing_key"),
-    ("ext_order", _act(_rev), "action_key_order"),
     ("ext_without_control", _act(lambda a: a.pop("control")), "action_extension_without_control"),
     ("why_enabled", _act(lambda a: a.update(why=why())), "action_why_mismatch"),
     ("why_disabled_missing", _act(lambda a: a.update(enabled=False)), "action_why_mismatch"),
     ("switch_disabled", _act(lambda a: a.update(enabled=False, why=why("entity_unavailable"))), "action_always_enabled"),
     ("switch_value_type", _act(lambda a: a.update(value="on")), "action_value_type"),
     ("options_on_switch", _act(lambda a: a.update(options=["a"])), "action_field_not_applicable"),
-    ("min_on_switch", _act(lambda a: a.update(min=0)), "action_field_not_applicable"),
+    ("min_on_switch", _act(lambda a: a.update(min=0)), "wrong_type"),
     ("unit_on_switch", _act(lambda a: a.update(unit="V")), "action_field_not_applicable"),
     ("button_value", lambda e: ecu(e)["actions"].__setitem__(0, action("button", value=True)), "action_value_type"),
     ("select_options_missing", lambda e: ecu(e)["actions"].__setitem__(0, action("select", options=None)), "wrong_type"),
     ("select_value_type", lambda e: ecu(e)["actions"].__setitem__(0, action("select", value=3)), "action_value_type"),
     ("number_min_type", lambda e: ecu(e)["actions"].__setitem__(0, action("number", min="low")), "wrong_type"),
+    ("number_min_null", lambda e: ecu(e)["actions"].__setitem__(0, action("number", min=None)), "wrong_type"),
+    ("number_max_null", lambda e: ecu(e)["actions"].__setitem__(0, action("number", max=None)), "wrong_type"),
+    ("number_step_null", lambda e: ecu(e)["actions"].__setitem__(0, action("number", step=None)), "wrong_type"),
     ("number_range_inverted", lambda e: ecu(e)["actions"].__setitem__(0, action("number", min=5, max=1)), "action_range_inverted"),
     ("number_step", lambda e: ecu(e)["actions"].__setitem__(0, action("number", step=0)), "action_step_not_positive"),
     ("number_unit_type", lambda e: ecu(e)["actions"].__setitem__(0, action("number", unit=3)), "wrong_type"),
@@ -272,7 +271,6 @@ ACTION_RULES = [
     ("result_age", _act(lambda a: a.update(result=result(age=-1))), "wrong_type"),
     ("result_value_type", _act(lambda a: a.update(result=result(value="x"))), "result_value_type"),
     ("result_missing_key", _act(lambda a: a.update(result={"state": "accepted"})), "missing_key"),
-    ("result_order", _act(lambda a: a.update(result=dict(list(result().items())[::-1]))), "action_key_order"),
     ("result_extra_key", _act(lambda a: a.update(result=dict(result(), extra=1))), "unknown_key"),
     ("actions_type", _set(["tree", "children", 0, "actions"], {}), "wrong_type"),
 ]
@@ -417,10 +415,71 @@ def test_links_rejecting_cases(name, links, code) -> None:
     assert code in codes(_with_links(links)), (name, codes(_with_links(links)))
 
 
-def test_links_position_is_after_peers_and_before_path() -> None:
-    """PS-M2-13 / 5.1 key order."""
-    env = _with_links([])
-    keys = list(env)
-    assert keys.index("peers") + 1 == keys.index("links")
-    bad = {k: env[k] for k in ["schema_version", "seq", "series_legend", "served_by", "links", "peers", "tree"]}
-    assert "key_order" in codes(bad)
+def test_key_order_is_not_checked() -> None:
+    """PS-M1-09 (5.6): JSON object order carries no meaning; a reordered envelope/node/action is valid."""
+    env = envelope()
+    ecu(env)["actions"] = [action("number", result=result("accepted", "applied", 1, 2.5))]
+    assert codes(env) == []
+
+    def rev(d):
+        items = list(d.items())[::-1]
+        d.clear()
+        d.update(items)
+
+    rev(env)
+    rev(env["tree"])
+    rev(ecu(env))
+    rev(ecu(env)["actions"][0])
+    rev(ecu(env)["actions"][0]["result"])
+    rev(ecu(env)["values"][0])
+    assert codes(env) == []
+
+
+@pytest.mark.parametrize("where", ["envelope", "served_by", "node", "value", "why", "provenance", "action", "result", "link"])
+def test_key_sets_are_closed(where) -> None:
+    """PS-M1-09 (5.6): a key outside required + optional is unknown_key."""
+    env = envelope()
+    ecu(env)["actions"] = [action("switch", result=result())]
+    env["links"] = [dict(WIFI_LINK)]
+    ecu(env)["state"] = "degraded"
+    ecu(env)["why"] = why()
+    target = {
+        "envelope": env, "served_by": env["served_by"], "node": ecu(env), "value": ecu(env)["values"][0],
+        "why": ecu(env)["why"], "provenance": ecu(env)["provenance"], "action": ecu(env)["actions"][0],
+        "result": ecu(env)["actions"][0]["result"], "link": env["links"][0],
+    }[where]
+    ecu(env)["values"][0]["state"] = "ok"
+    target["bogus"] = 1
+    assert "unknown_key" in codes(env), (where, codes(env))
+
+
+def test_older_v2_envelopes_pass() -> None:
+    """PS-M1-09 / PS-M1-04 (5.6 compatibility list): no links, 7-key actions, class null, non-empty
+    peers, every v2 state, a reordered envelope."""
+    env = envelope()
+    assert "links" not in env
+    ecu(env)["actions"] = [{k: v for k, v in action("switch").items()
+                            if k in ("key", "label", "method", "path", "enabled", "why", "body")}]
+    ecu(env)["series"] = series(cls=None, values=(3300, 3301, 3302))
+    env["series_legend"] = dict(LEGEND)
+    env["peers"] = [{"board": "peer", "node_id": "0xB", "endpoint": "http://peer.local", "state": "ok", "why": None,
+                     "schema_version": 2, "mounts": ["ecu.unit"], "age_ms": 5, "last_ok_age_ms": 5}]
+    ecu(env)["children"] = [node("ecu.unit", provenance={"origin": "peer", "board": "peer", "node_id": "0xB",
+                                                                      "age_ms": 9, "budget_ms": 1500, "trust": "confirmed", "seq": 1})]
+    assert codes(env) == [], codes(env)
+    items = list(env.items())[::-1]
+    env.clear()
+    env.update(items)
+    assert codes(env) == []
+
+
+@pytest.mark.parametrize("state", ["down", "unreachable", "incompatible"])
+def test_v2_only_states_remain_valid_where_their_rules_hold(state) -> None:
+    """5.6: down/unreachable/incompatible keep their v2 meaning (down needs trust confirmed)."""
+    env = envelope()
+    ecu(env)["state"] = state
+    ecu(env)["why"] = why("v2_reason")
+    assert codes(env) == [], codes(env)
+    if state == "down":
+        ecu(env)["provenance"]["trust"] = "assumed"
+        assert "down_not_confirmed" in codes(env)

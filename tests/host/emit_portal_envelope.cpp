@@ -197,6 +197,11 @@ int run(const std::string &scenario, const char *path) {
     asamples[2].has_value = true;
     std::snprintf(asamples[2].text, sizeof asamples[2].text, "two");
     asamples[3].enabled = false;
+    asamples[3].has_min = asamples[3].has_max = asamples[3].has_step = true;
+    asamples[3].min = 1.0f;
+    asamples[3].max = 60.0f;
+    asamples[3].step = 0.5f;
+    asamples[3].unit = "s";
     nodes[1].action_first = 0;
     nodes[1].action_count = 4;
   }

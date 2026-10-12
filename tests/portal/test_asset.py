@@ -21,10 +21,19 @@ SPEC = REPO / "docs" / "portal-spec.md"
 PAGE = COMPONENT / "index.html"
 NEUTRAL_KINDS = ["vehicle", "component", "bus", "device", "ecu", "charger", "battery", "logger", "gateway",
                  "network", "sensor", "actuator", "module"]
-PRIVATE = [r"smart[ _-]?451", r"fort(?:)two", r"\bsmart[ _-]?ed\b", r"daim(?:)ler", r"mcc[-_ ]?smart",
-           r"smart.ev.battery.rig", r"\bov(?:)ms\b", r"\bPNHV(?:)_", r"cbf.convert",
-           r"\borange\b", r"\bmr-(blue|orange|yellow|purple)\b", r"192\.168\.\d+\.\d+(?<!192\.168\.4\.1)",
-           r"/Users/", r"AC:EB:E6", r"20:6E:F1"]
+def _repo_patterns() -> list[str]:
+    """The repo-wide private-data patterns, imported (never restated) from the guard script."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_no_private_data", REPO / "script" / "check_no_private_data.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return [p.pattern for p, _reason in mod.PATTERNS]
+
+
+# Extra markers for the portal files: bench board names, LAN addresses, absolute home paths, bench MACs.
+_EXTRA = [r"\bmr-(blue|orange|yellow|purple)\b", r"192\.168\.\d+\.\d+(?<!192\.168\.4\.1)", r"/Users/", r"AC:EB:E6", r"20:6E:F1"]
+PRIVATE = _repo_patterns() + _EXTRA
 
 
 def _all_component_files():
@@ -174,7 +183,7 @@ def test_page_script_parses_with_node() -> None:
 def test_spec_exists_and_is_neutral() -> None:
     """PS-M0-01: the spec file exists and carries no private marker (the repo-wide guard also runs it)."""
     text = SPEC.read_text()
-    for pattern in PRIVATE[:7]:
+    for pattern in PRIVATE:
         assert not re.search(pattern, text, re.I), pattern
     r = subprocess.run(["python3", str(REPO / "script" / "check_no_private_data.py")], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
@@ -183,7 +192,7 @@ def test_spec_exists_and_is_neutral() -> None:
 def test_our_own_files_carry_nothing_private() -> None:
     """PS-G-02: tests/portal, tests/build/portal, script/portal_schema.py, tests/host/*portal*."""
     roots = [Path(__file__).parent, REPO / "tests" / "build" / "portal"]
-    files = [p for r in roots if r.exists() for p in r.rglob("*") if p.is_file() and p.suffix in
+    files = [p for r in roots if r.exists() for p in r.rglob("*") if p.is_file() and ".esphome" not in p.parts and "__pycache__" not in p.parts and p.suffix in
              (".py", ".yaml", ".json", ".md", ".html", ".cpp", ".h")]
     files += [REPO / "script" / "portal_schema.py"] + list((REPO / "tests" / "host").glob("*portal*"))
     me = Path(__file__).resolve()
@@ -192,8 +201,6 @@ def test_our_own_files_carry_nothing_private() -> None:
             continue
         text = f.read_text()
         for pattern in PRIVATE:
-            if pattern in (r"\borange\b",):
-                continue
             m = re.search(pattern, text, re.I)
             assert not m, f"{f}: {pattern!r} -> {m.group(0)!r}"
         for mac in re.findall(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])", text):

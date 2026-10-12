@@ -15,7 +15,7 @@ register_absent_provider(
     "demo_absent",
     args={"n": cv.int_range(min=0, max=3)},
     source_type=sensor.Sensor,
-    body="return {n} > 1;",
+    body="if (source == nullptr)\n  return true;\nreturn {n} > 1;",
     evidence='"announced":false',
     for_why=("never_announced",),
 )
@@ -29,7 +29,15 @@ register_series_provider(
     "demo_series",
     args={"n": cv.int_range(min=0, max=5)},
     source_type=sensor.Sensor,
-    body="out->has_value = false; return index < {n};",
+    body="if (index >= {n}) {{\n  return false;\n}}\nout->cls = '-';\nout->has_value = false;\nreturn true;",
+)
+
+
+register_absent_provider(
+    "demo_absent_bad",
+    args={},
+    source_type=sensor.Sensor,
+    body="return {zzz};",
 )
 
 

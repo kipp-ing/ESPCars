@@ -27,11 +27,11 @@ PS-M2-01     test_asset::test_no_own_httpd_*, test_component_registers_via_web_s
 PS-M2-02     test_config_full::test_portal_with_web_server_is_rejected
 PS-M2-03     test_codegen::test_port_reaches_web_server_base, test_config_full::..._captive_portal_and_ap
 PS-M2-04     test_schema auth tests, test_codegen auth defines / warning, test_config_full actions-without-auth
-PS-M2-05     host test_portal_actions::actions_ps_m2_05_*  (AP-active matcher: gap until the core exports it)
+PS-M2-05     host test_portal_actions::actions_ps_m2_05_* (inactive + AP-active matcher)
 PS-M2-06..10 bench (M5)
 PS-M2-11     bench (numbers on the team board / PR)
-PS-M2-12     bench (curl); host matcher for the AP routes: gap until exported
-PS-M2-13     test_wire_schema links tests, host links emission: gap until the core exports it
+PS-M2-12     host actions_ps_m2_12_* (matcher); bench curl for the 302s
+PS-M2-13     test_wire_schema links tests, host actions_ps_m2_13_*
 PS-M3-01     test_schema actions tests, test_config_full actions
 PS-M3-02     host actions_ps_m3_02_*, test_codegen::test_actions_storage_follows_declared_actions
 PS-M3-03     host actions_ps_m3_03_*, test_wire_schema ACTION_RULES, test_envelope_parity actions

@@ -226,6 +226,7 @@ def _validate_why_block(why: dict, path: str, violations: list[Violation]) -> No
     for key in WHY_KEYS:
         if key not in why:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    _check_key_order(why, WHY_KEYS, path, "why", violations)
 
     if "code" in why:
         code = why["code"]
@@ -352,6 +353,7 @@ def _validate_provenance(
     for key in PROVENANCE_KEYS:
         if key not in provenance:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    _check_key_order(provenance, PROVENANCE_KEYS, path, "provenance", violations)
 
     if "origin" in provenance and provenance["origin"] not in ORIGINS:
         violations.append(
@@ -585,6 +587,7 @@ def _validate_value(value: object, path: str, violations: list[Violation]) -> No
     for key in VALUE_KEYS:
         if key not in value:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    _check_key_order(value, VALUE_KEYS, path, "value", violations)
 
     if "key" in value and (not _is_str(value["key"]) or value["key"] == ""):
         violations.append(Violation(f"{path}.key", "wrong_type", "key must be a non-empty string"))
@@ -799,12 +802,7 @@ def _validate_action_result(result: object, control: object, path: str, violatio
     for key in ACTION_RESULT_KEYS:
         if key not in result:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
-    present = [k for k in result if k in ACTION_RESULT_KEYS]
-    if present != [k for k in ACTION_RESULT_KEYS if k in result]:
-        violations.append(Violation(path, "action_key_order", f"result keys out of order: {list(result)}"))
-    for key in result:
-        if key not in ACTION_RESULT_KEYS:
-            violations.append(Violation(path, "unknown_key", f"unexpected result key {key!r}"))
+    _check_key_order(result, ACTION_RESULT_KEYS, path, "result", violations)
 
     state = result.get("state")
     if "state" in result and state not in ACTION_RESULT_STATES:
@@ -855,9 +853,7 @@ def _validate_action_extension(
         if key not in action:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
 
-    expected_order = [k for k in ACTION_KEYS + ACTION_EXT_KEYS if k in action]
-    if [k for k in action if k in ACTION_KEYS + ACTION_EXT_KEYS] != expected_order:
-        violations.append(Violation(path, "action_key_order", f"action keys out of order: {list(action)}"))
+    _check_key_order(action, ACTION_KEYS + ACTION_EXT_KEYS, path, "action", violations)
 
     if action.get("method") != "POST":
         violations.append(Violation(f"{path}.method", "action_method_not_post", f"method {action.get('method')!r}"))
@@ -905,10 +901,10 @@ def _validate_action_extension(
             continue
         v = action[key]
         if control == "number":
-            if v is not None and not _is_number(v):
-                violations.append(Violation(f"{path}.{key}", "wrong_type", f"number {key} must be a number or null"))
+            if not _is_number(v):
+                violations.append(Violation(f"{path}.{key}", "wrong_type", f"number {key} must be a number, never null"))
         elif v is not None:
-            violations.append(Violation(f"{path}.{key}", "action_field_not_applicable", f"{key} only on number"))
+            violations.append(Violation(f"{path}.{key}", "wrong_type", f"{key} is null unless control is number"))
     if control == "number" and all(_is_number(action.get(k)) for k in ("min", "max", "step")):
         if action["min"] > action["max"]:
             violations.append(Violation(f"{path}.min", "action_range_inverted", "min > max"))
@@ -1022,14 +1018,11 @@ def _validate_links(links: object, violations: list[Violation]) -> None:
 def _check_key_order(
     obj: dict, expected: tuple[str, ...], path: str, label: str, violations: list[Violation]
 ) -> None:
-    """Spec sections 5.1/5.3: emitted keys are exactly the expected ones, in the expected order.
-    Unknown keys are ``unknown_key``; a different order of the known ones is ``key_order``."""
+    """Spec section 5.6: key sets are closed (a key outside required + optional is
+    ``unknown_key``); the ORDER of keys is not checked."""
     for key in obj:
         if key not in expected:
             violations.append(Violation(path, "unknown_key", f"unexpected {label} key {key!r}"))
-    present = [k for k in obj if k in expected]
-    if present != [k for k in expected if k in obj]:
-        violations.append(Violation(path, "key_order", f"{label} keys out of order: {present}"))
 
 
 # --- served_by / peers ------------------------------------------------------------
@@ -1043,6 +1036,7 @@ def _validate_served_by(served_by: object, path: str, violations: list[Violation
     for key in SERVED_BY_KEYS:
         if key not in served_by:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    _check_key_order(served_by, SERVED_BY_KEYS, path, "served_by", violations)
 
     for key in ("board", "node_id", "mac", "build"):
         if key in served_by and not _is_str_or_null(served_by[key]):
@@ -1115,6 +1109,7 @@ def _validate_peer(
     for key in PEER_KEYS:
         if key not in peer:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    _check_key_order(peer, PEER_KEYS, path, "peer", violations)
 
     state = peer.get("state")
     if "state" in peer and state not in STATES:
