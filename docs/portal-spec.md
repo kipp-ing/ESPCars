@@ -8,7 +8,8 @@ This document is the contract between implementer and tester. Behaviour that is 
 not required; behaviour that contradicts it is a bug in one of the two, and the spec owner
 decides which (see §11).
 
-**Status:** v1.1, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10). Origin: the `webui_node` component of a private bench-simulator
+**Status:** v1.2, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10;
+v1.2: provider body contract §4.6, number traits non-null §5.4, validator contract §5.6). Origin: the `webui_node` component of a private bench-simulator
 project (wire format `schema_version: 2`), lifted here and made vehicle-neutral. Nothing in
 this repository may name that project, its boards, MACs, IPs or captures
 (`script/check_no_private_data.py`, `docs/CONVENTIONS.md`).
@@ -201,6 +202,22 @@ provider args -> error. `source` is `cv.use_id(source_type)`. Codegen emits one 
 distinct (provider, args) into `main.cpp` via `cg.add_global`, named deterministically
 (`portal_prov_<provider>_<argletter><value>...`), deduplicated within one build.
 
+**`body` contract (public: other components write these).** `body` is C++ statement text,
+the body of a function returning `bool`. Before emission it is expanded with Python
+`str.format(**args)`, where `args` maps each declared arg name to its **validated** value
+(after the arg's validator ran), so `{name}` inserts that value; a literal `{` or `}` in the
+C++ text must be written `{{` / `}}`. No other placeholder exists; an unknown placeholder is a
+`KeyError` at codegen, which the registering component's tests must catch. Names in scope
+inside `body`:
+
+| provider kind | thunk signature | in scope |
+|---|---|---|
+| absent | `bool f(void *ctx)` | `source`: `<source_type> *` cast from `ctx`, **may be `nullptr`**; return `true` = absent (a null `source` must yield `true`) |
+| series | `bool f(void *ctx, uint16_t index, esphome::portal::core::SeriesElement *out)` | `source`: `<source_type> *`, never `nullptr` (the thunk returns `false` before `body` when it is); `index`: zero-based ordinal within the series; `out`: element to fill (`cls` in `r s i -`, `has_value`, `value`); return `false` = hole |
+
+The thunk text is emitted after `#include "esphome.h"`, so every compiled component's
+headers are visible; the portal includes nothing of the provider's component.
+
 ### 4.7 Action
 
 ```yaml
@@ -325,7 +342,7 @@ Order of keys: the seven v2 keys, then the extension keys.
 | `control` | `switch` / `button` / `select` / `number` |
 | `value` | current entity state: bool (switch), string (select), number with `decimals` (number); `null` for button and for an entity without state |
 | `options` | select: list of option strings (copied at setup); else `null` |
-| `min`, `max`, `step` | number: from the number's traits (with `decimals`); else `null` |
+| `min`, `max`, `step` | number: from the number's traits, emitted with `decimals`, **always numbers, never `null`** (ESPHome number traits always carry them); every other control: `null`. The validator rejects `null` for a `number` and a non-null value for any other control (`wrong_type`) |
 | `unit` | number: unit of measurement or `null`; else `null` |
 | `result` | `null` until first invoked since boot; then the last result (5.5) |
 
@@ -348,6 +365,28 @@ the page.
 `accepted` means the entity took the command on the main loop. It is not a claim about what
 the commanded device did; the entity's own state shows in `value` of the action entry and in
 any bound values.
+
+### 5.6 Validator contract (`script/portal_schema.py`)
+
+The validator is the conformance gate for envelopes of `schema_version: 2`, from this producer
+and from older v2 producers alike. It is not the page: the page ignores unknown keys (R32);
+the validator does not.
+
+- **Closed key sets.** Envelope, `served_by`, peer, node, value, series, action, action
+  result, why, provenance, `ancestor_role` and `links` entries are closed: a key outside the
+  required + optional set of §5 is a violation `unknown_key`. Optional keys are: envelope
+  `links`, `path`, `ancestor_role`; node `role`, `roles_available`; action `control`,
+  `value`, `options`, `min`, `max`, `step`, `unit`, `result`. A missing optional key is
+  never a violation; a missing required key is `missing_key`.
+- **Older envelopes must pass.** An otherwise valid v2 envelope with no `links`, actions
+  carrying only the seven v2 keys, `series.class: null`, non-empty `peers` (validated per
+  v2 peer rules) and every v2 `state` (incl. `down`, `unreachable`, `incompatible` with
+  their v2 rules) is valid. A rejecting test for each of these would be a contract bug.
+- **Key order is not checked by the validator.** JSON object order carries no meaning, and
+  another v2 producer may serialise in a different order. This producer's order (§5.1, §5.3,
+  §5.4) is pinned by the byte-identical golden fixture (PS-M1-08), not by the validator.
+- `series_legend`: exactly the four-entry object of §5.1 or `null`; anything else is a
+  violation. It must be `null` iff the tree carries no non-null `series`.
 
 ---
 
@@ -528,12 +567,12 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M1-01 | `components/portal/{__init__.py,portal.h,portal.cpp,portal_core.h,index.html}` exist; `portal_core.h` includes only `<cstddef>`, `<cstdint>`, `<cstring>` and compiles in the host build | host, py (include grep) |
 | PS-M1-02 | Every schema rule of §4.1, 4.3–4.5 has an accepting and a rejecting pytest case (segment/key patterns, duplicates, exclusivity, evidence-gated codes, budget derivation incl. all null spellings, binary_sensor cadence/budget, series frame/provider rules, role rules, unknown_when/trust_from targets, text_max range, port 32767/65535) | py |
 | PS-M1-03 | `owns` rules of §4.2: unknown id, duplicate, identity-without-owns rejected; a config that compiles `uds`/`isotp` but declares `owns: []` without identity is valid; `resolved` owns equal YAML | py |
-| PS-M1-04 | Provider registry: empty by default; unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) | py |
+| PS-M1-04 | Provider registry: empty by default; unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) whose text has each `{arg}` replaced by the validated value, `{{`/`}}` as literal braces, and the §4.6 names in scope | py |
 | PS-M1-05 | Root node: id `car`, kind `car`, label `root_label` (default `Vehicle`) | py (codegen), host |
 | PS-M1-06 | `submodule_position`/`submodule_size` rules of §4.5 incl. the derived `resolved_pack_index_base` | py |
 | PS-M1-07 | Envelope emitter: all ported core cases pass (ChunkWriter framing at 4096, JSON escaping, number formatting, `parse_after`, `has_node`, resolve/derivation table, child propagation, skeleton provenance, `path`/`ancestor_role` order and cycle guard, series pairing/clamp/legend, absent_fn single evaluation, fingerprint ignores age but not state, flush failure propagates) under ASan/UBSan | host |
 | PS-M1-08 | Wire compatibility: fictional golden fixtures in `tests/portal/fixtures/` validate with `portal_schema`; at least one fixture is byte-identical to the core's output for the same snapshot (host or py-driven) | host, py |
-| PS-M1-09 | `script/portal_schema.py`: every rule of §5 has a rejecting case with its violation code; CLI exit codes 0/1; never raises on non-dict / missing keys | py |
+| PS-M1-09 | `script/portal_schema.py`: every rule of §5 has a rejecting case with its violation code; the §5.6 compatibility list has an accepting case each (no `links`, 7-key actions, `class: null`, a non-empty `peers`, a reordered envelope); CLI exit codes 0/1; never raises on non-dict / missing keys | py |
 | PS-M1-10 | `web_asset:` replaces the embedded bytes (codegen embeds the gzip of the given file); missing file rejected | py |
 | PS-M1-11 | Built-in `index.html`: <= 64 KiB gzipped, no `http://`/`https://` resource reference, no private marker, `KINDS` contains the §7 neutral nouns | py |
 | PS-M1-12 | `tests/build/portal/test-minimal.esp32-c6-idf.yaml` (no actions, no auth) passes cfg and cc | cfg, cc |
