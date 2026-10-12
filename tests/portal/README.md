@@ -39,6 +39,7 @@ PS-M3-04     host actions_ps_m3_04_*
 PS-M3-05     host actions_ps_m3_05_*, bench for ?after=
 PS-M3-06/07  bench
 PS-M3-08     test_asset::test_page_renders_each_control, test_page_sends_json_via_fetch_post, test_page_script_parses_with_node
+PS-M3-07/v1.3 rules  test_handler_rules.py (503 on lock timeout, shutdown B1, body reset N1: grep-level); 411/form>1KiB/503 behaviour: bench (BENCH.md)
 PS-M3-09     test_asset::test_entity_calls_are_not_made_from_the_request_handler (grep level; review by the spec owner)
 PS-M4-01     tests/build/portal/test.esp32-c6-idf.yaml, test_asset::test_build_yamls_transmit_on_no_bus
 PS-M4-02     tests/build/portal/test-asset.esp32-c6-idf.yaml
@@ -54,6 +55,8 @@ PS-M5-*      bench
 | `test_codegen.py` | py: `esphome compile --only-generate` (defines, port, asset bytes, owns) |
 | `test_wire_schema.py`, `wire.py` | py: `script/portal_schema.py` rule table |
 | `test_envelope_parity.py`, `fixtures/envelopes/` | py + host emitter (`tests/host/emit_portal_envelope.cpp`) |
+| `test_handler_rules.py` | py: grep-level handler rules (shutdown, body reset, 503) |
+| `BENCH.md` | bench checklist with exact curl commands |
 | `test_asset.py` | py: component sources, built-in page, privacy |
 | `tests/host/test_portal_core.cpp`, `test_portal_actions.cpp` | host C++ (ASan/UBSan) |
 | `tests/build/portal/` | cfg + cc |
