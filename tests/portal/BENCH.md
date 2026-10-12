@@ -28,3 +28,10 @@ Before flashing record the running image; restore it afterwards. Schema check of
 | page: toggle / dropdown | click the logging toggle, pick a mode | result chip appears without clicking elsewhere, `seq` in the header follows the board (M3-10) |
 | page: clocks | leave the page idle 15 s | `up …` and the chip ages keep counting (M3-10) |
 | no-auth image | a build without `auth:` | state 200; POST 202 without login |
+
+## Last run: 2026-10-12, ESP32-C6, ESPHome 2026.7.0 (8695e40)
+
+All rows green, the page rows after the fix in 8695e40. httpd stack high-water at least 1448 B free;
+idle heap of this test image 285-290 KB free, largest block 264 KB. AP fallback checked with a phone: portal,
+captive redirects, Digest prompt on an action, `/wifi`. Note: credentials saved through `/wifi` bring the board
+back over DHCP, not on its `manual_ip` (find it via `<name>.local`); the next image uses its YAML networks again.
