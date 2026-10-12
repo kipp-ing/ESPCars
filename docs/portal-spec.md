@@ -8,9 +8,10 @@ This document is the contract between implementer and tester. Behaviour that is 
 not required; behaviour that contradicts it is a bug in one of the two, and the spec owner
 decides which (see §11).
 
-**Status:** v1.2, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10;
+**Status:** v1.4, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10;
 v1.2: provider body contract §4.6, number traits non-null §5.4, validator contract §5.6;
-v1.3: rejections outside the portal and 503 §6.2, shutdown rule §6.2, kind views §7). Origin: the `webui_node` component of a private bench-simulator
+v1.3: rejections outside the portal and 503 §6.2, shutdown rule §6.2, kind views §7;
+v1.4: page repaint hold and local clocks §7, from the bench). Origin: the `webui_node` component of a private bench-simulator
 project (wire format `schema_version: 2`), lifted here and made vehicle-neutral. Nothing in
 this repository may name that project, its boards, MACs, IPs or captures
 (`script/check_no_private_data.py`, `docs/CONVENTIONS.md`).
@@ -500,6 +501,15 @@ While the AP is not active, the portal claims only its three routes and `links` 
   detail, age). Disabled actions stay visible with their reason. Unknown `control` -> shown
   disabled as unrecognised. Requests use `fetch` with JSON bodies; a 401 on a POST lets the
   browser's own Digest prompt handle the login. The page itself never needs a login.
+- Repaint: a toggle or a button never holds the repaint. Only a number input or a dropdown
+  the user touched within the last 10 s holds the node card; header, banners, crumbs and peers
+  repaint regardless, a dropdown change blurs it, and navigation always repaints (bench
+  2026-10-12: a focused toggle or dropdown froze the whole page, result chip included).
+- Clocks: while the envelope is held (204), the page advances `served_by.uptime_ms` and
+  `result.age_ms` by the time since the envelope arrived (neither is in the fingerprint and
+  both only grow). Provenance ages are not advanced (a value re-published unchanged gets
+  younger without a new `seq`); instead the page fetches the full envelope without `after` at
+  least every 5 s.
 - Each entry of the envelope's `links` is shown as a link in the header (the WiFi setup link
   while the AP is active).
 - Kind views (an extra or replacing section for one `kind`, e.g. the inherited `pack`, `cse`,
@@ -626,6 +636,7 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M3-07 | On a board: unknown node/key 404; with `auth:` a POST without credentials 401 and `seq` unchanged; out-of-range 422 recorded as refused | bench |
 | PS-M3-08 | Page renders toggle, button, dropdown, number input, the result chip and the envelope's `links`; sends JSON via `fetch`; never requests credentials for GET (static checks; optional `node` smoke test skips without node) | py |
 | PS-M3-09 | No entity control call on the httpd task; pending slots and results guarded by the mutex | rev |
+| PS-M3-10 | Page repaint hold and local clocks per §7 (core `holdsRepaint`/`advanceClocks` under node; on a board a toggle shows its result chip without moving the focus, uptime and chip ages keep counting) | py, bench |
 
 ### M4 — docs and example
 

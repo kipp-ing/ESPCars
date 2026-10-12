@@ -1278,8 +1278,43 @@ function censusModel(children) {
   return {usable:rows.length > 0, rows:rows, others:others};
 }
 
+/* ---- repaint hold and local clocks -------------------------------------
+ * The main area is repainted from scratch, which would yank a number the user
+ * is typing or a dropdown the user has open. Only those two hold the repaint,
+ * and only for HOLD_MS after the user last touched them: a toggle or a button
+ * never holds it, and a dropdown left focused without a change cannot freeze
+ * the page. `ctl` is {tag, type, touched_ago_ms} of the focused control. */
+var HOLD_MS = 10000;
+function holdsRepaint(ctl) {
+  if (!ctl) return false;
+  var editable = ctl.tag === "SELECT" || (ctl.tag === "INPUT" && ctl.type === "number");
+  return editable && typeof ctl.touched_ago_ms === "number" && ctl.touched_ago_ms < HOLD_MS;
+}
+
+/* A 204 means nothing in the fingerprint changed, and neither `result.age_ms`
+ * nor `uptime_ms` is in it: both only grow while the envelope is held, so the
+ * page advances them by the time since the envelope arrived. Provenance ages
+ * are not advanced: a value re-published unchanged gets younger on the board
+ * without a new seq, so the page refetches the full envelope instead (REFRESH_MS). */
+function advanceClocks(raw, elapsed_ms) {
+  if (!isNode(raw) || typeof elapsed_ms !== "number" || !(elapsed_ms > 0)) return raw;
+  var out = JSON.parse(JSON.stringify(raw));
+  if (isNode(out.served_by) && typeof out.served_by.uptime_ms === "number")
+    out.served_by.uptime_ms += elapsed_ms;
+  (function visit(n) {
+    if (!isNode(n)) return;
+    if (Array.isArray(n.actions)) n.actions.forEach(function (a) {
+      if (isNode(a) && isNode(a.result) && typeof a.result.age_ms === "number")
+        a.result.age_ms += elapsed_ms;
+    });
+    if (Array.isArray(n.children)) n.children.forEach(visit);
+  })(out.tree);
+  return out;
+}
+
 root.PortalCore = {
   SCHEMA_TARGET:SCHEMA_TARGET, SCHEMA_FLOOR:SCHEMA_FLOOR, QUERY_CAP:QUERY_CAP,
+  HOLD_MS:HOLD_MS, holdsRepaint:holdsRepaint, advanceClocks:advanceClocks,
   linkModels:linkModels,
   STATES:STATES, KINDS:KINDS, WHY:WHY, CLASS_LEGEND:CLASS_LEGEND, HUES:HUES,
   UNIT_SCALE:UNIT_SCALE, NUMBERING:NUMBERING,
@@ -1310,8 +1345,11 @@ root.PortalCore = {
 (function (C) {
 
 var POLL_MS = 1000;
+/* a 204 says nothing about provenance ages, so the envelope is fetched in full
+ * at least this often (core advanceClocks) */
+var REFRESH_MS = 5000;
 var app = {
-  raw:null, env:null, focus:null, seq:null,
+  raw:null, env:null, focus:null, seq:null, fetchedAt:null, touchedAt:0,
   link:"connecting", linkWhy:null, sub:null, subNote:null, timer:null,
   /* the path `seq` is actually valid for — `undefined` until the first
    * successful fetch, distinct from `null` (which means "the full tree, held")
@@ -1697,7 +1735,8 @@ function actionsSection(actions) {
         ctl.appendChild(op);
       });
       ctl.disabled = !usable;
-      ctl.onchange = function () { doAction(a, ctl.value); };
+      /* blur so the repaint resumes and the result chip shows */
+      ctl.onchange = function () { ctl.blur(); doAction(a, ctl.value); };
     } else if (a.kind === "number") {
       ctl = el("span", null);
       var inp = el("input", "numin");
@@ -1714,6 +1753,7 @@ function actionsSection(actions) {
         if (inp.value === "" || !isFinite(n)) { app.linkWhy = a.label + ": enter a number"; render(); return; }
         doAction(a, n);
       };
+      inp.onkeydown = function (e) { if (e.key === "Enter") { inp.blur(); setb.click(); } };
       ctl.appendChild(inp);
       if (a.unit) ctl.appendChild(el("span", "unit", " " + a.unit + " "));
       ctl.appendChild(setb);
@@ -2042,17 +2082,25 @@ function renderFatal(f) {
   $("main").appendChild(box);
 }
 
-function render() {
-  /* never repaint under a control the user is editing (number input, dropdown) */
+/* the main area waits while the user types a number or has a dropdown open
+ * (core holdsRepaint); header, banners, crumbs and peers always repaint */
+function mainHeld() {
   var ae = document.activeElement;
-  if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT") && $("main").contains(ae)) return;
+  if (!ae || !$("main").contains(ae)) return false;
+  return C.holdsRepaint({tag:ae.tagName, type:ae.type, touched_ago_ms:Date.now() - app.touchedAt});
+}
+
+function render() {
   var env = app.env;
   if (!env) return;
   if (env.fatal) { renderFatal(env.fatal); return; }
+  if (app.raw && app.fetchedAt !== null)
+    env = C.envelopeModel(C.advanceClocks(app.raw, Date.now() - app.fetchedAt));
   renderHeader(env);
   renderBanners(env);
   renderCrumbs(env);
   renderPeers(env);
+  if (mainHeld()) return;
   var main = $("main");
   main.replaceChildren();
   if (!env.tree) { main.appendChild(banner("refuse", "No tree in this envelope", null)); return; }
@@ -2090,6 +2138,9 @@ function go(id) {
   location.hash = id ? "#" + id : "";
 }
 function readHash() {
+  /* navigating always repaints, whatever was focused */
+  var ae = document.activeElement;
+  if (ae && $("main").contains(ae)) ae.blur();
   var h = decodeURIComponent(location.hash.replace(/^#/, ""));
   app.focus = h === "" ? null : h;
   app.sub = null;
@@ -2151,7 +2202,8 @@ function doAction(a, value) {
 function poll() {
   var reqPath = app.sub;
   var sameResource = reqPath === app.heldPath;
-  var u = C.stateUrl({path:reqPath, after:sameResource ? app.seq : null});
+  var fresh = app.fetchedAt !== null && Date.now() - app.fetchedAt < REFRESH_MS;
+  var u = C.stateUrl({path:reqPath, after:sameResource && fresh ? app.seq : null});
   if (u.error) u = C.stateUrl({path:reqPath});
   if (u.error) u = C.stateUrl({});
   fetch(u.url, {headers:{"Accept":"application/json"}})
@@ -2185,6 +2237,7 @@ function poll() {
       app.link = "ok";
       app.linkWhy = null;
       app.raw = body;
+      app.fetchedAt = Date.now();
       app.env = C.envelopeModel(body);
       /* `seq` and `heldPath` are one fact — the resource and revision this
        * client can truthfully say it holds — and move together for exactly
@@ -2202,6 +2255,9 @@ function poll() {
     });
 }
 
+["focusin", "input", "keydown", "pointerdown"].forEach(function (t) {
+  $("main").addEventListener(t, function () { app.touchedAt = Date.now(); });
+});
 window.addEventListener("hashchange", readHash);
 readHash();
 app.timer = setInterval(poll, POLL_MS);
