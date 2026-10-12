@@ -103,7 +103,6 @@ class Portal : public Component, public AsyncWebHandler {
   void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::WIFI - 1.0f; }
-  void on_shutdown() override;
 
   // AsyncWebHandler
   bool canHandle(AsyncWebServerRequest *request) const override;
@@ -240,6 +239,7 @@ class Portal : public Component, public AsyncWebHandler {
   char body_buf_[core::ACTION_BODY_MAX]{};
   size_t body_total_{0};
   size_t body_stored_{0};
+  const AsyncWebServerRequest *body_req_{nullptr};  // request that streamed body_buf_
 };
 
 }  // namespace esphome::portal

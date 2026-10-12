@@ -175,13 +175,6 @@ void Portal::setup() {
   this->base_->add_handler_without_auth(this);
 }
 
-void Portal::on_shutdown() {
-  if (this->mutex_ != nullptr) {
-    vSemaphoreDelete(this->mutex_);
-    this->mutex_ = nullptr;
-  }
-}
-
 void Portal::dump_config() {
   ESP_LOGCONFIG(TAG, "Portal: port %u, %u nodes, %u values, %u actions, web asset %u bytes, auth: %s",
                 this->base_ != nullptr ? this->base_->get_port() : 0, static_cast<unsigned>(this->node_count_),
@@ -493,9 +486,12 @@ void Portal::serve_redirect_(httpd_req_t *req) {
 }
 
 void Portal::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  (void) request;
-  if (index == 0)
+  // A body belongs to the request that streamed it: an aborted stream's leftovers are ignored
+  // by the next request (serve_action_ checks body_req_).
+  if (index == 0 || this->body_req_ != request) {
     this->body_stored_ = 0;
+    this->body_req_ = request;
+  }
   this->body_total_ = total;
   for (size_t i = 0; i < len && this->body_stored_ < sizeof(this->body_buf_); i++)
     this->body_buf_[this->body_stored_++] = static_cast<char>(data[i]);
@@ -524,6 +520,7 @@ void Portal::handleRequest(AsyncWebServerRequest *request) {
   }
   this->body_total_ = 0;
   this->body_stored_ = 0;
+  this->body_req_ = nullptr;
 }
 
 void Portal::send_status_(httpd_req_t *req, const char *status) {
@@ -715,8 +712,8 @@ void Portal::serve_action_(AsyncWebServerRequest *request, const core::RouteMatc
   core::ActionOutcome outcome =
       is_form
           ? core::evaluate_action_text(def, sample, busy, form_has_value, form_text.c_str(), request->contentLength())
-          : core::evaluate_action_json(def, sample, busy, this->body_buf_,
-                                       this->body_total_ != 0 ? this->body_total_ : request->contentLength());
+          : core::evaluate_action_json(def, sample, busy, this->body_req_ == request ? this->body_buf_ : "",
+                                       this->body_req_ == request ? this->body_total_ : request->contentLength());
 
   if (outcome.verdict == core::Verdict::BUSY) {
     xSemaphoreGive(this->mutex_);
