@@ -1,0 +1,2212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Device state</title>
+<style>
+:root{
+  --bg:#080b12; --panel:#0f1521; --panel2:#0b1220; --line:#1e293b; --line2:#2b3a52;
+  --text:#e2e8f0; --muted:#7b8ba3; --dim:#4d5c73;
+  /* One tone per state. Nothing else in this sheet may introduce a state colour. */
+  --t-ok:#34d399; --t-stale:#fde047; --t-warn:#f97316; --t-refuse:#f472b6;
+  --t-silent:#a78bfa; --t-absent:#64748b; --t-down:#ef4444; --t-gone:#7dd3fc;
+  --t-noid:#f8fafc; --t-skew:#e879f9; --t-alien:#94a3b8;
+  --hue-none:0;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);
+  font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+a{color:var(--t-gone)}
+button{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line2);
+  border-radius:6px;padding:4px 10px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--muted)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.shell{max-width:1100px;margin:0 auto;padding:0 14px 40px}
+
+/* ---- header: board identity is a hue ---- */
+.top{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 0;
+  border-bottom:1px solid var(--line);margin-bottom:12px}
+.brand{display:flex;gap:10px;align-items:center;min-width:230px}
+.dot{width:26px;height:26px;border-radius:50%;flex:0 0 auto;
+  background:hsl(var(--hue,0) 0% 92%);box-shadow:0 0 12px hsl(var(--hue,0) 0% 92% / .5)}
+.dot.hued{background:hsl(var(--hue) 85% 55%);box-shadow:0 0 12px hsl(var(--hue) 85% 55% / .55)}
+.dot.noid{background:#fff;box-shadow:0 0 14px #fff9;animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.ttl{font-weight:650;letter-spacing:.08em;font-size:12px;color:var(--muted)}
+.sub{font-size:13px}
+.grow{flex:1 1 auto}
+.hdr-right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+
+/* ---- badges: glyph + colour + border style, three independent channels ---- */
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:650;
+  letter-spacing:.05em;padding:2px 8px;border-radius:999px;white-space:nowrap;
+  border:1px solid var(--tone,var(--line2));color:var(--tone,var(--text));
+  background:color-mix(in srgb,var(--tone,#fff) 12%,transparent)}
+.badge .g{font-size:12px;line-height:1;
+  font-family:"Segoe UI Symbol","Noto Sans Symbols2","Noto Sans Symbols","DejaVu Sans",system-ui,sans-serif}
+.badge.alien,.badge.role{border-style:double;border-width:3px}
+.badge.dotted{border-style:dotted}
+.badge.dashed{border-style:dashed}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:1px 7px;
+  border-radius:5px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
+.chip.on{border-color:var(--t-ok);color:var(--t-ok);background:#34d3991a}
+.chip.guess{border-style:dashed;border-color:var(--t-stale);color:var(--t-stale);font-style:italic}
+.chip.warn{border-color:var(--t-stale);color:var(--t-stale)}
+.chip.bad{border-color:var(--t-refuse);color:var(--t-refuse)}
+.act{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 8px}
+.actlbl{min-width:120px;color:var(--muted)}
+.tog{width:20px;height:20px;accent-color:var(--t-ok)}
+.numin{width:90px;font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:3px 6px}
+select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:3px 6px}
+.chip.alien{border:2px double var(--t-alien);color:var(--t-alien)}
+
+/* ---- banners ---- */
+.banner{border:1px solid var(--tone,var(--line2));border-left-width:4px;border-radius:6px;
+  padding:8px 12px;margin:0 0 10px;background:color-mix(in srgb,var(--tone,#fff) 8%,transparent)}
+.banner b{color:var(--tone,var(--text))}
+.banner .d{color:var(--muted);font-size:13px}
+
+/* ---- breadcrumbs ---- */
+.crumbs{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:12px;font-size:13px}
+.crumbs button{background:none;border:0;padding:2px 4px;color:var(--t-gone);border-radius:4px}
+.crumbs button:hover{background:#ffffff12}
+.crumbs .sep{color:var(--dim)}
+.crumbs .here{color:var(--text);font-weight:600;padding:2px 4px}
+
+/* ---- node card ---- */
+.card{border:1px solid var(--line);border-radius:10px;background:var(--panel);margin-bottom:12px}
+.card.s-stale{border-left:4px solid var(--tone)}
+.card.s-absent,.card.s-gone{border-style:dotted;border-color:var(--tone)}
+.card.s-noid,.card.s-alien{border:2px double var(--tone)}
+.card.lead{border-color:var(--tone,var(--line))}
+/* the remaining five of eleven tones the border channel owed: degraded,
+   refused, silent, down and incompatible each get a tone-coloured border,
+   matching their STATES.border field (solid recoloured, double for skew). */
+.card.s-skew{border:2px double var(--tone)}
+.card.s-warn,.card.s-refuse,.card.s-silent,.card.s-down{border-color:var(--tone)}
+/* malformed (`alien` tone) gets its own texture, not just its own hue:
+   a different vocabulary is a different texture. */
+.hatch,.e.c-alien{background-image:repeating-linear-gradient(45deg,
+  color-mix(in srgb,var(--t-alien) 35%,transparent) 0 4px,transparent 4px 10px)}
+.hd{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;
+  border-bottom:1px solid var(--line)}
+.hd h2{margin:0;font-size:16px;font-weight:640}
+.hd .id{font-size:11px;color:var(--dim)}
+.sec{padding:10px 14px;border-bottom:1px solid var(--line)}
+.sec:last-child{border-bottom:0}
+.sec h3{margin:0 0 6px;font-size:11px;letter-spacing:.09em;color:var(--muted);font-weight:650}
+
+/* ---- WHY block: always the first section of a non-ok node ---- */
+.why{border-left:3px solid var(--tone,var(--line2));padding-left:10px}
+.why .head{font-size:15px;color:var(--tone,var(--text))}
+.why .detail{color:var(--text);margin-top:3px}
+.why .code{font-size:11px;color:var(--dim)}
+.ev{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.ev .kv{font-size:11px;border:1px solid var(--line2);border-radius:5px;padding:1px 6px;color:var(--muted)}
+.ev .kv b{color:var(--text);font-weight:600}
+
+/* ---- the value slot. When there is no reading, the reason occupies it. ---- */
+.nodata{border:1px dashed var(--tone,var(--line2));border-radius:7px;padding:10px 12px;
+  color:var(--tone,var(--muted));background:color-mix(in srgb,var(--tone,#fff) 6%,transparent)}
+.nodata .big{font-size:14px;font-weight:600}
+/* the reason line inside a no-reading slot. Its own class: `.why` is the
+   top-level WHY block and the two must not share a selector. */
+.nodata .rs{margin-top:3px;color:var(--muted);font-size:13px}
+.vals{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.v{border:1px solid var(--line);border-radius:7px;padding:7px 9px;background:var(--panel2)}
+.v .l{font-size:11px;color:var(--muted)}
+.v .n{font-size:19px;font-weight:620;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.v .u{font-size:11px;color:var(--muted);margin-left:4px}
+.v .x{font-size:11px;color:var(--dim);margin-top:2px}
+.v.aged .n{opacity:.55}
+.v.sna{border-style:dashed;border-color:var(--t-absent)}
+.v.sna .n{color:var(--t-absent);font-size:14px;letter-spacing:.05em}
+.v.impl{border-color:var(--t-stale)}
+.v.impl .n{color:var(--t-stale)}
+
+/* ---- series ---- */
+.ser .sum{font-size:12px;color:var(--muted);margin-bottom:6px}
+.grid{display:flex;flex-wrap:wrap;gap:4px}
+.e{font-size:11px;border:1px solid var(--line);border-radius:4px;padding:2px 5px;
+  background:var(--panel2);font-family:ui-monospace,Menlo,monospace;white-space:nowrap}
+.e i{color:var(--dim);font-style:normal;margin-right:4px}
+.e.c-s{border-style:dashed;border-color:var(--t-absent);color:var(--t-absent)}
+.e.c-i{border-color:var(--t-stale);color:var(--t-stale)}
+.e.c-x{border-color:var(--t-absent);color:var(--t-absent)}
+.e.c-alien{border:2px double var(--t-alien);color:var(--t-alien)}
+
+/* ---- children ---- */
+.kids{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px}
+.kid{display:flex;gap:9px;align-items:flex-start;text-align:left;width:100%;
+  border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--panel2)}
+.kid.s-absent,.kid.s-gone{border-style:dotted;border-color:var(--tone)}
+.kid.s-stale{border-left:3px solid var(--tone)}
+.kid.s-noid,.kid.s-alien{border:2px double var(--tone)}
+.kid.s-skew{border:2px double var(--tone)}
+.kid.s-warn,.kid.s-refuse,.kid.s-silent,.kid.s-down{border-color:var(--tone)}
+.kid .g{font-size:15px;color:var(--tone,var(--muted));line-height:1.2}
+.kid .n{font-weight:600}
+.kid .m{font-size:11px;color:var(--muted)}
+.kid .m .r{color:var(--tone,var(--muted))}
+
+/* ---- peers / footer ---- */
+.peer{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 0;
+  border-top:1px solid var(--line);font-size:13px}
+.foot{color:var(--dim);font-size:11px;padding-top:12px;border-top:1px solid var(--line);
+  display:flex;flex-wrap:wrap;gap:10px}
+.fatal{border:2px solid var(--t-refuse);border-radius:10px;padding:18px;background:#fb718514}
+.fatal h2{margin:0 0 8px;color:var(--t-refuse)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <span id="dot" class="dot"></span>
+      <div>
+        <div class="ttl">DEVICE STATE</div>
+        <div class="sub" id="served">connecting…</div>
+      </div>
+    </div>
+    <span class="grow"></span>
+    <div class="hdr-right" id="hdr"></div>
+  </header>
+  <div id="banners"></div>
+  <nav class="crumbs" id="crumbs"></nav>
+  <main id="main"></main>
+  <section id="peers"></section>
+  <footer class="foot" id="foot"></footer>
+</div>
+
+<script>
+/* portal-core:start
+ * ---------------------------------------------------------------------------
+ * The pure layer. No DOM, no fetch, no timers, no globals beyond the single
+ * export below. Everything here is a total function from JSON to a plain-data
+ * render model, which is what makes the fault-tolerance guarantees testable
+ * without a browser: a test can extract this exact block out of this exact
+ * file and run it under node, so there is no second copy to drift.
+ * ------------------------------------------------------------------------- */
+"use strict";
+(function (root) {
+
+/* The version this asset was written against, and the oldest it will render at
+ * all. the schema: higher is generic and non-fatal, below the floor is a
+ * stub, and a *missing* schema_version fails closed in both directions. */
+var SCHEMA_TARGET = 2, SCHEMA_FLOOR = 2;
+
+/* The firmware rejects a query of 32 bytes or more outright; the URL builder
+ * fits itself to it rather than trusting to luck. */
+var QUERY_CAP = 32;
+
+/* ---- the state table --------------------------------------------------
+ * The ONE place a state's appearance is decided. No node kind branches on
+ * state and no state branches on kind, which is what keeps the ten states
+ * distinct without a layout per kind.
+ *
+ *  sev     roll-up order.
+ *  tone    colour token.
+ *  glyph   shape, so the states survive greyscale and colour-blindness.
+ *  border  border style, a third channel independent of the first two.
+ *  slot    what belongs in the value's place when there is no reading — the
+ *          fourth and strongest channel, because it differs as a *sentence*.
+ */
+var STATES = {
+  ok:           {sev:0, tone:"ok",     glyph:"●", border:"solid",  slot:null,
+                 gist:"present, fresh, trustworthy"},
+  stale:        {sev:1, tone:"stale",  glyph:"◔", border:"dashed", slot:"held over — this is the last value, not a live one",
+                 gist:"data present and older than its budget"},
+  degraded:     {sev:2, tone:"warn",   glyph:"◑", border:"solid",  slot:"partially working — some of this subtree is missing",
+                 gist:"present and partially working"},
+  refused:      {sev:3, tone:"refuse", glyph:"⊘", border:"solid",  slot:"no reading: it is there and declining the job",
+                 gist:"present and declining the job"},
+  silent:       {sev:3, tone:"silent", glyph:"≡", border:"solid",  slot:"no reading: it is on the wire, but nothing ever completes",
+                 gist:"present on the wire, no usable transfer completes"},
+  absent:       {sev:3, tone:"absent", glyph:"—", border:"dotted", slot:"no reading: there is nothing there at all",
+                 gist:"nothing there"},
+  down:         {sev:3, tone:"down",   glyph:"⏻", border:"solid",  slot:"no reading: measured powered down",
+                 gist:"measured powered down — only ever a confirmed measurement"},
+  unreachable:  {sev:3, tone:"gone",   glyph:"✕", border:"dotted", slot:"no reading: this subtree could not be contacted",
+                 gist:"cannot be contacted"},
+  unknown:      {sev:3, tone:"noid",   glyph:"?",      border:"double", slot:"no reading: it cannot say what it is",
+                 gist:"cannot identify itself"},
+  incompatible: {sev:3, tone:"skew",   glyph:"≠", border:"double", slot:"no reading: served by a version this UI predates",
+                 gist:"served by a version this consumer predates"}
+};
+
+/* ---- a hole is a node, never a gap ------------------------------------
+ * An entry in `children` or `actions` that is not an object at all cannot be
+ * modelled — but dropping it is worse than showing it, because the drop is
+ * invisible: the contained-count shrinks to match and nothing says a node was
+ * lost. The producer here is a board serving JSON over the wire, not this
+ * repo's host-side validator; a firmware bug, a truncated write or a future
+ * producer we do not control reaches this UI directly. So an unparseable entry
+ * becomes a node of its own, in a state no producer can send, and it is
+ * counted, walked and rendered like every other node. */
+var BROKEN_STATE = "(not a node)";
+
+function isNode(n) { return !!n && typeof n === "object" && !Array.isArray(n); }
+function typeName(x) {
+  if (x === null) return "null";
+  if (x === undefined) return "nothing";
+  if (Array.isArray(x)) return "an array";
+  return "a " + typeof x;
+}
+function atIndex(i) { return typeof i === "number" ? " at index " + i : ""; }
+function brokenNode(raw, i) {
+  return {id:null, label:"(unparseable node)", state:BROKEN_STATE,
+          provenance:null, values:[], series:null, children:[], actions:[],
+          why:{code:"malformed_node", detail:"the producer sent " + typeName(raw) +
+                                             atIndex(i) + " where a node belongs"}};
+}
+
+/* the schema: an unknown state is treated as not-ok, its badge is rendered
+ * verbatim, and its `why` is still shown. It gets its own tone and a doubled
+ * border so it can never be mistaken for one of the ten above. */
+function stateInfo(state) {
+  /* Not a producer state and not in STATES: this UI's own verdict on an entry
+   * that was never a node. Its own glyph, so it never reads as an alien state
+   * the board sent. */
+  if (state === BROKEN_STATE) {
+    return {state:BROKEN_STATE, label:"MALFORMED", known:false, ok:false, sev:3,
+            tone:"alien", glyph:"⌀", border:"double",
+            slot:"no reading: this entry is not a node at all",
+            gist:"the producer emitted something that is not a node — a producer bug"};
+  }
+  if (typeof state !== "string" || state === "") {
+    return {state:state === undefined ? "(missing)" : String(state), label:"NO STATE",
+            known:false, ok:false, sev:3, tone:"alien", glyph:"!", border:"double",
+            slot:"no reading: the producer sent no state for this node",
+            gist:"the producer omitted `state` — that is a producer bug"};
+  }
+  var s = STATES[state];
+  if (s) {
+    return {state:state, label:state.toUpperCase(), known:true, ok:state === "ok",
+            sev:s.sev, tone:s.tone, glyph:s.glyph, border:s.border, slot:s.slot, gist:s.gist};
+  }
+  return {state:state, label:state.toUpperCase(), known:false, ok:false, sev:3,
+          tone:"alien", glyph:"!", border:"double",
+          slot:"no reading: this UI does not know the state “" + state + "”",
+          gist:"a state newer than this UI — treated as not OK"};
+}
+
+/* ---- kinds ------------------------------------------------------------
+ * A vocabulary, not a layout registry. Every kind renders with the
+ * same generic node view; this map only supplies the human noun so the header
+ * reads as something. A kind that is not in it renders identically and is
+ * named explicitly as unrecognised (spec section 7). */
+var KINDS = {
+  car:"vehicle", component:"component", vehicle:"vehicle side", pack:"battery pack",
+  device:"device", bus:"bus", ecu:"control unit", charger:"charger", battery:"battery",
+  logger:"logger", gateway:"gateway", network:"network", sensor:"sensor",
+  actuator:"actuator", module:"module",
+  /* `cse` names the assembly (submodule: cell module + one CSE), never the
+   * board that reads it. */
+  cse:"submodule", ti:"TI device", bcu:"battery control unit", nm:"NM ring",
+  wake_holds:"wake holds", dtcs:"trouble codes", dtc:"trouble code", uds:"UDS",
+  did:"data identifier", can_id:"CAN identifier", capture:"capture completeness",
+  census:"bus census", bus:"CAN bus transport", sync:"sync line",
+  user:"user-defined node"
+};
+function kindInfo(kind) {
+  if (typeof kind !== "string" || kind === "") {
+    return {kind:kind === undefined ? "(missing)" : String(kind), noun:"node", known:false};
+  }
+  var noun = Object.prototype.hasOwnProperty.call(KINDS, kind) ? KINDS[kind] : null;
+  return {kind:kind, noun:noun === null ? kind : noun, known:noun !== null};
+}
+
+/* label resolution, shared by nodeModel, childSummary and role inheritance
+ * below — one fallback chain (`label`, then `id`, then a marker) rather than
+ * three copies drifting. */
+function nodeLabel(node) {
+  return typeof node.label === "string" && node.label !== "" ? node.label
+       : (typeof node.id === "string" ? node.id : "(unlabelled node)");
+}
+
+/* ---- role ---------------------------------------------------------------
+ * `role` describes how we are ENGAGING with a subtree - it never says what
+ * the subtree IS, and this UI never says what a role MEANS.
+ * Same generic-rendering rule as an unrecognised `kind`: any non-empty string
+ * is shown verbatim, known or not, and nothing here branches on which role it
+ * is. Anything that is not a non-empty string — missing, null, a number, an
+ * object — carries no role at all; absence must never resolve to a rendered
+ * value (that failure mode is the reason this function exists). */
+function roleOf(node) {
+  return typeof node.role === "string" && node.role !== "" ? node.role : null;
+}
+
+/* ---- role inheritance -----------------------------------------------------
+ * A schema may declare `role` on one node, several levels above the nodes it
+ * qualifies. A node that
+ * only ever renders its own `role` makes every descendant look unroled —
+ * the same "asserted reads as measured" failure `roleOf` exists to close,
+ * one level deeper.
+ *
+ * `nearestRole` walks a chain of ancestors THIS UI ACTUALLY HOLDS — never the
+ * true tree, which a subtree fetch (the schema) may not have
+ * handed over — and returns the nearest one that declares a role, named.
+ * `effectiveRole` turns that plus a node's own role into one of three facts:
+ * declared (its own), inherited (an ancestor's, named), or — when its third
+ * argument, `roleContextUnstated`, is true — unknown rather than silently
+ * absent. That argument is `roleContext(env) === "unstated"` (below): a
+ * subtree fetch from a board old enough to say nothing about its ancestor at
+ * all. Full-tree mode, and a subtree fetch the board DID state (`"stated"` or
+ * `"none"`), both pass false and finding nothing stays genuinely absent: same
+ * shape, a different fact, because the UI knows which case it is in and must
+ * say so rather than collapse them (pin 5; the same discipline the
+ * `announced` invariant enforces for evidence, commit db19359). */
+function nearestRole(ancestors) {
+  var i, r;
+  if (!ancestors) return null;
+  for (i = ancestors.length - 1; i >= 0; i--) {
+    r = roleOf(ancestors[i]);
+    if (r) return {role:r, from:nodeLabel(ancestors[i])};
+  }
+  return null;
+}
+function effectiveRole(ownRole, inherited, roleContextUnstated) {
+  if (ownRole) return {role:ownRole, source:"declared", from:null};
+  if (inherited) return {role:inherited.role, source:"inherited", from:inherited.from};
+  if (roleContextUnstated) return {role:null, source:"unknown", from:null};
+  return null;
+}
+
+/* ---- envelope-level ancestor_role -----------------------------------------
+ * A narrowed (`?path=`) envelope carries `ancestor_role` as its own three-way
+ * fact, distinct from `nearestRole`'s walk over the ancestors THIS UI HOLDS,
+ * so the envelope states the one fact that completes the view instead of the
+ * client guessing at it.
+ *
+ *   "full"     -- no `path` at all: the whole tree is held, nothing to state.
+ *   "stated"   -- `path` present, `ancestor_role` a well-formed object: a role
+ *                 governs this view, declared at `ancestor_role.node`.
+ *   "none"     -- `path` present, `ancestor_role` explicitly `null`: the board
+ *                 looked, and no ancestor declares a role. Renders nothing.
+ *   "unstated" -- `path` present, and this UI cannot say what the board meant
+ *                 about its ancestor -- EITHER `ancestor_role` is genuinely
+ *                 absent (a board that predates this key), OR it is present
+ *                 but unreadable (wrong type, a missing field -- a foreign or
+ *                 buggy producer; the validator's
+ *                 `ancestor_role_wrong_type` is what should catch it). Both are "cannot judge", never "there is none":
+ *                 collapsing a parse failure into "none" would render a hard
+ *                 absence ("no role governs this view") for a claim the board
+ *                 never made -- a deep series would then render with no
+ *                 disclosure at all, the exact failure this key exists to close. Deliberately still ONE mode, not
+ *                 a fifth string: the existing "role unknown here" marker is
+ *                 not a precise description of a parse failure, but it is
+ *                 honest in the operative direction, and the precise cause is
+ *                 a validator finding, not an operator-facing one. */
+function roleContext(env) {
+  if (!env || typeof env !== "object" || env.path === null || env.path === undefined) return "full";
+  if (!env.hasAncestorRole || env.ancestorRoleUnreadable) return "unstated";
+  return env.ancestorRole ? "stated" : "none";
+}
+
+/* ---- why -------------------------------------------------------------- */
+var WHY = {
+  never_announced:"never announced — nothing at that address",
+  no_transfer:"on the wire, but no transfer ever completes",
+  negative_response:"answered with a negative response",
+  stale_data:"the last value is older than its budget",
+  crc_fail:"CRC failed over this device’s own cells",
+  degraded_raster:"the raster is running with fewer than all contributors",
+  raster_stall:"the raster stalled",
+  child_degraded:"something below this node is not OK",
+  peer_unreachable:"the peer board did not answer",
+  peer_timeout:"the peer board timed out",
+  schema_skew:"the peer speaks a different schema version",
+  no_identity:"this board cannot say what it is",
+  no_rail_instrument:"the rail instrument is not mounted, so DOWN cannot be measured",
+  role_exclusive:"the image serves one role at a time",
+  not_compiled:"not compiled into this image",
+  not_polled:"nothing has asked for this yet",
+  transport_timeout:"the transport timed out",
+  ring_down:"the NM ring is down",
+  wake_hold:"something is holding the bus awake",
+  wake_holds_stale:"the wake-hold reading is a stale latch",
+  no_sleep_indication:"no sleep indication was seen",
+  quiesce_not_confirmed:"quiesce was never confirmed",
+  rail_held:"the rail is still held up",
+  entities_unavailable:"the entities behind this are unavailable",
+  identical_substitute:"a substitute value identical to the last one",
+  value_not_available:"the producer reports no value available",
+  implausible_value:"the reading is outside its sanity band",
+  dtc_set:"a diagnostic trouble code is set",
+  capture_degraded:"the capture is incomplete",
+  thermal_derate:"thermally derated",
+  /* the last two are this UI's verdicts on a malformed producer, not codes a
+   * board sends — they exist so a dropped entry becomes a visible one */
+  malformed_node:"this entry in the tree is not a node at all",
+  malformed_action:"this entry in `actions` is not an action at all"
+};
+
+function fmtScalar(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") {
+    if (!isFinite(v)) return String(v);
+    return Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000);
+  }
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v); } catch (e) { return String(v); }
+}
+
+function fmtAge(ms) {
+  if (ms === null || ms === undefined) return null;   /* never received != age 0 */
+  if (typeof ms !== "number" || !isFinite(ms)) return String(ms);
+  if (ms < 1000) return Math.round(ms) + " ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + " s";
+  var m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
+  if (m < 60) return m + " m " + s + " s";
+  return Math.floor(m / 60) + " h " + (m % 60) + " m";
+}
+
+function evidencePairs(ev) {
+  var out = [], k, v, k2;
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return out;
+  for (k in ev) {
+    if (!Object.prototype.hasOwnProperty.call(ev, k)) continue;
+    v = ev[k];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      for (k2 in v) {
+        if (Object.prototype.hasOwnProperty.call(v, k2)) {
+          out.push({key:k + "." + k2, value:fmtScalar(v[k2])});
+        }
+      }
+    } else {
+      out.push({key:k, value:Array.isArray(v) ? v.join(", ") : fmtScalar(v)});
+    }
+  }
+  return out;
+}
+
+/* the schema: an unknown why.code shows `detail` if present, else the code
+ * verbatim. A consumer must never parse `detail` — it is only ever displayed. */
+function whyModel(why) {
+  if (why === null || why === undefined) return null;
+  if (typeof why !== "object" || Array.isArray(why)) {
+    return {code:null, known:false, headline:fmtScalar(why), detail:null,
+            since_ms:null, since:null, evidence:[]};
+  }
+  var code = typeof why.code === "string" && why.code !== "" ? why.code : null;
+  var detail = typeof why.detail === "string" && why.detail !== "" ? why.detail : null;
+  var known = code !== null && Object.prototype.hasOwnProperty.call(WHY, code);
+  var since = typeof why.since_ms === "number" ? why.since_ms : null;
+  return {
+    code:code, known:known, detail:known ? detail : null,
+    headline:known ? WHY[code] : (detail || code || "no reason given"),
+    since_ms:since, since:fmtAge(since), evidence:evidencePairs(why.evidence)
+  };
+}
+
+/* ---- identity --------------------------------------------------------
+ * Hue is board identity. A board gets a stable hue derived from its name, and
+ * a board that cannot identify itself gets no hue at all - the dull white of
+ * the LED language, explicit and never a silent default. */
+var HUES = {};
+function boardHue(board) {
+  if (typeof board !== "string" || board === "") return null;
+  if (Object.prototype.hasOwnProperty.call(HUES, board)) return HUES[board];
+  var h = 0, i;
+  for (i = 0; i < board.length; i++) h = (h * 31 + board.charCodeAt(i)) % 360;
+  return h;
+}
+
+function provModel(p) {
+  if (!p || typeof p !== "object" || Array.isArray(p)) {
+    return {present:false, origin:null, board:null, hue:null, identified:false,
+            trust:null, confirmed:false, age_ms:null, age:null, budget_ms:null,
+            overBudget:false, neverReceived:true, seq:null};
+  }
+  var board = typeof p.board === "string" && p.board !== "" ? p.board : null;
+  var age = typeof p.age_ms === "number" ? p.age_ms : null;
+  var budget = typeof p.budget_ms === "number" ? p.budget_ms : null;
+  var trust = typeof p.trust === "string" && p.trust !== "" ? p.trust : null;
+  return {
+    present:true,
+    origin:typeof p.origin === "string" ? p.origin : null,
+    board:board, hue:boardHue(board), identified:board !== null,
+    trust:trust, confirmed:trust === "confirmed",
+    age_ms:age, age:fmtAge(age), budget_ms:budget,
+    overBudget:age !== null && budget !== null && age > budget,
+    neverReceived:age === null,   /* the schema: null is never received, not a big age */
+    seq:typeof p.seq === "number" ? p.seq : null
+  };
+}
+
+/* ---- unit scaling (pin 3, refined 3-R) ---------------------------------
+ * Table-driven, exact-match only: an unrecognised unit (including a
+ * lower-case "v" that is already in volts) renders verbatim, same rule as an
+ * unrecognised kind not being specialised. */
+var UNIT_SCALE = {mV:"V", mA:"A", "mΩ":"Ω", ms:"s"};
+
+/* Exact decimal shift, string manipulation only -- no division anywhere, so
+ * no float ever reaches a divide and A1 (no fixture float in a scaled unit)
+ * does not need its own rule. */
+function shift3(n) {
+  if (typeof n !== "number" || !isFinite(n) || !Number.isInteger(n)) return null;
+  var neg = n < 0, s = String(Math.abs(n));
+  if (!/^[0-9]+$/.test(s)) return null;        /* 1e21 and friends: refuse */
+  if (s.length <= 3) return null;              /* |n| < 1000: do not scale */
+  var head = s.slice(0, s.length - 3);
+  var tail = s.slice(s.length - 3);
+  return (neg ? "-" : "") + head + "." + tail;
+}
+
+/* S1's whole rule in one place: table lookup + exact shift. Returns null
+ * when the unit is not in the table or the shift is not exact -- the caller
+ * then leaves the value exactly as it was. S2 (aggregates) reuses this
+ * unchanged as a per-member veto: shift3 cannot lift a sub-1000 value, so a
+ * population whose extreme is below the threshold stays entirely unscaled
+ * rather than one member scaling and the other not. */
+function scaleUnit(unit, n) {
+  if (typeof unit !== "string" || !Object.prototype.hasOwnProperty.call(UNIT_SCALE, unit)) return null;
+  var s = shift3(n);
+  return s === null ? null : {unit:UNIT_SCALE[unit], display:s};
+}
+
+/* ---- values ----------------------------------------------------------- */
+function valueModel(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) {
+    return {key:null, label:"(malformed value)", unit:null, display:null, hole:"malformed",
+            classification:null, implausible:false, raw_hex:null, state:stateInfo(undefined),
+            why:null, rawValue:null, scaled:null};
+  }
+  var cls = typeof v.classification === "string" ? v.classification : null;
+  var hole = null, display = null;
+  if (cls === "sna") hole = "sna";                       /* value is null iff sna */
+  else if (v.value === null || v.value === undefined) hole = "null";
+  else display = fmtScalar(v.value);
+  /* S1: never a hole, never implausible, and only ever a number -- a scale is
+   * a second rendering of a quantity, not something a string or bool has. */
+  var scaled = (!hole && cls !== "implausible" && typeof v.value === "number")
+    ? scaleUnit(typeof v.unit === "string" ? v.unit : null, v.value) : null;
+  return {
+    key:typeof v.key === "string" ? v.key : null,
+    label:typeof v.label === "string" && v.label !== "" ? v.label
+          : (typeof v.key === "string" ? v.key : "(unlabelled)"),
+    unit:typeof v.unit === "string" && v.unit !== "" ? v.unit : null,
+    display:display, hole:hole, classification:cls,
+    implausible:cls === "implausible",
+    /* the untouched wire value -- above this line valueModel only ever kept
+     * a formatted string, and wakeHoldsModel needs the real JS type */
+    rawValue:hole ? null : v.value,
+    scaled:scaled,
+    raw_hex:typeof v.raw_hex === "string" && v.raw_hex !== "" ? v.raw_hex : null,
+    state:stateInfo(v.state), why:whyModel(v.why)
+  };
+}
+
+/* ---- series -----------------------------------------------------------
+ * `class` is one character per element. The built-in table is the fallback;
+ * an envelope-supplied legend wins, so a compact encoding stays self-
+ * describing to a UI older than the board. A character in neither is named as
+ * unrecognised rather than quietly counted as a real reading — the whole point
+ * of the classification is that a hole must never read as a measurement. */
+var CLASS_LEGEND = {r:"real", s:"SNA", i:"implausible", "-":"not measured"};
+var CLASS_TONE = {r:"", s:"c-s", i:"c-i", "-":"c-x"};
+
+/* ---- series numbering ---------------------------------------------------
+ * The wire carries the frame directly (`series.index_frame`); the frame is
+ * never recovered from `kind`. `NUMBERING` is keyed by the WIRE FRAME NAME
+ * itself: `submodule_cell` is the prose the old `submodule` row already
+ * carried (unchanged), `pack_cell` is new (the schema, reserved, nobody emits
+ * it yet). `unstated` is the fallback for `index_frame: null` / the key
+ * absent — never reachable by a wire lookup keyed on the literal string
+ * "unstated" (see KNOWN_FRAMES below and the guard in numberingInfo). */
+var NUMBERING = {
+  submodule_cell:{key:"submodule_cell", known:true, word:"submodule cell", range:null,
+    qualifier:"", secondNumberNote:" · pack cell number not on the wire",
+    line:"numbering: submodule cell, this submodule's own count · pack cell number: not on the wire",
+    title:"A cell has two numbers and both are real: the whole-pack count and the submodule's own count. This device sends only the submodule-local number, so the pack number is not shown here and is never derived from address, array order or submodule id."},
+  pack_cell:{key:"pack_cell", known:true, word:"pack cell", range:null,
+    qualifier:"", secondNumberNote:"",
+    line:"numbering: pack cell, across the whole pack",
+    title:"This series counts cells across the whole pack rather than one submodule's own count. Reserved on the wire; no producer emits it yet."},
+  unstated:{key:"unstated", known:false, word:"index", range:null,
+    qualifier:" (numbering unstated)", secondNumberNote:"",
+    line:"numbering: this producer did not say which numbering these indices use",
+    title:"The envelope declares an index_base but no frame of reference for it, so this UI names the number as the producer's own index rather than guessing it is a submodule-local or a pack cell number."}
+};
+/* The only wire frame NAMES this UI recognises -- deliberately NOT
+ * `Object.keys(NUMBERING)`, because `NUMBERING` also holds the `unstated`
+ * fallback row under that same key, and a producer sending the literal
+ * string `index_frame: "unstated"` must render as UNRECOGNISED (below),
+ * never be mistaken for "the producer did not say" . */
+var KNOWN_FRAMES = ["submodule_cell", "pack_cell"];
+/* `numberingInfo` takes the SERIES OBJECT (not a node kind) and resolves
+ * exactly three cases : a recognised frame name -> that
+ * row; null or the key absent -> NUMBERING.unstated; anything else -- an
+ * unrecognised name, or a non-string -- -> a row naming it verbatim,
+ * `known:false` (rendered and named as unrecognised, never mapped onto a known one). */
+function numberingInfo(series) {
+  var frame = series && typeof series === "object" && !Array.isArray(series) ? series.index_frame : undefined;
+  if (frame === null || frame === undefined) return NUMBERING.unstated;
+  if (typeof frame === "string" && KNOWN_FRAMES.indexOf(frame) !== -1) return NUMBERING[frame];
+  var label = typeof frame === "string" ? frame : String(frame);
+  return {key:"unrecognised", known:false, word:"index", range:null,
+    qualifier:" (numbering unrecognised “" + label + "”)", secondNumberNote:"",
+    line:"numbering: unrecognised index_frame “" + label + "”",
+    title:"This series names an index_frame this UI does not recognise (“" + label + "”), shown verbatim rather than mapped onto a known numbering."};
+}
+
+/* One name for one index, in whichever frame `numberingInfo` resolved. Never
+ * a bare number: the whole point of naming the frame once (above) is that
+ * every reference to a cell repeats the word, not just the digit. Reads its
+ * parenthetical from the row's own `qualifier`  instead
+ * of branching on `known`, so a new row carries its own wording without a
+ * rewrite here. */
+function cellRef(numbering, index) {
+  var n = numbering && numbering.known !== undefined ? numbering : NUMBERING.unstated;
+  return n.word + " " + index + (n.qualifier || "");
+}
+
+function seriesModel(s, legend) {
+  if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+  var vals = Array.isArray(s.values) ? s.values : [];
+  var idx = Array.isArray(s.index) ? s.index : null;
+  var base = typeof s.index_base === "number" ? s.index_base : 0;
+  var rawCls = s["class"], cls = typeof rawCls === "string" ? rawCls : null;
+  /* `class` omitted entirely means every element is real (the schema). A
+   * `class` that is PRESENT but unusable — not a string, or a string shorter
+   * than `values` — is the opposite of that: those elements carry no
+   * classification at all, and defaulting them to "real" would put a hole on
+   * the screen as a measurement. Absence never resolves to real. */
+  var clsBad = cls === null && rawCls !== null && rawCls !== undefined;
+  var leg = {}, k;
+  for (k in CLASS_LEGEND) if (Object.prototype.hasOwnProperty.call(CLASS_LEGEND, k)) leg[k] = CLASS_LEGEND[k];
+  if (legend && typeof legend === "object") {
+    for (k in legend) if (Object.prototype.hasOwnProperty.call(legend, k)) leg[k] = String(legend[k]);
+  }
+  if (s.legend && typeof s.legend === "object") {
+    for (k in s.legend) if (Object.prototype.hasOwnProperty.call(s.legend, k)) leg[k] = String(s.legend[k]);
+  }
+  var els = [], counts = {}, i, ch, name, cname, known, tn;
+  for (i = 0; i < vals.length; i++) {
+    /* null means "no class character for this element" — never "r" */
+    ch = clsBad ? null : (cls === null ? "r" : (i < cls.length ? cls.charAt(i) : null));
+    if (ch === null) {
+      cname = "unclassified"; known = false; tn = "c-alien";
+    } else {
+      name = Object.prototype.hasOwnProperty.call(leg, ch) ? leg[ch] : null;
+      known = name !== null;
+      cname = known ? name : "unrecognised “" + ch + "”";
+      tn = known && CLASS_TONE[ch] !== undefined ? CLASS_TONE[ch] : "c-alien";
+    }
+    counts[cname] = (counts[cname] || 0) + 1;
+    els.push({
+      index:idx ? idx[i] : base + i,
+      value:vals[i], display:fmtScalar(vals[i]),
+      ch:ch, className:cname, classKnown:known, tone:tn,
+      hole:vals[i] === null || vals[i] === undefined
+    });
+  }
+  var summary = [];
+  for (k in counts) if (Object.prototype.hasOwnProperty.call(counts, k)) summary.push({name:k, n:counts[k]});
+  summary.sort(function (a, b) { return b.n - a.n; });
+  return {
+    key:typeof s.key === "string" ? s.key : null,
+    label:typeof s.label === "string" && s.label !== "" ? s.label : (typeof s.key === "string" ? s.key : "series"),
+    unit:typeof s.unit === "string" && s.unit !== "" ? s.unit : null,
+    count:els.length, elements:els, summary:summary,
+    /* the schema: length is not cell count. Say what it is, never infer. */
+    contiguous:idx === null, index_base:base,
+    numbering:numberingInfo(s)
+  };
+}
+
+/* an element counts toward the population only if it is classified `real`,
+ * non-hole, AND its wire value is actually a finite number -- a producer
+ * that puts a string or boolean under a "real" class character must not
+ * turn into a rendered min/max/spread that asserts a number where there was
+ * none. */
+function isRealNumeric(e) {
+  return e.className === "real" && !e.hole && typeof e.value === "number" && isFinite(e.value);
+}
+
+/* ---- series aggregates (pin 2, pin 7) ----------------------------------
+ * `className` rather than the raw character is deliberate: a legend can
+ * rename a character, and honouring it is the point of having one. */
+function seriesStats(sr) {
+  var real = [], i, e;
+  for (i = 0; i < sr.elements.length; i++) {
+    e = sr.elements[i];
+    if (isRealNumeric(e)) real.push(e);
+  }
+  var total = sr.count, population = real.length;
+  if (population === 0) {
+    return {total:total, population:0, partial:total > 0, min:null, max:null, spread:null, scaled:null};
+  }
+  var min = real[0], max = real[0], j;
+  for (j = 1; j < real.length; j++) {
+    if (real[j].value < min.value) min = real[j];
+    if (real[j].value > max.value) max = real[j];
+  }
+  var spread = max.value - min.value;
+  var scaled = scaledTriple(sr.unit, min.value, max.value, spread);
+  return {
+    total:total, population:population, partial:population < total,
+    min:{index:min.index, value:min.value}, max:{index:max.index, value:max.value},
+    spread:spread, scaled:scaled
+  };
+}
+
+/* S2 (min/max: veto, one decision for both) and S3 (spread: its own scalar
+ * rule, independent of S2) combined into the one triple both `seriesStats`
+ * and `cseRollup` render. Always non-null once there is a population --
+ * "scaled" names the render info, not a claim that a conversion happened;
+ * an ineligible member simply carries its own original unit back. */
+function scaledTriple(unit, minV, maxV, spread) {
+  if (!unit) {
+    return {min:{display:fmtScalar(minV), unit:null}, max:{display:fmtScalar(maxV), unit:null},
+            spread:{display:fmtScalar(spread), unit:null}};
+  }
+  var sMin = scaleUnit(unit, minV), sMax = scaleUnit(unit, maxV);
+  var veto = sMin && sMax;
+  var sSpread = scaleUnit(unit, spread);
+  return {
+    min:veto ? {display:sMin.display, unit:sMin.unit} : {display:fmtScalar(minV), unit:unit},
+    max:veto ? {display:sMax.display, unit:sMax.unit} : {display:fmtScalar(maxV), unit:unit},
+    spread:sSpread ? {display:sSpread.display, unit:sSpread.unit} : {display:fmtScalar(spread), unit:unit}
+  };
+}
+
+/* Over `ti` children present in THIS view (one hop, never a deeper walk --
+ * a subtree fetch may hold fewer than the true CSE has) that carry a usable
+ * series. `null` when there are none of those, which is the common
+ * case. `legend` is optional and threads the envelope-level legend through
+ * unchanged. The frame sits on each min/max RECORD, taken from that record's
+ * own TI's `series.numbering` -- a per-record frame cannot lie when two TIs
+ * disagree; a single rollup-level frame could. */
+function cseRollup(node, legend) {
+  if (!node || !Array.isArray(node.children)) return null;
+  var totalTis = 0, tis = [], i, kid, sr;
+  for (i = 0; i < node.children.length; i++) {
+    kid = node.children[i];
+    if (!isNode(kid) || kid.kind !== "ti") continue;
+    totalTis++;
+    sr = seriesModel(kid.series, legend);
+    if (sr) tis.push({label:nodeLabel(kid), series:sr});
+  }
+  if (!tis.length) return null;
+  var totalEls = 0, real = [], unit = null, t, j, e;
+  for (t = 0; t < tis.length; t++) {
+    totalEls += tis[t].series.count;
+    if (unit === null) unit = tis[t].series.unit;
+    for (j = 0; j < tis[t].series.elements.length; j++) {
+      e = tis[t].series.elements[j];
+      if (isRealNumeric(e)) {
+        real.push({tiLabel:tis[t].label, index:e.index, value:e.value, numbering:tis[t].series.numbering});
+      }
+    }
+  }
+  var population = real.length;
+  if (population === 0) {
+    return {tisInView:tis.length, tisTotal:totalTis, totalElements:totalEls,
+            population:0, min:null, max:null, spread:null, unit:unit, scaled:null};
+  }
+  var min = real[0], max = real[0];
+  for (j = 1; j < real.length; j++) {
+    if (real[j].value < min.value) min = real[j];
+    if (real[j].value > max.value) max = real[j];
+  }
+  var spread = max.value - min.value;
+  var scaled = scaledTriple(unit, min.value, max.value, spread);
+  return {tisInView:tis.length, tisTotal:totalTis, totalElements:totalEls,
+          population:population, min:min, max:max, spread:spread, unit:unit, scaled:scaled};
+}
+
+/* Same rule as a child: an entry that cannot be modelled is shown, disabled,
+ * with the reason — never silently absent from the ACTIONS list. */
+var ACTION_CONTROLS = ["switch", "button", "select", "number"];
+function actionModel(a, i) {
+  if (!isNode(a)) {
+    return {key:null, label:"(unparseable action)", method:null, path:null,
+            enabled:false, body:null, broken:true,
+            why:whyModel({code:"malformed_action",
+                          detail:"the producer sent " + typeName(a) + atIndex(i) +
+                                 " where an action belongs"})};
+  }
+  var control = typeof a.control === "string" ? a.control : null;
+  var res = isNode(a.result) ? a.result : null;
+  return {
+    broken:false,
+    key:typeof a.key === "string" ? a.key : null,
+    label:typeof a.label === "string" && a.label !== "" ? a.label : (typeof a.key === "string" ? a.key : "action"),
+    method:typeof a.method === "string" ? a.method : "POST",
+    path:typeof a.path === "string" ? a.path : null,
+    enabled:a.enabled === true,
+    body:a.body === undefined ? null : a.body,
+    why:whyModel(a.why),
+    control:control,
+    /* an action from an older producer carries no `control`: it is a plain button */
+    kind:control === null ? "button" : (ACTION_CONTROLS.indexOf(control) !== -1 ? control : "unknown"),
+    value:a.value === undefined ? null : a.value,
+    options:Array.isArray(a.options) ? a.options.filter(function (o) { return typeof o === "string"; }) : [],
+    min:typeof a.min === "number" ? a.min : null,
+    max:typeof a.max === "number" ? a.max : null,
+    step:typeof a.step === "number" ? a.step : null,
+    unit:typeof a.unit === "string" ? a.unit : null,
+    result:res === null ? null : {
+      state:typeof res.state === "string" ? res.state : "?",
+      code:isNode(res.why) && typeof res.why.code === "string" ? res.why.code : null,
+      detail:isNode(res.why) && typeof res.why.detail === "string" ? res.why.detail : null,
+      age:typeof res.age_ms === "number" ? fmtAge(res.age_ms) : null,
+      value:res.value === undefined ? null : res.value
+    }
+  };
+}
+
+/* ---- the node model ---------------------------------------------------
+ * `blocks` is the render order, and it is where WHY-before-WHAT stops being a
+ * convention: for any node that is not ok, blocks[0].type === "why". The DOM
+ * layer paints blocks in order and makes no ordering decision of its own. */
+function nodeModel(node, opts) {
+  opts = opts || {};
+  var roleContextUnstated = !!opts.roleContextUnstated, inherited = opts.inherited || null;
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return {broken:true, id:null, label:"malformed node", kind:kindInfo(undefined),
+            state:stateInfo(undefined), why:null, prov:provModel(null), role:null, roleView:null,
+            values:[], series:null, children:[], actions:[],
+            blocks:[{type:"nodata", state:stateInfo(undefined), why:null}]};
+  }
+  var st = stateInfo(node.state);
+  var why = whyModel(node.why);
+  var prov = provModel(node.provenance);
+  var label = nodeLabel(node);
+  var ownRole = roleOf(node);
+  var roleView = effectiveRole(ownRole, inherited, roleContextUnstated);
+  /* A role reaches every node under the one that declares it, not only the
+   * one being rendered right now — this is what keeps CONTAINS's one-hop
+   * children honest about it too, without each kid re-walking to the root. */
+  var kidsInherit = ownRole ? {role:ownRole, from:label} : inherited;
+  var values = [], series = null, kids = [], actions = [], i, a;
+  if (Array.isArray(node.values)) for (i = 0; i < node.values.length; i++) values.push(valueModel(node.values[i]));
+  if (node.series) series = seriesModel(node.series, opts.legend);
+  /* Every entry survives, parseable or not. `children.length` is therefore the
+   * count the producer sent, which is what makes CONTAINS — N honest. */
+  if (Array.isArray(node.children)) for (i = 0; i < node.children.length; i++) {
+    kids.push(isNode(node.children[i]) ? node.children[i] : brokenNode(node.children[i], i));
+  }
+  if (Array.isArray(node.actions)) for (i = 0; i < node.actions.length; i++) {
+    a = actionModel(node.actions[i], i);
+    if (a) actions.push(a);
+  }
+
+  var blocks = [];
+  if (!st.ok) blocks.push({type:"why", why:why, state:st});
+  if (values.length) blocks.push({type:"values", values:values});
+  if (series) blocks.push({type:"series", series:series});
+  if (!st.ok && !values.length && !series) blocks.push({type:"nodata", state:st, why:why});
+  if (actions.length) blocks.push({type:"actions", actions:actions});
+  if (kids.length) blocks.push({type:"children", children:kids.map(function (k) {
+    return childSummary(k, kidsInherit, roleContextUnstated);
+  })});
+
+  return {
+    broken:false,
+    id:typeof node.id === "string" ? node.id : null,
+    label:label,
+    kind:kindInfo(node.kind), state:st, why:why, prov:prov, role:ownRole, roleView:roleView,
+    values:values, series:series, children:kids, actions:actions, blocks:blocks
+  };
+}
+
+function childSummary(node, inherited, roleContextUnstated) {
+  if (!isNode(node)) node = brokenNode(node);
+  var st = stateInfo(node.state), why = whyModel(node.why), prov = provModel(node.provenance);
+  var kids = Array.isArray(node.children) ? node.children.length : 0;
+  var ownRole = roleOf(node);
+  return {
+    id:typeof node.id === "string" ? node.id : null,
+    label:nodeLabel(node),
+    kind:kindInfo(node.kind), state:st, prov:prov, childCount:kids,
+    role:ownRole, roleView:effectiveRole(ownRole, inherited || null, !!roleContextUnstated),
+    /* the reason travels with the summary; a child never shows a bare badge */
+    reason:st.ok ? null : (why ? why.headline : st.gist)
+  };
+}
+
+/* ---- tree walking ------------------------------------------------------ */
+/* An unparseable child is walked as a broken node rather than skipped, so
+ * census() counts it and the header's "N of M nodes not OK" cannot go quiet
+ * over a node the producer mangled. */
+function walk(node, fn, depth, parent) {
+  if (!isNode(node)) return;
+  fn(node, depth || 0, parent || null);
+  var kids = Array.isArray(node.children) ? node.children : [], i;
+  for (i = 0; i < kids.length; i++) {
+    walk(isNode(kids[i]) ? kids[i] : brokenNode(kids[i], i), fn, (depth || 0) + 1, node);
+  }
+}
+function findNode(root, id) {
+  var hit = null;
+  walk(root, function (n) { if (hit === null && n.id === id) hit = n; });
+  return hit;
+}
+function pathTo(root, id) {
+  if (!root || typeof root !== "object") return null;
+  if (root.id === id) return [root];
+  var kids = Array.isArray(root.children) ? root.children : [], i, sub;
+  for (i = 0; i < kids.length; i++) {
+    sub = pathTo(kids[i], id);
+    if (sub) return [root].concat(sub);
+  }
+  return null;
+}
+function census(root) {
+  var counts = {}, total = 0;
+  walk(root, function (n) {
+    var s = stateInfo(n.state);
+    counts[s.state] = (counts[s.state] || 0) + 1;
+    total++;
+  });
+  return {counts:counts, total:total,
+          notOk:total - (counts.ok || 0)};
+}
+
+/* ---- envelope ---------------------------------------------------------
+ * the schema: renaming `schema` to `schema_version` alongside the bump is
+ * deliberate, so an old asset against a new board and a new asset against an
+ * old board both see `undefined` and refuse. Failing closed is the required
+ * behaviour in both directions — but refusing is a screen, never a blank. */
+/* Envelope `links` (optional, additive): {rel,label,href}, href starting with "/". Anything
+ * that does not fit that shape is dropped, never rendered as a link. */
+function linkModels(raw) {
+  var out = [], i, l;
+  if (!Array.isArray(raw)) return out;
+  for (i = 0; i < raw.length; i++) {
+    l = raw[i];
+    if (isNode(l) && typeof l.label === "string" && l.label !== "" && typeof l.href === "string" &&
+        l.href.charAt(0) === "/" && l.href.charAt(1) !== "/") {
+      out.push({rel:typeof l.rel === "string" ? l.rel : "", label:l.label, href:l.href});
+    }
+  }
+  return out;
+}
+
+function envelopeModel(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return fatal("not_an_object", "The board sent something that is not a state envelope.");
+  }
+  var v = raw.schema_version;
+  if (v === undefined) {
+    return fatal("no_schema_version",
+      "No schema_version in the body. Either this asset predates the board and is " +
+      "seeing a key it does not know, or the board predates this asset and still " +
+      "sends `schema`. Both directions fail closed rather than half-render.");
+  }
+  if (typeof v !== "number" || !isFinite(v) || Math.floor(v) !== v) {
+    return fatal("bad_schema_version", "schema_version is not an integer: " + fmtScalar(v));
+  }
+  if (v < SCHEMA_FLOOR) {
+    return fatal("schema_too_old",
+      "The board serves schema_version " + v + "; this asset renders " + SCHEMA_FLOOR + " and up.", v);
+  }
+  var problems = [];
+  if (!raw.tree || typeof raw.tree !== "object" || Array.isArray(raw.tree)) {
+    problems.push({code:"no_tree", text:"The envelope carries no tree."});
+  }
+  var peers = [], i;
+  if (Array.isArray(raw.peers)) for (i = 0; i < raw.peers.length; i++) peers.push(peerModel(raw.peers[i]));
+  var hasAncestorRole = Object.prototype.hasOwnProperty.call(raw, "ancestor_role");
+  var ancestorRoleRaw = raw.ancestor_role;
+  var ancestorRole = hasAncestorRole ? ancestorRoleModel(ancestorRoleRaw) : null;
+  return {
+    fatal:null, version:v,
+    skew:v > SCHEMA_TARGET ? "newer" : "same",
+    seq:typeof raw.seq === "number" ? raw.seq : null,
+    servedBy:servedByModel(raw.served_by),
+    peers:peers,
+    links:linkModels(raw.links),
+    tree:raw.tree && typeof raw.tree === "object" && !Array.isArray(raw.tree) ? raw.tree : null,
+    path:typeof raw.path === "string" ? raw.path : null,
+    legend:raw.series_legend && typeof raw.series_legend === "object" ? raw.series_legend : null,
+    problems:problems,
+    hasAncestorRole:hasAncestorRole,
+    ancestorRole:ancestorRole,
+    /* Present, NOT the explicit wire `null` that means "board looked, no
+     * ancestor", and still failed to parse into `{node, label, role}`
+     * -- a foreign or buggy producer getting the shape wrong, not a producer
+     * that stated "none". `roleContext` folds this into "unstated" rather
+     * than "none": see its own comment for why that direction matters. */
+    ancestorRoleUnreadable:hasAncestorRole && ancestorRoleRaw !== null && ancestorRole === null
+  };
+}
+function fatal(code, text, version) {
+  return {fatal:{code:code, text:text}, version:version === undefined ? null : version,
+          skew:"same", seq:null, servedBy:servedByModel(null), peers:[], tree:null,
+          path:null, legend:null, problems:[],
+          hasAncestorRole:false, ancestorRole:null, ancestorRoleUnreadable:false};
+}
+
+/* raw `ancestor_role` -> `{node, label, role}` when well-formed, else `null`.
+ * That `null` alone is NOT "no role governs this view" -- it is also what a
+ * malformed value produces, and those are different facts (a genuine wire
+ * `null` vs. an unparseable object). Failing closed here means refusing to
+ * STATE a role when the shape cannot be trusted, not asserting that there is
+ * none; `envelopeModel` is what tells the two apart (`ancestorRoleUnreadable`)
+ * so `roleContext` never has to guess which one produced this `null`. */
+function ancestorRoleModel(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  var node = typeof raw.node === "string" && raw.node !== "" ? raw.node : null;
+  var label = typeof raw.label === "string" && raw.label !== "" ? raw.label : null;
+  var role = typeof raw.role === "string" && raw.role !== "" ? raw.role : null;
+  return node && label && role ? {node:node, label:label, role:role} : null;
+}
+
+function servedByModel(sb) {
+  if (!sb || typeof sb !== "object" || Array.isArray(sb)) {
+    return {present:false, board:null, node_id:null, mac:null, hue:null, identified:false,
+            state:stateInfo(undefined), why:null, uptime_ms:null, uptime:null,
+            build:null, owns:[], components:[]};
+  }
+  var board = typeof sb.board === "string" && sb.board !== "" ? sb.board : null;
+  var nid = typeof sb.node_id === "string" && sb.node_id !== "" ? sb.node_id : null;
+  var mac = typeof sb.mac === "string" && sb.mac !== "" ? sb.mac : null;
+  return {
+    present:true, board:board, node_id:nid, mac:mac, hue:boardHue(board),
+    /* a board that cannot identify itself is an explicit state, never
+     * a silent default. All three must be there before we call it identified. */
+    identified:board !== null && nid !== null && mac !== null,
+    state:stateInfo(sb.state), why:whyModel(sb.why),
+    uptime_ms:typeof sb.uptime_ms === "number" ? sb.uptime_ms : null,
+    uptime:fmtAge(typeof sb.uptime_ms === "number" ? sb.uptime_ms : null),
+    build:typeof sb.build === "string" ? sb.build : null,
+    owns:Array.isArray(sb.owns) ? sb.owns : [],
+    components:Array.isArray(sb.components) ? sb.components : []
+  };
+}
+
+/* Skew is classified against THIS asset's window, not against the serving
+ * board's — a board only reports what it saw, and the asset may be older than
+ * either of them. the schema: newer is generic and non-fatal, older than
+ * the floor is a stub, never a drop. */
+function peerModel(p) {
+  if (!p || typeof p !== "object" || Array.isArray(p)) {
+    return {board:null, hue:null, node_id:null, endpoint:null, state:stateInfo(undefined),
+            why:null, schema_version:null, skew:"unknown", mounts:[], age_ms:null, age:null,
+            last_ok_age_ms:null, last_ok_age:null, diverged:false};
+  }
+  var board = typeof p.board === "string" && p.board !== "" ? p.board : null;
+  var pv = typeof p.schema_version === "number" ? p.schema_version : null;
+  var skew = "same";
+  if (pv === null) skew = "unknown";
+  else if (pv > SCHEMA_TARGET) skew = "newer";
+  else if (pv < SCHEMA_FLOOR) skew = "older";
+  var age = typeof p.age_ms === "number" ? p.age_ms : null;
+  var lastOk = typeof p.last_ok_age_ms === "number" ? p.last_ok_age_ms : null;
+  return {
+    board:board, hue:boardHue(board),
+    node_id:typeof p.node_id === "string" ? p.node_id : null,
+    endpoint:typeof p.endpoint === "string" ? p.endpoint : null,
+    state:stateInfo(p.state), why:whyModel(p.why),
+    schema_version:pv, skew:skew,
+    mounts:Array.isArray(p.mounts) ? p.mounts : [],
+    age_ms:age, age:fmtAge(age), last_ok_age_ms:lastOk, last_ok_age:fmtAge(lastOk),
+    /* the schema: these agree on a live peer and diverge exactly when
+     * something is wrong. That divergence is the signal separating a stale
+     * mount from an unreachable one, so it is shown rather than averaged. */
+    diverged:age !== lastOk
+  };
+}
+
+/* ---- transport --------------------------------------------------------- */
+function qbytes(s) {
+  if (typeof TextEncoder === "function") return new TextEncoder().encode(s).length;
+  return unescape(encodeURIComponent(s)).length;
+}
+
+/* Builds /api/v1/state with the 32-byte query cap enforced up front rather
+ * than discovered as a 400. `path` is the request; `after` is only an
+ * optimisation (it saves a body on an unchanged seq), so `after` is what gets
+ * dropped when the two together will not fit. A `path` that cannot fit on its
+ * own is reported, not silently truncated — the caller then falls back to
+ * slicing the subtree out of the full envelope it already holds. */
+function stateUrl(opts) {
+  opts = opts || {};
+  var base = opts.base === undefined ? "/api/v1/state" : opts.base;
+  var parts = [], dropped = [], q;
+  if (typeof opts.path === "string" && opts.path !== "") parts.push("path=" + opts.path);
+  if (opts.after !== null && opts.after !== undefined) parts.push("after=" + opts.after);
+  q = parts.join("&");
+  if (qbytes(q) >= QUERY_CAP && parts.length === 2) {
+    dropped.push("after");
+    parts.pop();
+    q = parts.join("&");
+  }
+  if (qbytes(q) >= QUERY_CAP) {
+    return {url:null, query:q, bytes:qbytes(q), dropped:dropped, error:"query_too_long", cap:QUERY_CAP};
+  }
+  return {url:q === "" ? base : base + "?" + q, query:q, bytes:qbytes(q),
+          dropped:dropped, error:null, cap:QUERY_CAP};
+}
+
+/* Mounting a peer's subtree and drilling into a local one are the same
+ * operation against a different origin . The serving board
+ * does the cross-origin half; the browser only ever needs the local form, so
+ * this returns the descriptor rather than performing a fetch the firmware's
+ * connect-src 'self' would refuse. */
+function mountUrl(peer, path) {
+  var base = peer && typeof peer.endpoint === "string" ? peer.endpoint : "/api/v1/state";
+  return stateUrl({base:base, path:path});
+}
+
+/* ---- DTCs (pin 4) -------------------------------------------------------
+ * Operates on the RAW wire `why` (not `whyModel`'s output): `whyModel`
+ * flattens `evidence` into display strings, and `status_flags` needs to
+ * survive as an array to be bucketed. `why` here is a node's own `node.why`. */
+var DTC_LATCH = {test_failed:true};
+var DTC_HISTORY = {confirmed:true, test_failed_since_last_clear:true};
+/* `status_hex` is a fourth key the lead's contract never named (M4), folded
+ * into its own named `statusHex` field below -- consumed, same as the three
+ * the contract does pin, so it does not ALSO duplicate into `extra`. */
+var DTC_CONSUMED = {dfc:true, status_flags:true, status_unknown_bits_hex:true, status_hex:true};
+
+function dtcModel(why) {
+  if (!why || typeof why !== "object" || Array.isArray(why)) return {usable:false};
+  var ev = why.evidence;
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return {usable:false};
+  var hasDfc = Object.prototype.hasOwnProperty.call(ev, "dfc");
+  var hasFlags = Object.prototype.hasOwnProperty.call(ev, "status_flags");
+  var hasUnknown = Object.prototype.hasOwnProperty.call(ev, "status_unknown_bits_hex");
+  if (!hasDfc && !hasFlags && !hasUnknown) return {usable:false};
+
+  var flags = {latch:[], history:[], other:[]}, i, f;
+  if (Array.isArray(ev.status_flags)) {
+    for (i = 0; i < ev.status_flags.length; i++) {
+      f = ev.status_flags[i];
+      if (Object.prototype.hasOwnProperty.call(DTC_LATCH, f)) flags.latch.push(f);
+      else if (Object.prototype.hasOwnProperty.call(DTC_HISTORY, f)) flags.history.push(f);
+      else flags.other.push(f);
+    }
+  }
+
+  /* three-way, not two-way: a string, an explicit null, and an absent key
+   * are three different facts and collapsing the third into the second is
+   * absence resolving to a claim (same shape as `roleContext`). */
+  var unknown = !hasUnknown ? {stated:false, hex:null}
+    : {stated:true, hex:typeof ev.status_unknown_bits_hex === "string" ? ev.status_unknown_bits_hex : null};
+
+  var filteredEv = {}, k;
+  for (k in ev) {
+    if (Object.prototype.hasOwnProperty.call(ev, k) && !Object.prototype.hasOwnProperty.call(DTC_CONSUMED, k)) {
+      filteredEv[k] = ev[k];
+    }
+  }
+
+  return {
+    usable:true,
+    dfc:typeof ev.dfc === "string" ? ev.dfc : null,
+    statusHex:typeof ev.status_hex === "string" ? ev.status_hex : null,
+    flags:flags, unknown:unknown,
+    extra:evidencePairs(filteredEv)      /* every evidence key not consumed above */
+  };
+}
+
+/* ---- NM ring wake-holds (pin 5) -----------------------------------------
+ * Operates on the modeled `values` array (valueModel's output, the same
+ * array a `values` block already carries) so it can read `hole`,
+ * `implausible` and the untouched `rawValue` in one place. */
+function wakeHoldsModel(values) {
+  values = Array.isArray(values) ? values : [];
+  var asserted = [], clear = [], unreadable = [], i, v, isBool, anyBool = false;
+  for (i = 0; i < values.length; i++) {
+    v = values[i];
+    isBool = typeof v.rawValue === "boolean";
+    if (isBool) anyBool = true;
+    if (v.hole === null && !v.implausible && isBool) {
+      (v.rawValue ? asserted : clear).push(v);
+    } else {
+      unreadable.push(v);
+    }
+  }
+  /* FINDING, reported: the plan's own literal formula (`readable >= 1`)
+   * contradicts its own required behaviour for the stale-latch fixture,
+   * which must still render "0 of 4 holds readable" via the specialised
+   * view rather than fall back generic. `usable` is therefore "does this
+   * look like wake-hold data at all" -- at least one boolean-typed value,
+   * readable or not -- not "is at least one hold currently readable". Only
+   * a node with NO boolean-typed value at all (the live board's `reasons`
+   * string) has none and falls back generic. */
+  return {usable:anyBool, asserted:asserted, clear:clear, unreadable:unreadable,
+          readable:asserted.length + clear.length, total:values.length};
+}
+
+/* ---- census (pin 6) ------------------------------------------------------
+ * Operates on the RAW `children` (one hop, as held by this view) so it can
+ * read each `can_id` child's own `frames`/`dlc8` values without re-fetching. */
+function findRawValue(values, key) {
+  if (!Array.isArray(values)) return null;
+  var i;
+  for (i = 0; i < values.length; i++) {
+    if (values[i] && typeof values[i] === "object" && values[i].key === key) return values[i];
+  }
+  return null;
+}
+function censusRow(node, isCanId) {
+  var fr = findRawValue(node.values, "frames"), dl = findRawValue(node.values, "dlc8");
+  return {
+    id:typeof node.id === "string" ? node.id : null,
+    label:nodeLabel(node), state:stateInfo(node.state), kind:kindInfo(node.kind), isCanId:!!isCanId,
+    frames:fr && typeof fr.value === "number" ? fr.value : null,
+    framesDisplay:fr && typeof fr.value === "number" ? fmtScalar(fr.value) : null,
+    dlc8Display:dl && typeof dl.value === "number" ? fmtScalar(dl.value) : null
+  };
+}
+function censusModel(children) {
+  children = Array.isArray(children) ? children : [];
+  var rows = [], others = [], i, c;
+  for (i = 0; i < children.length; i++) {
+    c = isNode(children[i]) ? children[i] : brokenNode(children[i], i);
+    if (c.kind === "can_id") rows.push(censusRow(c, true));
+    else others.push(censusRow(c, false));
+  }
+  /* a child with no readable `frames` sorts last and shows `—`, never `0` --
+   * `null` sorts after every number under this comparator. */
+  rows.sort(function (a, b) {
+    if (a.frames === null && b.frames === null) return 0;
+    if (a.frames === null) return 1;
+    if (b.frames === null) return -1;
+    return b.frames - a.frames;
+  });
+  return {usable:rows.length > 0, rows:rows, others:others};
+}
+
+root.PortalCore = {
+  SCHEMA_TARGET:SCHEMA_TARGET, SCHEMA_FLOOR:SCHEMA_FLOOR, QUERY_CAP:QUERY_CAP,
+  linkModels:linkModels,
+  STATES:STATES, KINDS:KINDS, WHY:WHY, CLASS_LEGEND:CLASS_LEGEND, HUES:HUES,
+  UNIT_SCALE:UNIT_SCALE, NUMBERING:NUMBERING,
+  stateInfo:stateInfo, kindInfo:kindInfo, roleOf:roleOf, nodeLabel:nodeLabel,
+  numberingInfo:numberingInfo, cellRef:cellRef,
+  nearestRole:nearestRole, effectiveRole:effectiveRole, roleContext:roleContext,
+  whyModel:whyModel, provModel:provModel,
+  valueModel:valueModel, seriesModel:seriesModel, actionModel:actionModel,
+  nodeModel:nodeModel, childSummary:childSummary, envelopeModel:envelopeModel,
+  servedByModel:servedByModel, peerModel:peerModel, boardHue:boardHue,
+  walk:walk, findNode:findNode, pathTo:pathTo, census:census,
+  stateUrl:stateUrl, mountUrl:mountUrl, fmtAge:fmtAge, fmtScalar:fmtScalar,
+  evidencePairs:evidencePairs,
+  shift3:shift3, scaleUnit:scaleUnit, seriesStats:seriesStats, cseRollup:cseRollup,
+  dtcModel:dtcModel, wakeHoldsModel:wakeHoldsModel, censusModel:censusModel
+};
+
+})(typeof globalThis !== "undefined" ? globalThis : this);
+/* portal-core:end */
+</script>
+
+<script>
+/* ---------------------------------------------------------------------------
+ * The DOM layer. Thin on purpose: it paints the render model the core already
+ * decided on and makes no classification or ordering decision of its own.
+ * ------------------------------------------------------------------------- */
+"use strict";
+(function (C) {
+
+var POLL_MS = 1000;
+var app = {
+  raw:null, env:null, focus:null, seq:null,
+  link:"connecting", linkWhy:null, sub:null, subNote:null, timer:null,
+  /* the path `seq` is actually valid for — `undefined` until the first
+   * successful fetch, distinct from `null` (which means "the full tree, held")
+   * so a mismatch is never masked by two different kinds of "nothing yet"
+   * colliding. See poll(): contract addendum, Finding F. */
+  heldPath:undefined
+};
+
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) {
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = text;
+  return n;
+}
+function tone(n, t) {
+  if (t) {
+    n.style.setProperty("--tone", "var(--t-" + t + ")");
+    if (t === "alien") n.className = (n.className ? n.className + " " : "") + "hatch";
+  }
+  return n;
+}
+
+function badge(st, extra) {
+  var b = el("span", "badge" + (st.border === "double" ? " alien" : "") +
+                     (st.border === "dotted" ? " dotted" : "") +
+                     (st.border === "dashed" ? " dashed" : ""));
+  tone(b, st.tone);
+  b.appendChild(el("span", "g", st.glyph));
+  b.appendChild(el("span", null, st.label));      /* verbatim, even when unknown */
+  if (extra) b.appendChild(el("span", null, extra));
+  b.title = st.gist + (st.known ? "" : "  — this UI does not know this state");
+  return b;
+}
+
+/* A role changes what a subtree's values MEAN — a different kind of fact
+ * than the state badge (what is happening) or the provenance chips (where a
+ * value came from, how fresh, how trusted). It reuses the `badge` shape and
+ * the `skew` tone already in the palette — the one other place this UI says
+ * "read this subtree against different assumptions than the default"
+ * (schema-version skew) — rather than a chip or a new colour invented for
+ * this alone. Rendered for ANY role string, known or not: this UI has no
+ * opinion on what a role means, only that engaging one changes the read.
+ *
+ * `rv` is a node's `roleView`: {role, source, from}. `source === "declared"`
+ * keeps the exact badge this always was — filled diamond, doubled border.
+ * `source === "inherited"` reuses the shape but hollow and dashed, and names
+ * the ancestor it borrowed the role from: an identical chip on a node that
+ * never announced a role would be a different lie, not a fix (contract
+ * pin 2). Both reuse existing border-style classes, no new CSS. */
+function roleBadge(rv) {
+  var inherited = rv.source === "inherited";
+  var b = el("span", "badge role" + (inherited ? " dashed" : ""));
+  tone(b, "skew");
+  b.appendChild(el("span", "g", inherited ? "◇" : "◆"));
+  b.appendChild(el("span", null, "ROLE " + rv.role + (inherited ? " (from " + rv.from + ")" : "")));
+  b.title = "this subtree's values are being asserted under role “" + rv.role + "”" +
+            (inherited ? ", inherited from “" + rv.from + "”" : "") +
+            " — read them as that engagement, not as a plain measurement";
+  return b;
+}
+
+/* Subtree fetch (`?path=`) narrows what this UI
+ * holds to one node and its descendants — an ancestor that declared a role
+ * may exist and simply not be in view. Rendering that the same as "no role
+ * anywhere" is the absence-resolving-to-a-fact failure the `announced`
+ * invariant closed for evidence (commit db19359); this is that same shape
+ * for role (contract pin 5). Deliberately a plain chip, not a badge: this is
+ * this UI admitting a limit of what it holds, not a fact about the car — the
+ * "quiet explicit marker" the contract asks for, reusing the default chip
+ * style rather than a toned one. */
+function roleUnknown() {
+  var c = el("span", "chip role-unknown", "role unknown here — outside this subtree view");
+  c.title = "this view was fetched as a subtree (?path=); an ancestor outside it may declare a " +
+            "role this UI cannot see from here — not the same as no role at all";
+  return c;
+}
+function roleElement(rv) {
+  return rv.source === "unknown" ? roleUnknown() : roleBadge(rv);
+}
+
+/* provenance chips: board (hued), origin, trust, age against budget */
+function provChips(p) {
+  var out = [], c;
+  if (!p.present) return out;
+  if (p.identified) {
+    c = el("span", "chip", p.board);
+    c.style.borderColor = "hsl(" + p.hue + " 85% 55%)";
+    c.style.color = "hsl(" + p.hue + " 85% 68%)";
+    c.title = "measured by " + p.board;
+    out.push(c);
+  } else {
+    c = el("span", "chip bad", "no board");
+    c.title = "this node does not say which board measured it";
+    out.push(c);
+  }
+  if (p.origin) out.push(el("span", "chip", p.origin));
+  /* confirmed vs assumed is the difference between a measurement and a guess.
+   * It gets its own shape, not only its own colour. */
+  if (p.trust === "confirmed") out.push(el("span", "chip on", "✓ confirmed"));
+  else if (p.trust === "assumed") out.push(el("span", "chip guess", "~ assumed"));
+  else if (p.trust !== null) out.push(el("span", "chip bad", "trust: " + p.trust));
+  if (p.neverReceived) {
+    c = el("span", "chip", "never received");
+    c.title = "age_ms is null: this is not a large age, it is no reading at all";
+    out.push(c);
+  } else {
+    c = el("span", p.overBudget ? "chip warn" : "chip",
+           p.age + (p.budget_ms !== null ? " / " + C.fmtAge(p.budget_ms) : ""));
+    c.title = "age against the producer's own staleness budget";
+    out.push(c);
+  }
+  return out;
+}
+
+/* `suppressEvidence` is set when a `dtc` node's specialised section is about
+ * to show this same evidence better-organised (pin 4) — the fixed sentence
+ * and headline stay here regardless, only the raw `.kv` dump is skipped. */
+/* the `.ev`/`.kv` shape, shared by the generic WHY evidence dump and the
+ * DTC view's own extra/unconsumed keys -- one rendering of "key: value"
+ * pairs rather than two copies of it. */
+function kvPairs(pairs) {
+  if (!pairs.length) return null;
+  var ev = el("div", "ev");
+  pairs.forEach(function (kv) {
+    var k = el("span", "kv");
+    k.appendChild(el("b", null, kv.key));
+    k.appendChild(document.createTextNode(" " + (kv.value === null ? "—" : kv.value)));
+    ev.appendChild(k);
+  });
+  return ev;
+}
+
+function whySection(why, st, suppressEvidence) {
+  var s = el("div", "sec"), w = el("div", "why");
+  tone(w, st.tone);
+  s.appendChild(el("h3", null, "WHY"));
+  if (!why) {
+    w.appendChild(el("div", "head", st.gist));
+    w.appendChild(el("div", "code", "the producer sent no `why` for a non-ok state — producer bug"));
+  } else {
+    w.appendChild(el("div", "head", why.headline));
+    if (why.detail) w.appendChild(el("div", "detail", why.detail));
+    var meta = why.code ? why.code : "(no code)";
+    if (!why.known && why.code) meta += " — code unknown to this UI";
+    if (why.since) meta += " · for " + why.since;
+    w.appendChild(el("div", "code", meta));
+    if (!suppressEvidence) {
+      var ev = kvPairs(why.evidence);
+      if (ev) w.appendChild(ev);
+    }
+  }
+  s.appendChild(w);
+  return s;
+}
+
+/* pin 4: surfaces what the producer already decoded, including its
+ * ignorance (`status_unknown_bits_hex`) -- no re-decoding, no verdict beyond
+ * the one fixed sentence about bit 0. */
+function dtcSection(dm) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "TROUBLE CODE"));
+  var head = el("div", "ev");
+  if (dm.dfc) head.appendChild(el("span", "chip", dm.dfc));
+  if (dm.statusHex) head.appendChild(el("span", "chip mono", "status 0x" + dm.statusHex));
+  if (head.children.length) s.appendChild(head);
+
+  var g = el("div", "ev");
+  dm.flags.latch.forEach(function (f) {
+    var c = el("span", "chip bad", f);
+    c.title = "bit 0 (test_failed) — latches; does not by itself mean a live fault";
+    g.appendChild(c);
+  });
+  dm.flags.history.forEach(function (f) {
+    var c = el("span", "chip warn", f);
+    c.title = "a record of a past test result, not the current one";
+    g.appendChild(c);
+  });
+  dm.flags.other.forEach(function (f) { g.appendChild(el("span", "chip", f)); });
+  if (g.children.length) s.appendChild(g);
+
+  s.appendChild(el("div", "x",
+    "bit 0 latches; only clear-then-watch separates a live fault from a stale latch"));
+
+  if (dm.unknown.stated && dm.unknown.hex !== null) {
+    var u = el("span", "chip alien", "unknown bits 0x" + dm.unknown.hex + " — the producer could not name these");
+    s.appendChild(u);
+  } else if (dm.unknown.stated) {
+    s.appendChild(el("div", "x", "all set status bits were named — the producer stated it"));
+  } else {
+    s.appendChild(el("div", "x", "the producer did not say whether any bits were unnamed"));
+  }
+
+  var extraEv = kvPairs(dm.extra);
+  if (extraEv) s.appendChild(extraEv);
+  return s;
+}
+
+/* One value chip. `noteText` is an extra line appended to the `.x` detail
+ * row — pin 1's dtcs mask line is the one caller that uses it; every other
+ * caller passes nothing and gets exactly the rendering this always was. */
+function valueChip(v, noteText) {
+  var cls = "v";
+  if (v.hole === "sna") cls += " sna";
+  if (v.implausible) cls += " impl";
+  if (v.state.state === "stale") cls += " aged";
+  var n = el("div", cls);
+  n.appendChild(el("div", "l", v.label));
+  var line = el("div", "n");
+  if (v.hole === "sna") { line.textContent = "SNA"; line.title = "not available — there is no reading"; }
+  else if (v.hole) { line.textContent = "—"; line.title = "no value carried"; }
+  else if (v.scaled) {
+    /* pin 3: a second rendering of the same quantity, never a replacement —
+     * the raw value and its own unit stay one hover away. */
+    line.textContent = v.scaled.display;
+    line.appendChild(el("span", "u", v.scaled.unit));
+    line.title = "raw: " + v.display + (v.unit ? " " + v.unit : "");
+  } else {
+    line.textContent = v.display;
+    if (v.unit) line.appendChild(el("span", "u", v.unit));
+  }
+  n.appendChild(line);
+  var x = [];
+  if (v.implausible) x.push("implausible — outside its sanity band");
+  if (v.raw_hex) x.push(v.raw_hex);
+  if (!v.state.ok && v.state.state !== "stale") x.push(v.state.label);
+  if (v.why) x.push(v.why.headline);
+  if (noteText) x.push(noteText);
+  if (x.length) {
+    /* a real separator, not just the sibling `<div>`'s implied line break --
+     * this shim's (and a real DOM's) flattened textContent has no space
+     * between adjacent block elements, so a unit like "v" would otherwise
+     * run straight into whatever a hex/why detail starts with next. */
+    n.appendChild(document.createTextNode(" "));
+    n.appendChild(el("div", "x", x.join(" · ")));
+  }
+  return n;
+}
+
+function valuesSection(values, note) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "VALUES"));
+  var g = el("div", "vals");
+  values.forEach(function (v) {
+    g.appendChild(valueChip(v, note && v.key === note.forKey ? note.text : null));
+  });
+  s.appendChild(g);
+  return s;
+}
+
+/* pin 1's cheapest line: `dtcs` states the mask its count was taken under,
+ * so "N DTCs" never reads as a statement about the car rather than a query. */
+function dtcsMaskNote(values) {
+  var count = null, mask = null, i;
+  for (i = 0; i < values.length; i++) {
+    if (values[i].key === "count" && !values[i].hole) count = values[i];
+    if (values[i].key === "mask" && !values[i].hole) mask = values[i];
+  }
+  if (!count || !mask || !mask.raw_hex) return null;
+  return {forKey:"count",
+          text:count.display + " DTCs matching status mask 0x" + mask.raw_hex +
+               " — a different mask can return more"};
+}
+
+/* pin 5: the wake-holds view. Never a sleep verdict -- the sentence states
+ * only what this subtree published, and stops there. */
+function wakeHoldsSection(wm) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "WAKE HOLDS"));
+  var headline;
+  if (wm.readable === 0) {
+    headline = wm.readable + " of " + wm.total + " holds readable — no hold state can be read here";
+  } else if (wm.asserted.length === 0) {
+    headline = wm.readable + " of " + wm.total + " holds readable · none asserted here";
+  } else {
+    headline = wm.readable + " of " + wm.total + " holds readable · " + wm.asserted.length + " asserted here";
+  }
+  var sum = el("div", "sum", headline);
+  sum.title = "states only what this subtree published; never a sleep verdict";
+  s.appendChild(sum);
+  var g = el("div", "vals");
+  /* render order: unreadable, then asserted, then clear (pin 5, inverted
+   * from "asserted first" -- a stale latch must never read as a live hold) */
+  wm.unreadable.forEach(function (v) { g.appendChild(valueChip(v)); });
+  wm.asserted.forEach(function (v) { g.appendChild(valueChip(v)); });
+  wm.clear.forEach(function (v) { g.appendChild(valueChip(v)); });
+  s.appendChild(g);
+  return s;
+}
+
+/* pin 7: min, max, spread and the *index* of each, over the population the
+ * line states — never rendered at all when that population is 0 (pin 2),
+ * because the WHY block above the card already carries the reason. */
+function fmtQty(q) { return q.display + (q.unit ? " " + q.unit : ""); }
+
+function seriesAggLine(stats, unit, numbering) {
+  var m = stats.scaled;
+  var text = "min " + fmtQty(m.min) + " (" + C.cellRef(numbering, stats.min.index) + ")" +
+    " · max " + fmtQty(m.max) + " (" + C.cellRef(numbering, stats.max.index) + ")" +
+    " · spread " + fmtQty(m.spread) +
+    " — over " + stats.population + " of " + stats.total + " elements";
+  var d = el("div", "sum", text);
+  if (m.min.unit !== unit || m.max.unit !== unit || m.spread.unit !== unit) {
+    d.title = "raw: min " + C.fmtScalar(stats.min.value) + " " + unit +
+              " · max " + C.fmtScalar(stats.max.value) + " " + unit;
+  }
+  return d;
+}
+
+/* Deliberately NOT kind-gated: an aggregate makes no kind-specific claim and
+ * invents nothing, so gating it would only deny it to a differently-named
+ * series for no reason. `cseRollup`'s `kind === "ti"` check is a different
+ * thing: a cross-node roll-up needs the kind vocabulary to know what a TI is. */
+function seriesSection(sr) {
+  var s = el("div", "sec ser");
+  s.appendChild(el("h3", null, (sr.label + (sr.unit ? " (" + sr.unit + ")" : "")).toUpperCase()));
+  /* Name the frame of reference once, above the grid (like units, printed
+   * once in the heading, never on every element). */
+  var numLine = el("div", "sum", sr.numbering.line);
+  numLine.title = sr.numbering.title;
+  s.appendChild(numLine);
+  var bits = [sr.count + " element" + (sr.count === 1 ? "" : "s")];
+  sr.summary.forEach(function (c) { bits.push(c.n + " " + c.name); });
+  bits.push(sr.contiguous ? "contiguous from " + sr.index_base : "explicit indices");
+  var sum = el("div", "sum", bits.join(" · "));
+  sum.title = "element count is evidence, not a constant — an unmeasured element is not here at all";
+  s.appendChild(sum);
+  var stats = C.seriesStats(sr);
+  if (stats.population > 0) s.appendChild(seriesAggLine(stats, sr.unit, sr.numbering));
+  /* S4: the grid itself is never scaled — the unit is already printed once
+   * in the heading above, and a per-element threshold is what M3 measured
+   * to be the wrong scan for a mixed-magnitude series. */
+  var g = el("div", "grid");
+  sr.elements.forEach(function (e) {
+    var n = el("div", "e" + (e.tone ? " " + e.tone : ""));
+    n.appendChild(el("i", null, e.index));
+    n.appendChild(document.createTextNode(e.hole ? "—" : e.display));
+    n.title = C.cellRef(sr.numbering, e.index) + " · " + e.className +
+      sr.numbering.secondNumberNote +
+      (e.ch === null ? " — the producer sent no class character for this element, so it is "
+                     + "NOT known to be a real reading" : "");
+    g.appendChild(n);
+  });
+  s.appendChild(g);
+  return s;
+}
+
+/* The reason takes the value's place. This is the channel that keeps absent /
+ * silent / refused / down / unreachable apart even in greyscale: they are not
+ * four colours of the same empty box, they are four different sentences. */
+function nodataSection(st, why) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "READING"));
+  var d = el("div", "nodata");
+  tone(d, st.tone);
+  d.appendChild(el("div", "big", st.slot || "no reading"));
+  d.appendChild(el("div", "rs", why ? why.headline : st.gist));
+  s.appendChild(d);
+  return s;
+}
+
+function actionsSection(actions) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "ACTIONS"));
+  actions.forEach(function (a) {
+    var wrap = el("div", "act");
+    wrap.appendChild(el("span", "actlbl", a.label));
+    var usable = a.enabled && !!a.path && a.kind !== "unknown";
+    var ctl;
+    if (a.kind === "switch") {
+      ctl = el("input", "tog");
+      ctl.type = "checkbox";
+      ctl.checked = a.value === true;
+      ctl.title = a.value === true ? "on" : (a.value === false ? "off" : "state unknown");
+      ctl.disabled = !usable;
+      ctl.onchange = function () { doAction(a, ctl.checked); };
+    } else if (a.kind === "select") {
+      ctl = document.createElement("select");
+      a.options.forEach(function (o) {
+        var op = el("option", null, o);
+        op.value = o;
+        if (o === a.value) op.selected = true;
+        ctl.appendChild(op);
+      });
+      ctl.disabled = !usable;
+      ctl.onchange = function () { doAction(a, ctl.value); };
+    } else if (a.kind === "number") {
+      ctl = el("span", null);
+      var inp = el("input", "numin");
+      inp.type = "number";
+      if (a.min !== null) inp.min = String(a.min);
+      if (a.max !== null) inp.max = String(a.max);
+      if (a.step !== null) inp.step = String(a.step);
+      if (typeof a.value === "number") inp.value = String(a.value);
+      inp.disabled = !usable;
+      var setb = el("button", null, "Set");
+      setb.disabled = !usable;
+      setb.onclick = function () {
+        var n = Number(inp.value);
+        if (inp.value === "" || !isFinite(n)) { app.linkWhy = a.label + ": enter a number"; render(); return; }
+        doAction(a, n);
+      };
+      ctl.appendChild(inp);
+      if (a.unit) ctl.appendChild(el("span", "unit", " " + a.unit + " "));
+      ctl.appendChild(setb);
+    } else if (a.kind === "unknown") {
+      ctl = el("button", null, "unrecognised control “" + a.control + "”");
+      ctl.disabled = true;
+    } else {
+      ctl = el("button", null, a.label);
+      ctl.disabled = !usable;
+      ctl.onclick = function () { doAction(a, undefined); };
+    }
+    wrap.appendChild(ctl);
+    if (!a.enabled) {
+      wrap.appendChild(el("span", "chip", a.why ? a.why.headline : "disabled"));
+    }
+    if (a.result) {
+      var r = a.result;
+      var cls = r.state === "accepted" ? "chip on" : (r.state === "refused" ? "chip bad" : "chip warn");
+      var txt = r.state + (r.code ? " · " + r.code : "") + (r.age ? " · " + r.age + " ago" : "");
+      wrap.appendChild(el("span", cls, txt));
+    }
+    s.appendChild(wrap);
+  });
+  return s;
+}
+
+/* pin 7's roll-up, over the TIs THIS view holds. `rollup` is null whenever
+ * there is nothing to roll up (no `ti` children at all, or none carrying a
+ * usable series) — rendering nothing then is the whole point of pin 0.
+ * each of `rollup.min`/`rollup.max` carries its OWN
+ * `numbering` (from that record's own TI), never a shared rollup-level one --
+ * a per-record frame cannot lie when two TIs disagree. */
+function cseRollupLine(rollup) {
+  if (!rollup || rollup.population === 0) return null;
+  var m = rollup.scaled;
+  var text = "min " + fmtQty(m.min) + " (" + rollup.min.tiLabel + " · " +
+      C.cellRef(rollup.min.numbering, rollup.min.index) + ")" +
+    " · max " + fmtQty(m.max) + " (" + rollup.max.tiLabel + " · " +
+      C.cellRef(rollup.max.numbering, rollup.max.index) + ")" +
+    " · spread " + fmtQty(m.spread) +
+    " — over " + rollup.population + " of " + rollup.totalElements + " elements in " +
+    rollup.tisInView + " of " + rollup.tisTotal + " TIs in view";
+  var d = el("div", "sum", text);
+  d.title = "covers only the TI children present in this view — under ?path= that may be fewer than the CSE has";
+  return d;
+}
+
+function childrenSection(kids, rollup) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "CONTAINS — " + kids.length));
+  var line = cseRollupLine(rollup);
+  if (line) s.appendChild(line);
+  var g = el("div", "kids");
+  kids.forEach(function (k) {
+    var b = el("button", "kid s-" + k.state.tone);
+    tone(b, k.state.tone);
+    /* a node with no id cannot be navigated to; going nowhere beats silently
+     * bouncing to the root */
+    b.onclick = function () { if (k.id) go(k.id); };
+    b.appendChild(el("span", "g", k.state.glyph));
+    var box = el("div", null);
+    box.appendChild(el("div", "n", k.label));
+    /* same badge as the node's own header, at kid scale: a role is a
+     * different kind of fact than the meta line below it, never folded in */
+    if (k.roleView) box.appendChild(roleElement(k.roleView));
+    var meta = [k.kind.known ? k.kind.noun : "unrecognised kind “" + k.kind.kind + "”"];
+    if (k.childCount) meta.push(k.childCount + " below");
+    if (k.prov.identified) meta.push(k.prov.board);
+    if (k.prov.trust === "assumed") meta.push("assumed");
+    box.appendChild(el("div", "m", meta.join(" · ")));
+    if (k.reason) {
+      var r = el("div", "m");
+      r.appendChild(el("span", "r", k.state.label + ": "));
+      r.appendChild(document.createTextNode(k.reason));
+      box.appendChild(r);
+    }
+    b.appendChild(box);
+    g.appendChild(b);
+  });
+  s.appendChild(g);
+  return s;
+}
+
+/* pin 6: a table of `can_id` children, sorted by frames descending — reusing
+ * the existing `.kids` grid rather than a `<table>` (deviation flagged to the
+ * lead in the report). Non-`can_id` and malformed children are never
+ * dropped: they render in a trailing group, and CONTAINS — N still counts
+ * every child the producer sent. */
+function censusRowEl(row) {
+  var b = el("button", "kid s-" + row.state.tone);
+  tone(b, row.state.tone);
+  b.onclick = function () { if (row.id) go(row.id); };
+  b.appendChild(el("span", "g", row.state.glyph));
+  var box = el("div", null);
+  box.appendChild(el("div", "n", row.label));
+  var meta;
+  if (row.isCanId) {
+    meta = [(row.framesDisplay === null ? "—" : row.framesDisplay) + " frames"];
+    if (row.dlc8Display !== null) meta.push(row.dlc8Display + " dlc8");
+  } else {
+    meta = [row.kind.known ? row.kind.noun : "unrecognised kind “" + row.kind.kind + "”"];
+  }
+  box.appendChild(el("div", "m", meta.join(" · ")));
+  b.appendChild(box);
+  return b;
+}
+function censusSection(cm) {
+  var s = el("div", "sec");
+  s.appendChild(el("h3", null, "CONTAINS — " + (cm.rows.length + cm.others.length)));
+  var g = el("div", "kids");
+  cm.rows.forEach(function (r) { g.appendChild(censusRowEl(r)); });
+  cm.others.forEach(function (r) { g.appendChild(censusRowEl(r)); });
+  s.appendChild(g);
+  return s;
+}
+
+function nodeCard(m, lead, node, opts) {
+  var card = el("div", "card s-" + m.state.tone + (lead ? " lead" : ""));
+  tone(card, m.state.tone);
+  var hd = el("div", "hd");
+  var h = el("h2", null, m.label);
+  hd.appendChild(h);
+  hd.appendChild(badge(m.state));
+  /* a role is present on some nodes and absent on most — absent renders
+   * exactly as before this feature existed: no chip, no placeholder */
+  if (m.roleView) hd.appendChild(roleElement(m.roleView));
+  /* name the kind, and say plainly when it is not recognised */
+  var kc = el("span", "chip" + (m.kind.known ? "" : " warn"),
+              m.kind.known ? m.kind.noun : "unrecognised kind “" + m.kind.kind + "”");
+  kc.title = "kind: " + m.kind.kind + (m.kind.known ? "" : " — rendered generically");
+  hd.appendChild(kc);
+  hd.appendChild(el("span", "grow"));
+  provChips(m.prov).forEach(function (c) { hd.appendChild(c); });
+  card.appendChild(hd);
+  if (m.id) {
+    var idr = el("div", "sec");
+    idr.appendChild(el("span", "id mono", m.id));
+    card.appendChild(idr);
+  }
+  var kind = m.kind.kind;
+  m.blocks.forEach(function (b) {
+    if (b.type === "why") {
+      /* pin 0: a kind view is an enhancement layer, `usable` gated, never a
+       * replacement of the WHY headline/detail itself. */
+      var dm = kind === "dtc" ? C.dtcModel(node && node.why) : {usable:false};
+      card.appendChild(whySection(b.why, b.state, dm.usable));
+      if (dm.usable) card.appendChild(dtcSection(dm));
+    } else if (b.type === "values") {
+      if (kind === "wake_holds") {
+        var wm = C.wakeHoldsModel(b.values);
+        card.appendChild(wm.usable ? wakeHoldsSection(wm) : valuesSection(b.values));
+      } else {
+        var vs = valuesSection(b.values, kind === "dtcs" ? dtcsMaskNote(b.values) : null);
+        if (kind === "capture" && b.values.length) {
+          vs.appendChild(el("div", "x",
+            "these counters do not share a denominator — no completeness figure is derivable from them"));
+        }
+        card.appendChild(vs);
+      }
+    } else if (b.type === "series") {
+      card.appendChild(seriesSection(b.series));
+    } else if (b.type === "nodata") {
+      card.appendChild(nodataSection(b.state, b.why));
+    } else if (b.type === "actions") {
+      card.appendChild(actionsSection(b.actions));
+    } else if (b.type === "children") {
+      if (kind === "census") {
+        var cm = C.censusModel(node && node.children);
+        card.appendChild(cm.usable ? censusSection(cm) : childrenSection(b.children));
+      } else if (kind === "cse") {
+        card.appendChild(childrenSection(b.children, C.cseRollup(node, opts && opts.legend)));
+      } else {
+        card.appendChild(childrenSection(b.children));
+      }
+    }
+  });
+  return card;
+}
+
+/* ---- chrome ------------------------------------------------------------ */
+function renderHeader(env) {
+  var sb = env.servedBy, dot = $("dot"), served = $("served"), hdr = $("hdr");
+  dot.className = "dot" + (sb.identified ? " hued" : " noid");
+  if (sb.identified) dot.style.setProperty("--hue", String(sb.hue));
+  dot.title = sb.identified
+    ? "served by " + sb.board + " (" + sb.node_id + ", " + sb.mac + ")"
+    : "this board cannot identify itself";
+  served.textContent = sb.identified
+    ? sb.board + " · " + sb.node_id + " · " + (sb.build || "?") +
+      (sb.uptime ? " · up " + sb.uptime : "")
+    : "NO BOARD IDENTITY";
+  hdr.replaceChildren();
+  if (!sb.identified) hdr.appendChild(badge(C.stateInfo("unknown"), "NO IDENTITY"));
+  if (env.tree) {
+    var c = C.census(env.tree);
+    var st = C.stateInfo(env.tree.state);
+    hdr.appendChild(badge(st));
+    var n = el("span", "chip" + (c.notOk ? " warn" : " on"),
+               c.notOk ? c.notOk + " of " + c.total + " nodes not OK" : c.total + " nodes OK");
+    hdr.appendChild(n);
+  }
+  env.links.forEach(function (l) {
+    var a = el("a", "chip", l.label);
+    a.href = l.href;
+    hdr.appendChild(a);
+  });
+  hdr.appendChild(el("span", "chip", "schema v" + env.version));
+  hdr.appendChild(el("span", "chip", "seq " + (env.seq === null ? "—" : env.seq)));
+  var lc = el("span", "chip" + (app.link === "ok" ? " on" : " bad"),
+              "link " + (app.link === "ok" ? "live" : app.link));
+  if (app.linkWhy) lc.title = app.linkWhy;
+  hdr.appendChild(lc);
+}
+
+function banner(t, title, detail) {
+  var b = el("div", "banner");
+  tone(b, t);
+  b.appendChild(el("b", null, title));
+  if (detail) b.appendChild(el("div", "d", detail));
+  return b;
+}
+
+function renderBanners(env) {
+  var box = $("banners");
+  box.replaceChildren();
+  if (env.skew === "newer") {
+    box.appendChild(banner("skew", "This board is newer than this UI",
+      "It serves schema_version " + env.version + "; this asset was written for " +
+      C.SCHEMA_TARGET + ". Everything below is rendered generically — nothing is dropped, " +
+      "but anything this asset has never heard of is shown as it arrived rather than interpreted."));
+  }
+  if (app.link !== "ok" && app.link !== "connecting") {
+    box.appendChild(banner("stale", "Showing the last state this board sent",
+      (app.linkWhy || "the poll is not completing") +
+      ". The tree below is held over — its ages are the ones the board reported, not live ones."));
+  }
+  if (app.subNote) box.appendChild(banner("stale", "Subtree fetch unavailable", app.subNote));
+  env.problems.forEach(function (p) { box.appendChild(banner("refuse", p.text, p.code)); });
+  env.peers.forEach(function (p) {
+    if (p.skew === "newer") {
+      box.appendChild(banner("skew", "Peer " + (p.board || "?") + " is newer than this UI",
+        "It reports schema_version " + p.schema_version + ". Its subtree is mounted and " +
+        "rendered generically; its nodes carry trust “assumed” for that reason."));
+    } else if (p.skew === "older") {
+      box.appendChild(banner("skew", "Peer " + (p.board || "?") + " is older than this UI can render",
+        "It reports schema_version " + p.schema_version + "; the floor is " + C.SCHEMA_FLOOR +
+        ". Its subtree is mounted as a stub — it is not dropped, but it carries no data."));
+    }
+  });
+}
+
+function renderCrumbs(env) {
+  var box = $("crumbs");
+  box.replaceChildren();
+  if (!env.tree) return;
+  var chain = app.focus ? C.pathTo(env.tree, app.focus) : [env.tree];
+  if (!chain) {
+    /* focus points at a node this envelope does not contain: say so, do not
+     * silently snap back to the root. */
+    box.appendChild(el("span", "here", "“" + app.focus + "” is not in this tree"));
+    var back = el("button", null, "back to " + (env.tree.label || env.tree.id));
+    back.onclick = function () { go(null); };
+    box.appendChild(back);
+    return;
+  }
+  chain.forEach(function (n, i) {
+    if (i) box.appendChild(el("span", "sep", "›"));
+    if (i === chain.length - 1) {
+      box.appendChild(el("span", "here", n.label || n.id));
+    } else {
+      var b = el("button", null, n.label || n.id);
+      b.onclick = function () { go(i === 0 ? null : n.id); };
+      box.appendChild(b);
+    }
+  });
+}
+
+function renderPeers(env) {
+  var box = $("peers");
+  box.replaceChildren();
+  if (!env.peers.length) return;
+  box.appendChild(el("h3", null, "PEERS"));
+  env.peers.forEach(function (p) {
+    var row = el("div", "peer");
+    var d = el("span", "dot" + (p.hue === null ? " noid" : " hued"));
+    d.style.width = "12px"; d.style.height = "12px";
+    if (p.hue !== null) d.style.setProperty("--hue", String(p.hue));
+    row.appendChild(d);
+    row.appendChild(el("b", null, p.board || "unidentified peer"));
+    row.appendChild(badge(p.state));
+    if (p.mounts.length) row.appendChild(el("span", "chip", "mounts " + p.mounts.join(", ")));
+    row.appendChild(el("span", "chip" + (p.skew === "same" ? "" : " warn"),
+      "schema " + (p.schema_version === null ? "?" : "v" + p.schema_version) +
+      (p.skew === "same" ? "" : " · " + p.skew)));
+    row.appendChild(el("span", "chip", p.age === null ? "never received" : "data " + p.age));
+    if (p.diverged) {
+      var dv = el("span", "chip warn",
+        "last ok " + (p.last_ok_age === null ? "never" : p.last_ok_age));
+      dv.title = "age and last-ok diverge — the signal that separates a stale mount " +
+                 "from an unreachable one";
+      row.appendChild(dv);
+    }
+    if (p.why) row.appendChild(el("span", "chip bad", p.why.headline));
+    if (p.endpoint) {
+      var a = el("a", null, "open");
+      a.href = p.endpoint.replace(/\/api\/v1\/state.*$/, "/");
+      a.title = "the peer serves this same asset — either board is a valid entry point";
+      row.appendChild(a);
+    }
+    box.appendChild(row);
+  });
+}
+
+function renderFatal(f) {
+  $("main").replaceChildren();
+  $("banners").replaceChildren();
+  $("crumbs").replaceChildren();
+  $("peers").replaceChildren();
+  var box = el("div", "fatal");
+  box.appendChild(el("h2", null, "This UI will not render what the board sent"));
+  box.appendChild(el("p", null, f.text));
+  box.appendChild(el("div", "mono", f.code));
+  box.appendChild(el("p", null,
+    "Refusing is deliberate: half-rendering an envelope this asset does not " +
+    "understand would show numbers whose meaning it is guessing at."));
+  $("main").appendChild(box);
+}
+
+function render() {
+  /* never repaint under a control the user is editing (number input, dropdown) */
+  var ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT") && $("main").contains(ae)) return;
+  var env = app.env;
+  if (!env) return;
+  if (env.fatal) { renderFatal(env.fatal); return; }
+  renderHeader(env);
+  renderBanners(env);
+  renderCrumbs(env);
+  renderPeers(env);
+  var main = $("main");
+  main.replaceChildren();
+  if (!env.tree) { main.appendChild(banner("refuse", "No tree in this envelope", null)); return; }
+  var node = app.focus ? C.findNode(env.tree, app.focus) : env.tree;
+  if (!node) node = env.tree;
+  /* Role inheritance walks the tree THIS UI ACTUALLY HOLDS, not the true one:
+   * `env.path` is non-null exactly when the current envelope is a subtree
+   * fetch (the schema), the case where real ancestors may exist
+   * and simply not be here (contract pin 5). When the board itself states the
+   * fact (`roleContext(env) === "stated"`), that envelope-level
+   * `ancestor_role` seeds the inheritance instead -- it is the same shape
+   * `nearestRole` would have found had the true ancestors been in view, so
+   * the existing inheritance chain below (`kidsInherit`) carries it down
+   * unchanged. Every other mode ("full", "none", "unstated") falls back to
+   * the walk over the held tree, which is already correct for "full" and
+   * already empty for a narrowed fetch with nothing to find. */
+  var chain = C.pathTo(env.tree, node.id);
+  var roleMode = C.roleContext(env);
+  var inherited = roleMode === "stated"
+    ? {role:env.ancestorRole.role, from:env.ancestorRole.label}
+    : C.nearestRole(chain ? chain.slice(0, chain.length - 1) : []);
+  var opts = {legend:env.legend, roleContextUnstated:roleMode === "unstated", inherited:inherited};
+  main.appendChild(nodeCard(C.nodeModel(node, opts), true, node, opts));
+  var foot = $("foot");
+  foot.replaceChildren();
+  var sb = env.servedBy;
+  if (sb.owns.length) foot.appendChild(el("span", null, "owns " + sb.owns.join(", ")));
+  if (sb.components.length) foot.appendChild(el("span", null, "compiled in: " + sb.components.join(", ")));
+  if (env.path) foot.appendChild(el("span", null, "subtree fetch: " + env.path));
+  foot.appendChild(el("span", null, "asset schema v" + C.SCHEMA_TARGET + ", floor v" + C.SCHEMA_FLOOR));
+}
+
+/* ---- navigation -------------------------------------------------------- */
+function go(id) {
+  location.hash = id ? "#" + id : "";
+}
+function readHash() {
+  var h = decodeURIComponent(location.hash.replace(/^#/, ""));
+  app.focus = h === "" ? null : h;
+  app.sub = null;
+  app.subNote = null;
+  /* Drilling into a subtree and mounting a peer's are the same operation
+   * (both are ?path= against a state endpoint. Only switch
+   * the poll to it when the query actually fits the firmware's 32-byte cap. */
+  if (app.focus) {
+    var u = C.stateUrl({path:app.focus});
+    if (u.error) {
+      app.subNote = "“" + app.focus + "” is " + u.bytes + " query bytes, over the " +
+        u.cap + "-byte cap the firmware enforces. Falling back to the subtree already in the " +
+        "full envelope — same data, one poll behind.";
+    } else {
+      app.sub = app.focus;
+    }
+  }
+  render();
+  poll();
+}
+
+function doAction(a, value) {
+  if (!a.path) return;
+  var opts = {method:a.method || "POST"};
+  if (value !== undefined) {
+    opts.headers = {"Content-Type":"application/json"};
+    opts.body = JSON.stringify({value:value});
+  }
+  fetch(a.path, opts).then(function (r) {
+    /* 401: the browser's own login prompt handles it; 409 busy / 4xx refusals are
+     * recorded in the tree and come back through the next poll as the result chip. */
+    if (r.status === 401) app.linkWhy = a.label + ": login required";
+    else if (r.status === 409 || r.status === 404) app.linkWhy = a.label + " returned HTTP " + r.status;
+    else app.linkWhy = null;
+    app.seq = null;
+    poll();
+  }).catch(function (e) {
+    app.linkWhy = a.label + " failed: " + e;
+    render();
+  });
+}
+
+/* ---- polling -----------------------------------------------------------
+ * A failed poll never blanks the screen: the last good tree stays up and the
+ * link itself goes stale, in the same state language the tree uses. That is
+ * the same lesson as `stale` on a node — a held-over value is fine as long as
+ * nothing claims it is live.
+ *
+ * `after=N` is the claim "I already hold seq N of THIS resource" — and
+ * `seq` is one counter for the whole tree, not scoped per subtree, so that
+ * claim is false the instant `path` names a resource other than the one
+ * last successfully fetched (contract addendum, Finding F: the mock answers
+ * a mismatched `path`+`after` with 204, and the client would go on showing
+ * the previous subtree's data under the new node's card, no error in sight).
+ * Only the client knows `path` changed, so only the client can fix it: send
+ * `after` exclusively when this request's path is the one `seq` is actually
+ * for; otherwise the first fetch of a resource is unconditional, same as if
+ * nothing had ever been fetched at all. */
+function poll() {
+  var reqPath = app.sub;
+  var sameResource = reqPath === app.heldPath;
+  var u = C.stateUrl({path:reqPath, after:sameResource ? app.seq : null});
+  if (u.error) u = C.stateUrl({path:reqPath});
+  if (u.error) u = C.stateUrl({});
+  fetch(u.url, {headers:{"Accept":"application/json"}})
+    .then(function (r) {
+      if (r.status === 204) { app.link = "ok"; app.linkWhy = null; render(); return null; }
+      if (r.status === 503) {
+        app.link = "stale";
+        app.linkWhy = "the board cannot snapshot its own state right now (503)";
+        render();
+        return null;
+      }
+      if (r.status === 404 && app.sub) {
+        app.link = "ok";
+        app.subNote = "the board has no node “" + app.sub + "”; showing the full tree";
+        app.sub = null;
+        app.seq = null;
+        app.heldPath = null;
+        render();
+        return null;
+      }
+      if (!r.ok) {
+        app.link = "stale";
+        app.linkWhy = "the board answered HTTP " + r.status;
+        render();
+        return null;
+      }
+      return r.json();
+    })
+    .then(function (body) {
+      if (!body) return;
+      app.link = "ok";
+      app.linkWhy = null;
+      app.raw = body;
+      app.env = C.envelopeModel(body);
+      /* `seq` and `heldPath` are one fact — the resource and revision this
+       * client can truthfully say it holds — and move together for exactly
+       * that reason: updating either alone is how a stale `after` reaches
+       * the wire for the wrong path. */
+      if (!app.env.fatal) { app.seq = app.env.seq; app.heldPath = reqPath; }
+      render();
+    })
+    .catch(function (e) {
+      app.link = "unreachable";
+      app.linkWhy = "no answer from the board (" + e + ")";
+      if (app.env) render();
+      else renderFatal({code:"no_contact",
+        text:"Nothing has been received from this board yet: " + e});
+    });
+}
+
+window.addEventListener("hashchange", readHash);
+readHash();
+app.timer = setInterval(poll, POLL_MS);
+
+})(window.PortalCore);
+</script>
+</body>
+</html>
