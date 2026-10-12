@@ -9,7 +9,8 @@ not required; behaviour that contradicts it is a bug in one of the two, and the 
 decides which (see §11).
 
 **Status:** v1.2, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10;
-v1.2: provider body contract §4.6, number traits non-null §5.4, validator contract §5.6). Origin: the `webui_node` component of a private bench-simulator
+v1.2: provider body contract §4.6, number traits non-null §5.4, validator contract §5.6;
+v1.3: rejections outside the portal and 503 §6.2, shutdown rule §6.2, kind views §7). Origin: the `webui_node` component of a private bench-simulator
 project (wire format `schema_version: 2`), lifted here and made vehicle-neutral. Nothing in
 this repository may name that project, its boards, MACs, IPs or captures
 (`script/check_no_private_data.py`, `docs/CONVENTIONS.md`).
@@ -444,6 +445,14 @@ Body over 256 bytes -> refused `body_too_large`.
 | number outside [min, max] or non-finite | 422 | `refused` / `out_of_range` | result JSON |
 | select value not an option | 422 | `refused` / `unknown_option` | result JSON |
 | valid | 202 | `running` / `queued`, then `accepted` / `applied` on the next main-loop pass | result JSON |
+| the portal's lock not obtained within 200 ms | 503 | no | empty |
+
+Rejected by `web_server_idf` **before** the portal sees the request, so never recorded and
+not the portal's to change: a POST without a `Content-Length` header -> `411` (for a button
+send an empty body, e.g. `curl -X POST -d '' ...`); a form-encoded body over 1024 bytes
+(`CONFIG_HTTPD_MAX_REQ_HDR_LEN`) -> `400`. Note that `curl -d` without `-H 'Content-Type:
+application/json'` sends a form body, so `{"value":...}` sent that way is `invalid_body`;
+use `-d 'value=true'` or set the JSON content type.
 
 Result JSON: `{"seq": <seq after recording>, "node": "<id>", "key": "<key>", "result": {...}}`,
 `Content-Type: application/json`.
@@ -452,6 +461,10 @@ Execution: the httpd task validates and enqueues (one pending slot per action, g
 mutex); `loop()` performs `turn_on()/turn_off()`, `press()`, `make_call().set_option().perform()`,
 `make_call().set_value().perform()` and records `accepted`. **No entity method is called on
 the httpd task.**
+
+Shutdown: `web_server_base` keeps serving until the restart, so the portal must not destroy
+anything the httpd task uses (mutex, buffers) in `on_shutdown()`/`teardown()`. A request that
+arrives during shutdown is served or refused normally, never a crash.
 
 ### 6.3 AP fallback and captive detection
 
@@ -489,6 +502,11 @@ While the AP is not active, the portal claims only its three routes and `links` 
   browser's own Digest prompt handle the login. The page itself never needs a login.
 - Each entry of the envelope's `links` is shown as a link in the header (the WiFi setup link
   while the AP is active).
+- Kind views (an extra or replacing section for one `kind`, e.g. the inherited `pack`, `cse`,
+  `ti`, `dtc`, `dtcs`, `wake_holds`, `capture`, `census` views) are allowed as catalogue
+  entries: they are keyed by `kind` only, fall back to the generic card when their data is not
+  there, and contain no vehicle, board or bench identity. A kind no view knows renders
+  generically.
 
 ---
 
