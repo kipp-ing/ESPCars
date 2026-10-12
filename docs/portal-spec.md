@@ -1,0 +1,565 @@
+# `portal` — specification v1
+
+One self-describing state tree per device, served as one web page plus a JSON API from
+ESPHome's shared `web_server_base`, with optional controls (actions) behind a login.
+
+This document is the contract between implementer and tester. Behaviour that is not here is
+not required; behaviour that contradicts it is a bug in one of the two, and the spec owner
+decides which (see §11).
+
+**Status:** v1, 2026-10-12. Origin: the `webui_node` component of a private bench-simulator
+project (wire format `schema_version: 2`), lifted here and made vehicle-neutral. Nothing in
+this repository may name that project, its boards, MACs, IPs or captures
+(`script/check_no_private_data.py`, `docs/CONVENTIONS.md`).
+
+---
+
+## 1. Goals and non-goals
+
+**Goals**
+
+- G1 One generic ESPHome external component, `components/portal/`, that serves a declared
+  tree of nodes (values, series, children, actions) at `GET /api/v1/state` and a single
+  embedded HTML page at `GET /`.
+- G2 Wire format of `/api/v1/state` stays compatible with `schema_version: 2` consumers:
+  every key and every rule of §5 that existed before still holds; new information is added
+  only as new keys inside `actions[]` entries.
+- G3 Vehicle-neutral: nothing in the component, the asset or its tests names a specific
+  vehicle, board or bench. Position (`owns`) is declared in YAML, never derived from which
+  components are compiled.
+- G4 One httpd per device: the portal is an `AsyncWebHandler` on `web_server_base`, shared
+  with `captive_portal` (§8).
+- G5 Actions: a node may carry controls bound to ESPHome `switch`, `button`, `select` and
+  `number` entities. Actions exist only when declared in YAML, are always behind a login, and
+  every invocation resolves into the tree (accepted / refused / running, with reason and age).
+
+**Non-goals (v1)**
+
+- Peer mounting (`peers` stays `[]`), runtime roles, live CAN frame views.
+- Any built-in data provider for series/absence (the registry ships empty, §4.6).
+- Arduino or non-ESP32 targets.
+
+---
+
+## 2. File ownership (three agents, one worktree)
+
+| owner | paths |
+|---|---|
+| implementer | `components/portal/**` (Python, C++, `index.html`) |
+| tester | `tests/portal/**`, `tests/host/*portal*`, `tests/build/portal/**`, `script/portal_schema.py`, `tests/host/Makefile` (include path only), `.github/workflows/ci.yml` (compile-matrix entries only) |
+| spec owner | `docs/portal-spec.md`, `docs/**` for the portal, `README.md` component list, `docs/HANDOVER.md` portal entry |
+
+Commit only your own paths: `git commit <paths>`; never `git add -A` / `git commit -a`.
+Questions go to the team board; behaviour changes land here first (§11).
+
+---
+
+## 3. Component layout
+
+```
+components/portal/
+  __init__.py      config schema, final validation, codegen, provider registry
+  portal.h/.cpp    ESPHome binding: AsyncWebHandler, sampling, actions queue
+  portal_core.h    freestanding core: <cstddef>, <cstdint>, <cstring> only, no ESPHome/IDF,
+                   no allocation. Resolver, ChunkWriter, envelope emitter, fingerprint,
+                   action-body parser, action-result emitter. Namespace esphome::portal::core
+  index.html       the built-in page (gzipped into flash at codegen)
+```
+
+The freestanding core is what the host tests compile (`make -C tests/host`). Everything the
+host can test (JSON shape, state derivation, request parsing, action validation, result
+emission, fingerprint) lives in `portal_core.h`; `portal.cpp` only binds entities and HTTP.
+
+---
+
+## 4. YAML surface
+
+```yaml
+portal:
+  id: portal                   # optional
+  port: 80                     # optional, default 80; sets web_server_base's port
+  build: "demo-1"              # required, string -> served_by.build
+  board: demo                  # optional identity (all three or the identity is "unknown")
+  node_id: 0x0A                # optional; int or int-string, normalised to "0xA"
+  mac: "02:00:00:00:00:01"     # optional; 6 hex octets, normalised upper-case
+  owns: [vehicle]              # optional list of node ids (see 4.2)
+  root_label: Vehicle          # optional, default "Vehicle"; label of the synthetic root
+  text_max: 48                 # optional 16..256, default 48; text value cap in bytes
+  submodule_size: 12           # optional int >= 1; required iff any node declares submodule_position
+  web_asset: my_page.html      # optional path (relative to the YAML); replaces index.html
+  auth:                        # optional; required as soon as any action is declared
+    username: !secret web_username
+    password: !secret web_password
+    protect: all               # all (default) | actions
+  tree: [ <node>, ... ]        # required, >= 1 node; the children of the synthetic root
+```
+
+### 4.1 Node
+
+| key | type | rule |
+|---|---|---|
+| `segment` | `[a-z][a-z0-9_]*` | required; unique among siblings |
+| `kind` | non-empty string | required; open vocabulary |
+| `label` | non-empty string | required |
+| `budget_ms` | int >= 1, or null (`null`/`~`/empty/`none`) | optional; omitted -> derived (4.4) |
+| `values` | list of value (4.3), >= 1 | optional |
+| `series` | series (4.5) | optional |
+| `children` | list of node, >= 1 | optional |
+| `actions` | list of action (4.7), >= 1 | optional |
+| `role` / `roles_available` | identifier / list of identifiers | `role` requires a non-empty `roles_available` containing it |
+| `absent` | why-code | optional; node is `absent` with this code |
+| `absent_when` | `{provider, source, <provider args>}` | requires `absent`; provider from the registry (4.6) |
+| `unknown_when` | `{value, equals, why}` | `value` must be one of this node's own value keys; not combinable with `children` |
+| `trust_from` | value key | must be one of this node's own value keys |
+| `submodule_position` | int >= 1 | optional; unique across the whole tree |
+
+Node ids are dotted paths: a top-level node's id is its `segment`, a child's id is
+`<parent id>.<segment>`. The synthetic root has id `car`, kind `car`, label `root_label`
+(id and kind stay `car` for wire compatibility; the root's children carry bare ids).
+
+Cross-field rules (each a config error naming the node):
+
+- `absent` without `absent_when` is exclusive with `values`, `children`, `role`,
+  `unknown_when`, `series`, `actions`. With `absent_when` only `role` and `unknown_when` stay
+  exclusive.
+- The evidence-gated why-codes `never_announced`, `no_transfer`, `crc_fail`,
+  `negative_response` are refused in `unknown_when.why`, and in `absent` unless the chosen
+  `absent_when` provider declares evidence for exactly that code.
+- A series `key` must not equal one of the node's own value keys; an action `key` must not
+  equal another action key on the same node.
+- A node with any `binary_sensor` value may not declare a positive `budget_ms`.
+
+### 4.2 `owns`
+
+- Each entry must be the id of a node in `tree` -> else error
+  `owns entry 'x' names no node in 'tree'`.
+- No duplicates -> else error.
+- If `board`, `node_id` and `mac` are all set, `owns` must be non-empty -> else error
+  (an identity with `served_by.state: ok` must own something).
+- `owns` is never derived from compiled components. `served_by.components` is still the
+  sorted list of top-level component keys of the config, minus `substitutions`, `packages`,
+  `esphome`, `external_components`; it is informational only.
+- With an incomplete identity, `served_by.owns` is emitted as `[]` whatever YAML says (wire
+  rule, §5.2).
+
+### 4.3 Value
+
+| key | rule |
+|---|---|
+| `key` | `[a-z][a-z0-9_]*`, required |
+| `label` | non-empty, required |
+| `unit` | string, optional (absent -> JSON null) |
+| `decimals` | 0..6, default 0 |
+| `cadence_ms` | int >= 1, optional; forbidden on `binary_sensor` |
+| exactly one of `sensor` / `text_sensor` / `binary_sensor` | entity id |
+
+### 4.4 Budget derivation
+
+Explicit `budget_ms` (int or null) wins. Otherwise: no own values, or any own value without
+`cadence_ms` -> null; else `3 * max(cadence_ms)`. The resolved value is written back into the
+validated config (visible in `esphome config` output). A component-level `budget_ms` is a
+config error with an explanatory message.
+
+### 4.5 Series
+
+| key | rule |
+|---|---|
+| `key`, `label` | as for values |
+| `unit` | optional |
+| `index_base` | int >= 0, required |
+| `index_frame` | `[a-z][a-z0-9_]*` or explicit null, **required** |
+| `count` | 1..64, required |
+| `decimals` | 0..6, default 0 |
+| `provider`, `source`, provider args | optional, all-or-nothing, from the registry (4.6) |
+
+Without a provider every element is a hole. `pack_index_base` (wire) derivation, written back
+as `resolved_pack_index_base`: walk from the series' node upward to the nearest node
+declaring `submodule_position` (itself included). None found -> null. Found and
+`index_frame == submodule_cell` -> `(position - 1) * submodule_size + index_base`. Found and
+`index_frame` null -> config error (an unnamed frame never gets an offset). Found and any
+other frame -> null. Two nodes with the same `submodule_position` -> config error. A
+`submodule_position` without top-level `submodule_size` -> config error.
+
+### 4.6 Provider registry
+
+`components/portal/__init__.py` exposes:
+
+```python
+register_absent_provider(name, *, args: dict[str, validator], source_type: MockObjClass,
+                         body: str, evidence: str | None = None, for_why: tuple[str, ...] = ())
+register_series_provider(name, *, args: dict[str, validator], source_type: MockObjClass,
+                         body: str)
+```
+
+Another external component calls these at import time to add providers. The portal ships
+**no** providers. Unknown provider -> error listing the registered names. Missing/extra
+provider args -> error. `source` is `cv.use_id(source_type)`. Codegen emits one thunk per
+distinct (provider, args) into `main.cpp` via `cg.add_global`, named deterministically
+(`portal_prov_<provider>_<argletter><value>...`), deduplicated within one build.
+
+### 4.7 Action
+
+```yaml
+actions:
+  - key: logging            # [a-z][a-z0-9_]*, unique per node
+    label: Logging          # non-empty
+    switch: logging_switch  # exactly one of switch / button / select / number
+  - key: restart
+    label: Restart
+    button: restart_button
+  - key: mode
+    label: Mode
+    select: mode_select
+  - key: interval
+    label: Interval
+    number: interval_number
+    decimals: 1             # number only, 0..6, default 2
+```
+
+- Exactly one entity key -> else error `an action needs exactly one of ...`.
+- `decimals` on a non-number action -> error.
+- Any action in the tree and no `auth:` -> error `actions require 'auth:' ...` (TX safety:
+  nothing that can transmit is reachable without a login).
+- A domain's control code compiles only when that domain exists in the build
+  (`USE_SWITCH`, `USE_BUTTON`, `USE_SELECT`, `USE_NUMBER`).
+- The portal never changes an entity's own state logic (`restore_mode`, optimistic, etc.).
+
+### 4.8 Component-level validation
+
+- `cv.only_on_esp32`. Depends on `network`; auto-loads `web_server_base`.
+- `web_server:` in the same config -> error: both serve `/` on the one `web_server_base`
+  and `web_server`'s auth defines/credentials would govern the portal's. The portal replaces
+  `web_server`.
+- `port` 32767 and 65535 -> error (they wedge `httpd_stop()`).
+- `web_asset` file missing -> error naming the path.
+- `auth.username` empty -> error. `auth.protect` not in {all, actions} -> error.
+- Consumes 3 TCP sockets (`socket.consume_sockets(3, "portal")`); the listening socket is
+  `web_server_base`'s.
+- Sizing defines from Python: `PORTAL_MAX_NODES` (tree nodes + root), `PORTAL_MAX_VALUES`,
+  `PORTAL_MAX_SERIES`, `PORTAL_MAX_ACTIONS`, `PORTAL_TEXT_MAX` (each >= 1). Feature define
+  `USE_PORTAL`. With `auth:`: `USE_WEBSERVER_AUTH` and `USE_WEBSERVER_AUTH_DIGEST`.
+
+---
+
+## 5. Wire format (`schema_version: 2`)
+
+Producer: `portal_core.h`. Validator: `script/portal_schema.py` (`validate_envelope(obj) ->
+list[Violation]`, CLI `script/portal_schema.py FILE...`, exit 0 iff all valid). The validator
+never raises on malformed input.
+
+### 5.1 Envelope
+
+Keys in this order: `schema_version` (2), `seq`, `series_legend`, `served_by`, `peers` (`[]`),
+then `path` and `ancestor_role` (only for `?path=`), then `tree`.
+
+- `seq` advances (wraps 0 -> 1) when the fingerprint changes. The fingerprint covers every
+  value's reading and derived state (not raw ages), and every action's emitted `value`,
+  `enabled` and `result.state`/`result.why.code` (not `result.age_ms`).
+- `series_legend` is `{"r":"real","s":"SNA","i":"implausible","-":"not measured"}` when the
+  emitted (possibly narrowed) tree carries at least one emitted series, else `null`.
+- `ancestor_role` (with `path` only): nearest strict ancestor declaring a role, as
+  `{node,label,role}`, or `null`.
+
+### 5.2 `served_by`
+
+`{board, node_id, mac, state, why, uptime_ms, build, owns, components}`. Identity complete
+(all three set) -> `state: "ok"`, `why: null`, `owns` from YAML. Otherwise `board`, `node_id`,
+`mac` null, `state: "unknown"`, `why.code: "no_identity"`, `owns: []`.
+
+### 5.3 Node
+
+Every node has exactly these keys, always present, in this order: `id`, `kind`, `label`,
+`state`, `why`, `provenance`, `values`, `series`, `children`, `actions`, then `role` and
+`roles_available` only when a role is declared.
+
+- `state` in {ok, stale, degraded, refused, silent, absent, unknown} from this producer
+  (`down`, `unreachable`, `incompatible` exist in the vocabulary, never emitted here).
+- `why` is null iff `state` is `ok`; otherwise `{code, detail, since_ms, evidence}`.
+- Derivation (unchanged): own value never published / non-finite -> `degraded`
+  (`entities_unavailable`); text over `text_max` -> value `degraded`; any own value older than
+  a known budget (booleans excepted) -> `stale` (`stale_data`); `absent` / `absent_when` ->
+  `absent`; `unknown_when` match -> `unknown`; any non-ok child upgrades an ok/stale parent to
+  `degraded` (`child_degraded`, evidence `children: {id: state}`).
+- `provenance` is `null` on a strict ancestor of an owned node; otherwise
+  `{origin:"local", board, node_id, age_ms, budget_ms, trust, seq}`.
+
+Values, series, provenance and transport rules are exactly those of `schema_version: 2`:
+`value` null iff `classification` is `sna`; booleans have `raw: null`; series carry
+`key,label,unit,index_base,index(null),index_frame,values,class,pack_index_base`; an absent
+node carries `series: null`.
+
+### 5.4 Action entry (extended)
+
+Order of keys: the seven v2 keys, then the extension keys.
+
+```json
+{"key": "logging", "label": "Logging", "method": "POST",
+ "path": "/api/v1/actions/vehicle.logger/logging",
+ "enabled": true, "why": null, "body": {"value": "bool"},
+ "control": "switch", "value": true, "options": null,
+ "min": null, "max": null, "step": null, "unit": null,
+ "result": {"state": "accepted", "why": {"code": "applied", "detail": null,
+            "since_ms": null, "evidence": {}}, "age_ms": 2140, "value": true}}
+```
+
+| key | meaning |
+|---|---|
+| `method` | always `"POST"` |
+| `path` | `/api/v1/actions/<node id>/<key>` |
+| `enabled` | false only when the entity cannot be driven: `select`/`number` without a state -> `why.code: "entity_unavailable"`. `switch` and `button` are always enabled |
+| `why` | null iff `enabled` |
+| `body` | the request body shape: switch `{"value":"bool"}`, select `{"value":"string"}`, number `{"value":"number"}`, button `null` |
+| `control` | `switch` / `button` / `select` / `number` |
+| `value` | current entity state: bool (switch), string (select), number with `decimals` (number); `null` for button and for an entity without state |
+| `options` | select: list of option strings (copied at setup); else `null` |
+| `min`, `max`, `step` | number: from the number's traits (with `decimals`); else `null` |
+| `unit` | number: unit of measurement or `null`; else `null` |
+| `result` | `null` until first invoked since boot; then the last result (5.5) |
+
+The validator accepts an action without the extension keys (older producer). If present,
+each extension key must have the type above; `control` outside the four known values is a
+violation `unknown_control` for the validator and is rendered as unrecognised (disabled) by
+the page.
+
+### 5.5 Action result (R26–R28)
+
+`result = {state, why, age_ms, value}`:
+
+- `state` in {`running`, `accepted`, `refused`}.
+- `why` is **always** an object (a reason for every outcome): `running` -> `queued`;
+  `accepted` -> `applied`; `refused` -> one of `invalid_body`, `wrong_type`, `out_of_range`,
+  `unknown_option`, `disabled`, `body_too_large`. `detail` may carry prose.
+- `age_ms`: ms since this result was set.
+- `value`: the requested value as parsed (`null` for a button or an unparseable body).
+
+`accepted` means the entity took the command on the main loop. It is not a claim about what
+the commanded device did; the entity's own state shows in `value` of the action entry and in
+any bound values.
+
+---
+
+## 6. HTTP surface
+
+All routes are claimed by the portal's `canHandle()`; anything else falls through to other
+handlers on `web_server_base` (e.g. `captive_portal`) or to the server's 404.
+
+| route | method | auth (protect=all / actions / no auth) | responses |
+|---|---|---|---|
+| `/` | GET | yes / no / no | 200 `text/html; charset=utf-8`, `Content-Encoding: gzip`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, CSP as before |
+| `/api/v1/state` | GET | yes / no / no | 200 chunked JSON (`Cache-Control: no-store`), 204, 400, 404, 503 per §6.1 |
+| `/api/v1/actions/<node>/<key>` | POST | yes / yes / route not claimed | §6.2 |
+
+Unauthenticated request to a protected route: `401` with
+`WWW-Authenticate: Digest realm="Login Required", qop="auth", nonce=..., opaque=...`, empty
+body, and **no side effect** (the tree and `seq` do not change). A valid Digest response
+(`curl --digest -u user:pass`) passes.
+
+### 6.1 State transport rules (unchanged)
+
+| rule | response |
+|---|---|
+| query string >= 32 bytes | 400 |
+| non-empty query with neither `path` nor `after` | 400 |
+| unparseable `after` (decimal uint32 only) | 400 |
+| producer cannot snapshot itself | 503 |
+| `path` naming no node (checked before `after`) | 404 |
+| `after` equal to `seq` | 204 |
+
+The body is streamed in frames of at most 4096 bytes (`httpd_resp_send_chunk`); the response
+buffer never grows with the tree.
+
+### 6.2 Actions
+
+Request body, one of:
+- `Content-Type: application/json`: `{"value": <bool|string|number>}`; for a button the body
+  may be empty or `{}`.
+- `Content-Type: application/x-www-form-urlencoded`: `value=<text>`; switch accepts
+  `true/false/on/off/1/0`, number a decimal, select the option text.
+
+Body over 256 bytes -> refused `body_too_large`.
+
+| situation | HTTP | recorded in tree | response body |
+|---|---|---|---|
+| unknown node or key | 404 | no | empty |
+| auth missing/invalid | 401 | no | empty |
+| action disabled | 409 | `refused` / `disabled` | result JSON |
+| previous invocation still `running` | 409 | no (the running result stays) | `{"error":"busy"}` |
+| body not parseable / no `value` (non-button) | 400 | `refused` / `invalid_body` | result JSON |
+| value of the wrong JSON type | 400 | `refused` / `wrong_type` | result JSON |
+| body too large | 400 | `refused` / `body_too_large` | result JSON |
+| number outside [min, max] or non-finite | 422 | `refused` / `out_of_range` | result JSON |
+| select value not an option | 422 | `refused` / `unknown_option` | result JSON |
+| valid | 202 | `running` / `queued`, then `accepted` / `applied` on the next main-loop pass | result JSON |
+
+Result JSON: `{"seq": <seq after recording>, "node": "<id>", "key": "<key>", "result": {...}}`,
+`Content-Type: application/json`.
+
+Execution: the httpd task validates and enqueues (one pending slot per action, guarded by the
+mutex); `loop()` performs `turn_on()/turn_off()`, `press()`, `make_call().set_option().perform()`,
+`make_call().set_value().perform()` and records `accepted`. **No entity method is called on
+the httpd task.**
+
+---
+
+## 7. Page (`index.html`)
+
+- One file, no external resource, no build step; built-in asset <= 64 KiB gzipped (as
+  embedded: `gzip -9`, mtime 0).
+- No board name, address, MAC, vehicle name or private marker in the file.
+- `KINDS` includes the neutral nouns `vehicle`, `component`, `bus`, `device`, `ecu`,
+  `charger`, `battery`, `logger`, `gateway`, `network`, `sensor`, `actuator`, `module` in
+  addition to the existing ones; an unknown kind renders generically and is named.
+- Board hue table is keyed by nothing board-specific; a board without a known hue gets a hue
+  derived from its name or the neutral dot.
+- Actions render per `control`: switch -> toggle, button -> button, select -> dropdown,
+  number -> number input + set button (min/max/step), plus a result chip (state, why code or
+  detail, age). Disabled actions stay visible with their reason. Unknown `control` -> shown
+  disabled as unrecognised. Requests use `fetch` with JSON bodies; a 401 lets the browser's
+  own Digest prompt handle the login.
+
+---
+
+## 8. M2 decision: `web_server_base` handler, not an own httpd
+
+**Decided: the portal is an `AsyncWebHandler` on `web_server_base`.** Investigation against
+the pinned ESPHome 2026.7.0 (`esphome/components/web_server_idf/web_server_idf.{h,cpp}`,
+`web_server_base/web_server_base.{h,cpp}`, `captive_portal/captive_portal.{h,cpp}`):
+
+1. `AsyncWebServer::request_handler_()` calls the first handler whose `canHandle()` is true and
+   runs `handleRequest()` synchronously on the httpd task.
+2. `AsyncWebServerRequest` has `operator httpd_req_t *()`. Inside `handleRequest()` the portal
+   can call `httpd_resp_set_status/type/hdr` and `httpd_resp_send_chunk` exactly as the
+   previous own-httpd code did. Streaming is therefore available unchanged; the
+   `AsyncResponseStream` (which buffers into a `std::string`) is **not** used.
+3. POST bodies: `application/json` arrives via `handleBody()` in chunks of <= 1460 bytes,
+   then `handleRequest()`; form bodies arrive pre-parsed (`arg("value")`).
+4. Auth: `AsyncWebServerRequest::authenticate()` / `requestAuthentication()` exist when
+   `USE_WEBSERVER_AUTH` (+ `_DIGEST`) is defined; the portal emits those defines itself. The
+   portal registers with `add_handler_without_auth()` and checks credentials per route (so
+   `protect: actions` is possible and the portal's credentials are not shared with other
+   handlers). This deviates from "set the base credentials" in the original plan on purpose.
+5. Handler order: the portal registers in `setup()` (priority `WIFI - 1`, like `web_server`),
+   `captive_portal` only when the AP starts, so the portal wins `/`, `/api/v1/state` and
+   `/api/v1/actions/...`; `captive_portal` serves every other GET while the AP is up
+   (`/config.json`, `/wifisave`, OS probes, any other path shows the WiFi page).
+6. The raw path skips `init_response_()`, so the base's default
+   `Access-Control-Allow-Origin: *` header is not sent: same-origin, as before.
+
+**Risk: httpd task stack.** `web_server_idf` starts httpd with the IDF default stack
+(4096) + 256 = 4352 bytes; the previous own httpd used 6144. Mitigation required: no buffer
+>= 256 bytes on the stack in the request path (the 4096-byte chunk buffer and the per-series
+element buffer are members), and the bench measures the httpd task's stack high-water mark
+after serving the largest test tree (PS-M2-07).
+
+**Fallback trigger:** if PS-M2-06 or PS-M2-07 fails on the bench and cannot be fixed inside
+the handler, the implementer switches to an own httpd (stack 6144, own Digest check) and the
+spec owner records the decision and its heap cost here.
+
+**Numbers** (filled in by M4/M5; tester reports, spec owner records):
+
+| build (same fictional tree) | static RAM (compile) | free heap idle | max block idle |
+|---|---|---|---|
+| portal + captive_portal | tbd | tbd | tbd |
+| previous component + `web_server` v3 on :81 + captive_portal | tbd | tbd | tbd |
+
+---
+
+## 9. Acceptance criteria
+
+Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/host`,
+**cfg** `esphome config`, **cc** `esphome compile`, **bench** a bench board per
+`tests/hil/HIL.md`, **rev** code review by the spec owner.
+
+### Global
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-G-01 | `script/check.sh` exits 0 (private-data guard, pytest, host, clang-format, config of every `tests/build/*/test*.yaml`) | all |
+| PS-G-02 | No existing component's files change; nothing private (vehicle names, real MACs/IPs, captures, sibling-repo paths) in any tracked file, commit message or PR text | py, rev |
+| PS-G-03 | Every `tests/build/portal/test*.yaml` is in the CI compile matrix | rev |
+
+### M0 — spec
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M0-01 | This file exists, is neutral, and passes `check_no_private_data.py` | py |
+
+### M1 — move, generic
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M1-01 | `components/portal/{__init__.py,portal.h,portal.cpp,portal_core.h,index.html}` exist; `portal_core.h` includes only `<cstddef>`, `<cstdint>`, `<cstring>` and compiles in the host build | host, py (include grep) |
+| PS-M1-02 | Every schema rule of §4.1, 4.3–4.5 has an accepting and a rejecting pytest case (segment/key patterns, duplicates, exclusivity, evidence-gated codes, budget derivation incl. all null spellings, binary_sensor cadence/budget, series frame/provider rules, role rules, unknown_when/trust_from targets, text_max range, port 32767/65535) | py |
+| PS-M1-03 | `owns` rules of §4.2: unknown id, duplicate, identity-without-owns rejected; a config that compiles `uds`/`isotp` but declares `owns: []` without identity is valid; `resolved` owns equal YAML | py |
+| PS-M1-04 | Provider registry: empty by default; unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) | py |
+| PS-M1-05 | Root node: id `car`, kind `car`, label `root_label` (default `Vehicle`) | py (codegen), host |
+| PS-M1-06 | `submodule_position`/`submodule_size` rules of §4.5 incl. the derived `resolved_pack_index_base` | py |
+| PS-M1-07 | Envelope emitter: all ported core cases pass (ChunkWriter framing at 4096, JSON escaping, number formatting, `parse_after`, `has_node`, resolve/derivation table, child propagation, skeleton provenance, `path`/`ancestor_role` order and cycle guard, series pairing/clamp/legend, absent_fn single evaluation, fingerprint ignores age but not state, flush failure propagates) under ASan/UBSan | host |
+| PS-M1-08 | Wire compatibility: fictional golden fixtures in `tests/portal/fixtures/` validate with `portal_schema`; at least one fixture is byte-identical to the core's output for the same snapshot (host or py-driven) | host, py |
+| PS-M1-09 | `script/portal_schema.py`: every rule of §5 has a rejecting case with its violation code; CLI exit codes 0/1; never raises on non-dict / missing keys | py |
+| PS-M1-10 | `web_asset:` replaces the embedded bytes (codegen embeds the gzip of the given file); missing file rejected | py |
+| PS-M1-11 | Built-in `index.html`: <= 64 KiB gzipped, no `http://`/`https://` resource reference, no private marker, `KINDS` contains the §7 neutral nouns | py |
+| PS-M1-12 | `tests/build/portal/test-minimal.esp32-c6-idf.yaml` (no actions, no auth) passes cfg and cc | cfg, cc |
+
+### M2 — on `web_server_base`
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M2-01 | No `httpd_start` in `components/portal/`; the portal registers via `web_server_base` (`init()` + `add_handler_without_auth`) | py (grep), rev |
+| PS-M2-02 | `portal` + `web_server` in one config is rejected with the §4.8 message | py |
+| PS-M2-03 | `port:` reaches `web_server_base::set_port`; with `captive_portal` + `wifi: ap:` the config compiles | py (codegen) or cc |
+| PS-M2-04 | `auth:` emits `USE_WEBSERVER_AUTH` and `USE_WEBSERVER_AUTH_DIGEST`; actions without `auth:` rejected; `protect` values validated | py |
+| PS-M2-05 | `canHandle()` claims exactly the three routes of §6 (POST route only when actions exist), nothing else | host (if the route matcher is in the core) or rev |
+| PS-M2-06 | On a board: `GET /api/v1/state` with the full test tree (> 4096 bytes) arrives with `Transfer-Encoding: chunked`, complete, and passes `script/portal_schema.py` | bench |
+| PS-M2-07 | On a board: httpd task stack high-water mark after serving the full state is >= 1024 bytes (logged at DEBUG by the portal) | bench |
+| PS-M2-08 | On a board: the §6.1 table (400 / 404 / 204 / 503-not-required) holds | bench; host for parsing |
+| PS-M2-09 | On a board, `protect: all`: `GET /` without credentials 401 with a Digest challenge, with `curl --digest` 200; `protect: actions`: GET 200 without credentials, POST 401 | bench |
+| PS-M2-10 | AP fallback (STA not reachable, AP up): `curl http://192.168.4.1/` returns the portal page, `/api/v1/state` validates, `/config.json` returns the captive portal's JSON | bench |
+| PS-M2-11 | §8 numbers table filled: static RAM of both builds, free heap and max block idle before/after on the bench board | cc, bench |
+
+### M3 — actions
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M3-01 | §4.7 schema: each control type accepted; zero or two entity keys, duplicate key, `decimals` on non-number, bad key pattern rejected | py |
+| PS-M3-02 | A node without actions emits `"actions":[]`; a build without any action claims no POST route | host/py, bench |
+| PS-M3-03 | Action entry emission for each control (enabled, disabled with `entity_unavailable`, value null without state, options, min/max/step/unit) matches §5.4 key order and types, and validates | host, py |
+| PS-M3-04 | Request parsing per §6.2 (JSON and form, each control, type errors, range, options, size) yields the right outcome code; refusals record `refused` with the right `why.code`; busy is not recorded | host |
+| PS-M3-05 | Fingerprint/seq advances on action value, enabled or result change and not on `result.age_ms` alone; `?after=<old seq>` returns a body after a POST | host, bench |
+| PS-M3-06 | On a board: switch round-trip — POST `{"value":true}` -> 202 `running`; a following state shows `accepted`/`applied` and `value: true`; POST false reverts; same for one select or number | bench |
+| PS-M3-07 | On a board: unknown node/key 404; POST without credentials 401 and `seq` unchanged; out-of-range 422 recorded as refused | bench |
+| PS-M3-08 | Page renders toggle, button, dropdown, number input and the result chip; sends JSON via `fetch` (static checks; optional `node` smoke test skips without node) | py |
+| PS-M3-09 | No entity control call on the httpd task; pending slots and results guarded by the mutex | rev |
+
+### M4 — docs and example
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M4-01 | `tests/build/portal/test.esp32-c6-idf.yaml`: fictional vehicle (bus, device, logger nodes), values of all three entity kinds, a series, all four action kinds (template entities, nothing on a vehicle bus), `auth:`, `wifi: ap:` + `captive_portal`; cfg + cc green | cfg, cc |
+| PS-M4-02 | `tests/build/portal/test-asset.esp32-c6-idf.yaml` with `web_asset:` passes cfg + cc | cfg, cc |
+| PS-M4-03 | `docs/portal-user-guide.md`, README component list, `docs/HANDOVER.md` entry for open bench items exist | rev |
+
+### M5 — bench
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M5-01 | One bench board identified by MAC, flashed with the M4 test config; its previous image restored afterwards (same build string as before) | bench |
+| PS-M5-02 | PS-M2-06..10 and PS-M3-06..07 run on that board, results in the PR | bench |
+
+---
+
+## 10. Open decisions
+
+| # | question | current default |
+|---|---|---|
+| D1 | Busy POST (409) is not recorded in the tree; is that acceptable under R28? | yes, the running result stays visible |
+| D2 | `protect: all` as default means the read-only state needs a login too | default `all`; `actions` opt-in |
+| D3 | With the AP up the WiFi page is reachable only at a path other than `/` | accepted, documented in the user guide |
+| D4 | Fallback to an own httpd only on bench evidence (§8) | not taken |
+
+---
+
+## 11. Change process
+
+Spec changes are made by the spec owner, noted on the team board, and committed with the
+acceptance IDs they touch. The implementer and tester do not edit this file.
