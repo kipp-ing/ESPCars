@@ -7,12 +7,19 @@ notes here are German. The README contains the platform introduction.
 
 **The open platform for connected vehicle electronics.**
 
-**Build your application. Connect it to the vehicle. Understand it in the field.**
+**Build your application. Connect it to the vehicle. Observe, modify and validate.**
 
 ESPCars stellt die gemeinsame Infrastruktur für die Entwicklung und den Betrieb
 vernetzter Fahrzeugelektronik bereit: ESPHome als Firmware-Framework,
 Fahrzeugkommunikation, Diagnose, lokale Prüfung, Aufzeichnung und Datenverarbeitung.
 Die Anwendung ist projektspezifisch; die Infrastruktur ist wiederverwendbar.
+Aktive Anwendungen stehen gleichberechtigt neben Beobachtung und Datenanalyse:
+Inline-CAN-Gateway / Man-in-the-Middle, Filter und Signaländerungen während der
+Weiterleitung, Signaladaption, Integrations- und Fehlertests sowie Tuning und
+Kalibrierung. CAN-Signalmanipulation und CCP-Kalibrierzugriff sind unterschiedliche
+Fähigkeiten. CCP bietet DAQ, Speicherzugriff, Kalibrierseitenwahl und opt-in
+Schreibzugriff an ECUs mit unterstütztem CCP-Zugang; projektspezifische Signale
+und Kalibrieradressen bleiben beim Anwenderprojekt.
 
 Primäre Leser: Embedded-, Automotive-, Integrations- und Testingenieure.
 Home Assistant ist eine mögliche Integration, kein vorausgesetzter Einstieg.
@@ -71,7 +78,8 @@ bleiben Vorschläge.
 
 **Bild:** Ein großes ESP32-Board-Rendering steht im Mittelpunkt. Ein deutlich
 kleineres Fahrzeug wird über eine schematische Busverbindung angebunden.
-CAN/LIN-Interfaces, Diagnose, Logging und Webinterface stehen als Fähigkeiten
+CAN-Gateway / MITM mit Signalmanipulation, LIN, Diagnose / Kalibrierung, Logging
+und Webinterface stehen als Fähigkeiten
 neben dem Gerät; eine gemeinsame Klammer verbindet sie mit dem ganzen Gerät.
 Die ESPHome-Grundlage wird als ruhiges Fundament darunter sichtbar. Es gibt
 keine Feature-Callouts oder Platzierungsmarker auf dem Fahrzeug. Die
@@ -148,6 +156,18 @@ Zuerst Motive 1 und 2 für Produktverständnis und Nutzen entwickeln. Motiv 3
 liefert anschließend technische Tiefe. Motive 4 und 5 ergänzen die Serie.
 Layoutentwürfe gemeinsam verbessern, danach final ausarbeiten und im README einbetten.
 
+## Zusätzliches Motiv: inline gateway and tuning
+
+Ein schematisches CAN-Segment A (kleines Fahrzeug-/Prüfstandsmotiv) und CAN-Segment B
+(ECU-/Subsystem-Block) liegen auf den beiden Seiten des großen ESPCars-Geräts.
+Beide Kommunikationsrichtungen sind sichtbar. Bridge, Filter, Signal-Rewrite und
+optionale CRC-8-Korrektur stehen innerhalb des Gerätebereichs. Runtime-Signalwerte
+kommen aus Automationen oder deklarierten Portal-Controls. CCP-Messung und opt-in
+Kalibrierschreiben werden als eigener Zugriff ausgewiesen. Keine Lokalisierung
+von Funktionen im Fahrzeug.
+
+Headline: `Observe. Modify. Validate.`
+
 ## Demo-Storyboard
 
 Ein fiktives Signal entsteht am Bus, wird lokal sichtbar und bei einer
@@ -159,3 +179,10 @@ und eine gezielt ausgelöste Störung zeigen Zustand, Datenalter und Fehlergrund
 Hardware, Simulation und Wiedergabe aufgezeichneter Daten werden im Demo-Auftritt
 klar bezeichnet. Ausschließlich fiktive Definitionen und synthetische Daten
 werden als öffentliche Beispiele verwendet.
+
+Ein aktiver Demo-Abschnitt zeigt einen synthetischen Frame auf CAN-Segment A,
+einen gezielt umgeschriebenen Signalwert auf CAN-Segment B und die Änderung
+über einen deklarierten Portal-Control. Beide Seiten werden aufgezeichnet,
+damit die Änderung nachvollziehbar ist. Ein eigener CCP-Demo-Target kann DAQ
+und opt-in Schreiben auf einen fiktiven Kalibrierparameter zeigen. Diese
+Demo-Erweiterungen sind Ausbauaufgaben, keine bereits veröffentlichte Demo.

@@ -1,22 +1,32 @@
 # ESPCars infographic layout drafts
 
-Layout iteration v3, 2026-10-13. Visual direction: technical OEM presentations,
+Layout iteration v4, 2026-10-13. Visual direction: technical OEM presentations,
 white background, navy typography and blue data paths. High-quality vehicle and
 board renders provide the visual base; SVG labels and data paths explain the
 system. The board is the main subject. The smaller car is a connection context:
 no functions, nodes, storage or feature leaders are placed within the vehicle.
 These are editable review drafts, not yet embedded in the main README.
 
-## Current device-centred drafts (v3)
+## Current device-centred drafts
 
 | Draft | Preview | Editable SVG composition |
 |---|---|---|
-| Device platform and vehicle connection | [PNG](01-device-platform-render-v3.png) | [SVG](01-device-platform-render-v3.svg) |
+| Active device platform: gateway, calibration and recording (v4) | [PNG](01-active-platform-render-v4.png) | [SVG](01-active-platform-render-v4.svg) |
 | Device recording and host collection | [PNG](02-device-data-render-v3.png) | [SVG](02-device-data-render-v3.svg) |
+| Inline CAN gateway, signal manipulation and calibration (v4) | [PNG](03-inline-gateway-render-v4.png) | [SVG](03-inline-gateway-render-v4.svg) |
 
-![Device platform draft](01-device-platform-render-v3.png)
+![Active device platform draft](01-active-platform-render-v4.png)
 
 ![Device recording and host collection draft](02-device-data-render-v3.png)
+
+![Inline CAN gateway and calibration draft](03-inline-gateway-render-v4.png)
+
+The gateway illustration shows the two CAN segments and independent forwarding
+directions. Signal rewriting is distinct from CCP calibration access. Runtime
+signal values can be supplied by automations or declared portal controls; CCP
+memory writes require opt-in and supported access on the target ECU. The original
+device overview remains available as [v3 PNG](01-device-platform-render-v3.png)
+and [v3 SVG](01-device-platform-render-v3.svg).
 
 ## Earlier rendering iteration (v2, superseded)
 
@@ -47,8 +57,8 @@ are schematic. The hardware illustration is not a pinout or wiring guide.
 
 All versions use a 1600 × 900 SVG viewBox and 3200 × 1800 PNG previews.
 Text uses Arial with Helvetica/sans-serif fallbacks. V1 contains only vector
-geometry; v2 and v3 combine embedded raster illustrations and vector annotations.
-No version requests remote assets or fonts. V3 reuses the existing render assets;
+geometry; v2–v4 combine embedded raster illustrations and vector annotations.
+No version requests remote assets or fonts. V3 and v4 reuse the existing render assets;
 no new raster generation was needed for this composition change.
 
 The platform diagram distinguishes the on-device firmware components from the

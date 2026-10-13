@@ -2,7 +2,7 @@
 
 **The open platform for connected vehicle electronics.**
 
-Build your application. Connect it to the vehicle. Understand it in the field.
+Build your application. Connect it to the vehicle. Observe, modify and validate.
 
 Developing vehicle electronics means bringing together firmware, bus communication,
 diagnostics, configuration, updates, logging and tools for checking the system in
@@ -11,9 +11,10 @@ operation. Each project needs these capabilities to work together.
 ESPCars provides a common foundation for that work.
 
 Built on ESPHome and ESP32, it combines application logic and connectivity with
-CAN, LIN, diagnostic access, local recording, a browser interface and automatic
-data collection. The environment supports development on the bench, checks inside
-the vehicle and analysis after a test run. Choose the components your application
+CAN, LIN, diagnostic and calibration access, local recording, a browser interface
+and automatic data collection. The environment supports development on the bench,
+active vehicle integration, tuning experiments and analysis after a test run.
+Choose the components your application
 needs; target support is listed below.
 
 ## From application logic to vehicle communication
@@ -27,11 +28,28 @@ CAN and LIN components connect that application to the vehicle: observe and deco
 traffic, schedule communication, implement LIN master or slave behaviour, and
 build CAN gateways with filtering and signal modification.
 
-## Diagnostics as part of the application
+## CAN gateway and man-in-the-middle signal manipulation
+
+Place ESPCars between two CAN segments as an inline, man-in-the-middle gateway.
+Define each forwarding direction independently: bridge traffic, filter selected
+frames, translate identifiers and rewrite signal fields as frames pass through.
+Signal values can change at runtime through ESPHome automations or explicitly
+configured portal controls. Supported CRC-8 correction can be applied to modified
+frames when configured.
+
+Use this for signal adaptation, controlled fault injection, ECU integration tests
+and tuning experiments. Two supported CAN controllers provide the two sides of
+the gateway; the application supplies the signal definitions and forwarding rules.
+See the [gateway and signal-rewrite guide](docs/can_gateway-user-guide.md).
+
+## Diagnostics, measurement and calibration
 
 Diagnostic communication runs on the device. ISO-TP and catalog-driven UDS provide
-access to ECU data alongside normal bus traffic; CCP 2.1 adds memory access and
-DAQ capabilities, with writes disabled by default.
+access to ECU data alongside normal bus traffic. CCP 2.1 adds memory access,
+DAQ measurement and calibration-page selection. Opt-in memory writes support
+calibration and tuning workflows on ECUs exposing the supported CCP access;
+writes are disabled by default. Signal rewriting and ECU calibration are distinct
+tools that can be combined with recording and local controls in one application.
 
 Diagnostic definitions and signal descriptions belong to the project. Reusable
 transport, scheduling and decoding infrastructure belongs to the platform. DBC
@@ -67,8 +85,9 @@ and [publisher](docs/sdlog-publish-spec.md).
 
 ## One foundation, many applications
 
-ECU prototypes. Auxiliary controllers. CAN gateways. LIN test devices. Diagnostic
-nodes. Embedded recorders. Vehicle integration rigs.
+ECU prototypes. Auxiliary controllers. Inline CAN gateways. Signal adaptation and
+tuning rigs. LIN test devices. Diagnostic and calibration nodes. Embedded
+recorders. Vehicle integration rigs.
 
 Choose the capabilities your application needs and extend the platform where the
 project demands it. Firmware, configuration, diagnostic definitions and data tools
