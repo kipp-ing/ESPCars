@@ -41,6 +41,8 @@ end in iterative fixing, which very costly
 without passing tests on the relevant tier is not done. If you discover open items
 which lie in the task, do a loop, fix it. This is what a succesful task produces.
 
+**Worktrees live inside the repo.** Parallel work goes into a worktree under `.claude/worktrees/<branch>` (gitignored; for subagents `isolation: "worktree"`), never into sibling directories like `../ESPCars-<feature>`. One worktree per branch; after the PR is merged, remove it at once (`git worktree remove <path> && git branch -d <branch>`). Throwaway work (merges, scrub experiments) goes to the scratchpad/`$TMPDIR`. Check `git worktree list` at the start and end of a task.
+
 **Branch and PR** Do the work on a branch and open a PR. Commiting is always a good 
 thing and allowed.
 
