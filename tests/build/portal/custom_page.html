@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Custom portal page</title></head>
+<body>
+<h1>Custom page</h1>
+<pre id="out">loading</pre>
+<script>
+fetch('/api/v1/state').then(r => r.json()).then(s => {
+  document.getElementById('out').textContent = JSON.stringify(s, null, 1);
+});
+</script>
+</body>
+</html>

@@ -93,6 +93,11 @@ jobs:
           - tests/build/uds/test-partition.esp32-c6-idf.yaml
           - tests/build/ccp/test.esp32-c6-idf.yaml
           - tests/build/ccp/test-write.esp32-c6-idf.yaml
+          # portal: minimal (no actions, no auth), full (all value kinds, series, four action
+          # kinds on template entities, auth, AP + captive_portal), custom web_asset.
+          - tests/build/portal/test-minimal.esp32-c6-idf.yaml
+          - tests/build/portal/test.esp32-c6-idf.yaml
+          - tests/build/portal/test-asset.esp32-c6-idf.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

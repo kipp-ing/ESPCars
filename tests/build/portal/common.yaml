@@ -1,0 +1,94 @@
+# portal on a fictional vehicle: one bus node, one device node, one logger node. Values of all
+# three entity kinds, a series, all four action kinds (template entities, nothing is transmitted
+# on any bus), `auth:` for the actions, an AP with the captive portal.
+packages:
+  entities: !include common_entities.yaml
+
+logger:
+
+wifi:
+  ssid: demo-network
+  password: demo-password-1
+  ap:
+    ssid: demo-portal
+    password: demo-ap-password
+
+captive_portal:
+
+portal:
+  id: demo_portal
+  build: demo-1
+  board: demo
+  node_id: 0x0A
+  mac: "02:00:00:00:00:0A"
+  owns: [vehicle]
+  root_label: Demo vehicle
+  submodule_size: 12
+  auth:
+    username: demo
+    password: demo-pass
+  tree:
+    - segment: vehicle
+      kind: vehicle
+      label: Demo vehicle parts
+      children:
+        - segment: bus
+          kind: bus
+          label: Demo bus
+          values:
+            - key: supply
+              label: Supply
+              unit: V
+              decimals: 2
+              cadence_ms: 1000
+              sensor: supply_voltage
+            - key: link
+              label: Link
+              binary_sensor: link_up
+          children:
+            - segment: cells
+              kind: module
+              label: Cell group
+              submodule_position: 2
+              series:
+                key: voltages
+                label: Voltages
+                unit: mV
+                index_base: 1
+                index_frame: submodule_cell
+                count: 6
+        - segment: device
+          kind: device
+          label: Demo device
+          values:
+            - key: state
+              label: State
+              text_sensor: link_state
+          actions:
+            - key: mode
+              label: Mode
+              select: mode_select
+            - key: interval
+              label: Interval
+              number: interval_number
+              decimals: 1
+            - key: restart
+              label: Restart
+              button: restart_button
+        - segment: logger
+          kind: logger
+          label: Demo logger
+          values:
+            - key: rate
+              label: Rate
+              unit: Hz
+              cadence_ms: 1000
+              sensor: logger_rate
+          actions:
+            - key: logging
+              label: Logging
+              switch: logging_switch
+        - segment: spare
+          kind: ecu
+          label: Spare unit
+          absent: not_compiled
