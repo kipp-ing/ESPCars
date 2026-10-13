@@ -1,25 +1,39 @@
-# ESPCars infographic layout drafts
+# ESPCars architecture illustrations
 
-Layout iteration v4, 2026-10-13. Visual direction: technical OEM presentations,
+README edition, 2026-10-13. Visual direction: technical OEM presentations,
 white background, navy typography and blue data paths. High-quality vehicle and
 board renders provide the visual base; SVG labels and data paths explain the
 system. The board is the main subject. The smaller car is a connection context:
 no functions, nodes, storage or feature leaders are placed within the vehicle.
-These are editable review drafts, not yet embedded in the main README.
+The current three illustrations are embedded in the main README. They use the
+requested replacement vehicle render with an intact exterior and preserve the
+device-first composition and schematic connections.
 
-## Current device-centred drafts
+## README illustrations
+
+| Illustration | PNG | Editable SVG |
+|---|---|---|
+| Platform overview | [PNG](platform-overview.png) | [SVG](platform-overview.svg) |
+| Local recording and host data pipeline | [PNG](data-pipeline.png) | [SVG](data-pipeline.svg) |
+| Inline CAN gateway and calibration | [PNG](inline-gateway.png) | [SVG](inline-gateway.svg) |
+
+![Platform overview](platform-overview.png)
+
+![Local recording and host data pipeline](data-pipeline.png)
+
+![Inline CAN gateway and calibration](inline-gateway.png)
+
+The replacement vehicle source is [vehicle-render-v5.png](assets/vehicle-render-v5.png).
+The board remains a hardware concept. Connections remain schematic and do not
+identify installation positions, wiring locations or a hardware pinout.
+
+## Earlier device-centred drafts (v3/v4)
 
 | Draft | Preview | Editable SVG composition |
 |---|---|---|
 | Active device platform: gateway, calibration and recording (v4) | [PNG](01-active-platform-render-v4.png) | [SVG](01-active-platform-render-v4.svg) |
 | Device recording and host collection | [PNG](02-device-data-render-v3.png) | [SVG](02-device-data-render-v3.svg) |
 | Inline CAN gateway, signal manipulation and calibration (v4) | [PNG](03-inline-gateway-render-v4.png) | [SVG](03-inline-gateway-render-v4.svg) |
-
-![Active device platform draft](01-active-platform-render-v4.png)
-
-![Device recording and host collection draft](02-device-data-render-v3.png)
-
-![Inline CAN gateway and calibration draft](03-inline-gateway-render-v4.png)
 
 The gateway illustration shows the two CAN segments and independent forwarding
 directions. Signal rewriting is distinct from CCP calibration access. Runtime
@@ -44,9 +58,9 @@ elements. The original transparent assets remain available separately:
 [vehicle](assets/vehicle-render-v2.png), [board](assets/board-render-v2.png).
 The [generation prompts](render-prompts.md) document the art direction.
 
-Vehicle and board are illustrative concepts, not a specific OEM vehicle or an
-exact depiction of the manufactured reference PCB. Connections and data paths
-are schematic. The hardware illustration is not a pinout or wiring guide.
+The earlier vehicle and board renders are illustrative concepts. The board is
+not an exact depiction of the manufactured reference PCB. Connections and data
+paths are schematic. The hardware illustration is not a pinout or wiring guide.
 
 ## Original vector drafts (v1)
 
@@ -57,7 +71,7 @@ are schematic. The hardware illustration is not a pinout or wiring guide.
 
 All versions use a 1600 × 900 SVG viewBox and 3200 × 1800 PNG previews.
 Text uses Arial with Helvetica/sans-serif fallbacks. V1 contains only vector
-geometry; v2–v4 combine embedded raster illustrations and vector annotations.
+geometry; v2–v5 combine embedded raster illustrations and vector annotations.
 No version requests remote assets or fonts. V3 and v4 reuse the existing render assets;
 no new raster generation was needed for this composition change.
 

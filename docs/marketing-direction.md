@@ -63,14 +63,15 @@ haben eine durchgängige Bedeutung. Eigenständige ESPCars-Gestaltung ohne
 
 Renderings und SVG-Overlay getrennt halten; für portable SVGs werden die Raster-
 Assets eingebettet. Texte, Verbindungslinien und Diagramme bleiben editierbar.
-PNG für Einbettungen exportieren. Fahrzeug und Board sind konzeptionelle
-Illustrationen, keine Abbildungen eines bestimmten OEM-Modells oder des exakten
-Referenz-PCBs.
+PNG für Einbettungen exportieren. Das Fahrzeug-Rendering folgt dem ausdrücklich
+gewünschten Fahrzeugmotiv; das Board bleibt eine konzeptionelle Illustration,
+keine Abbildung des exakten Referenz-PCBs. Das Fahrzeug zeigt eine geschlossene
+Karosserie und bekommt weiterhin keine Funktions- oder Einbauortmarker.
 Querformat für README und Präsentationen, separat komponierte Hochformate für
-Social Media. Erste Layoutentwürfe für Motive 1 und 2 liegen unter
-[`marketing/figures/`](marketing/figures/README.md); sie werden vor einer
-Einbettung in den öffentlichen README gemeinsam überarbeitet. Motive 3–5
-bleiben Vorschläge.
+Social Media. Plattformüberblick, Datenkette und Inline-Gateway sind mit dem
+aktualisierten Fahrzeugmotiv im README eingebettet. Quellen und frühere
+Layoutentwürfe liegen unter [`marketing/figures/`](marketing/figures/README.md).
+Die weiteren Motive bleiben Vorschläge.
 
 ### 1. The infrastructure around your application
 
@@ -154,7 +155,8 @@ deklarierte Aktionen. Keine erfundenen automatischen Busdiagnosen im Screenshot.
 
 Zuerst Motive 1 und 2 für Produktverständnis und Nutzen entwickeln. Motiv 3
 liefert anschließend technische Tiefe. Motive 4 und 5 ergänzen die Serie.
-Layoutentwürfe gemeinsam verbessern, danach final ausarbeiten und im README einbetten.
+Plattformüberblick, Datenkette und das ergänzende Gateway-Motiv sind ausgearbeitet
+und im README eingebettet. Weitere Motive und die Demo folgen als eigener Ausbau.
 
 ## Zusätzliches Motiv: inline gateway and tuning
 

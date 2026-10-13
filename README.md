@@ -14,8 +14,9 @@ Built on ESPHome and ESP32, it combines application logic and connectivity with
 CAN, LIN, diagnostic and calibration access, local recording, a browser interface
 and automatic data collection. The environment supports development on the bench,
 active vehicle integration, tuning experiments and analysis after a test run.
-Choose the components your application
-needs; target support is listed below.
+Choose the components your application needs; target support is listed below.
+
+![ESPCars platform: vehicle connection, ESP32 device and application capabilities](docs/marketing/figures/platform-overview.png)
 
 ## From application logic to vehicle communication
 
@@ -36,6 +37,8 @@ frames, translate identifiers and rewrite signal fields as frames pass through.
 Signal values can change at runtime through ESPHome automations or explicitly
 configured portal controls. Supported CRC-8 correction can be applied to modified
 frames when configured.
+
+![Inline CAN gateway: independent routes, signal manipulation and calibration access](docs/marketing/figures/inline-gateway.png)
 
 Use this for signal adaptation, controlled fault injection, ECU integration tests
 and tuning experiments. Two supported CAN controllers provide the two sides of
@@ -71,6 +74,8 @@ system at the bench and inside the vehicle.
 Record CAN and LIN frames and firmware events locally while the vehicle is in
 use. Recordings carry device and firmware identity, their time basis and explicit
 markers when retention discards uncollected chunks.
+
+![Local SD recording and automatic host collection, archiving, decoding and publication](docs/marketing/figures/data-pipeline.png)
 
 When the device is reachable over WiFi, a scheduled host collector retrieves the
 recordings automatically. It resumes interrupted downloads, verifies the files
