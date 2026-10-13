@@ -46,14 +46,16 @@ oder öffentliche Demo bereits existiert.
 ## Visuelle Richtung
 
 Stil technischer Präsentationen großer OEMs: weißer Hintergrund, präzises
-16:9-Raster, sachliche Sans-Serif-Typografie und viel Freiraum. Hochwertige
-Board-Renderings bilden das Hauptmotiv; editierbare SVG-Labels und Datenpfade
-erklären die Funktionen am Gerät. Das Fahrzeug bleibt ein kleines Kontextmotiv,
+16:9-Raster, sachliche Sans-Serif-Typografie und viel Freiraum. Die ersten
+klaren SVG-Blockdiagramme bestimmen den Aufbau: Anwendung, Komponenten,
+Firmware-Grundlage und Host-Datenkette sind als logische Module dargestellt.
+Platinen-Renderings werden in den README-Grafiken nicht verwendet.
+Das Fahrzeug bleibt als einziges Rendering ein kleines Kontextmotiv,
 das über eine schematische CAN/LIN-Verbindung an das Gerät angebunden ist.
 **Keine Funktionen, Geräte, SD-Marker oder Anschlüsse im Fahrzeug lokalisieren.**
 Verbindungslinien enden außerhalb der Fahrzeugsilhouette; sie stellen keine
-konkrete Einbauposition oder Fahrzeugverkabelung dar. Der Board-Ausschnitt zeigt
-ESP32 und Peripherie, ohne daraus eine verbindliche Pinbelegung abzuleiten.
+konkrete Einbauposition oder Fahrzeugverkabelung dar. Die Geräteblöcke zeigen
+Softwarefähigkeiten und Datenflüsse, keine Leiterplatte oder Pinbelegung.
 Dunkles Navy trägt Titel und Anwendungsebene; ein klares technisches
 Blau markiert Datenflüsse und aktive Elemente. Grau zeigt Systemgrenzen und
 Anfragen; Amber ist für fehlende Konnektivität oder Hinweise reserviert.
@@ -64,8 +66,7 @@ haben eine durchgängige Bedeutung. Eigenständige ESPCars-Gestaltung ohne
 Renderings und SVG-Overlay getrennt halten; für portable SVGs werden die Raster-
 Assets eingebettet. Texte, Verbindungslinien und Diagramme bleiben editierbar.
 PNG für Einbettungen exportieren. Das Fahrzeug-Rendering folgt dem ausdrücklich
-gewünschten Fahrzeugmotiv; das Board bleibt eine konzeptionelle Illustration,
-keine Abbildung des exakten Referenz-PCBs. Das Fahrzeug zeigt eine geschlossene
+gewünschten Fahrzeugmotiv. Das Fahrzeug zeigt eine geschlossene
 Karosserie und bekommt weiterhin keine Funktions- oder Einbauortmarker.
 Querformat für README und Präsentationen, separat komponierte Hochformate für
 Social Media. Plattformüberblick, Datenkette und Inline-Gateway sind mit dem
@@ -77,14 +78,13 @@ Die weiteren Motive bleiben Vorschläge.
 
 **Aussage:** Eine Anwendung bekommt eine gemeinsame Infrastruktur.
 
-**Bild:** Ein großes ESP32-Board-Rendering steht im Mittelpunkt. Ein deutlich
-kleineres Fahrzeug wird über eine schematische Busverbindung angebunden.
-CAN-Gateway / MITM mit Signalmanipulation, LIN, Diagnose / Kalibrierung, Logging
-und Webinterface stehen als Fähigkeiten
-neben dem Gerät; eine gemeinsame Klammer verbindet sie mit dem ganzen Gerät.
-Die ESPHome-Grundlage wird als ruhiges Fundament darunter sichtbar. Es gibt
-keine Feature-Callouts oder Platzierungsmarker auf dem Fahrzeug. Die
-Host-Datenkette folgt in Motiv 2.
+**Bild:** Der zentrale Gerätebereich enthält einen großen Block `Your application`.
+Darunter liegen CAN/LIN mit Gateway/MITM und Signal-Rewrite, Diagnose mit
+Kalibrierzugriff, Recording, Portal und die ESPHome-Grundlage. Links verbinden
+sich ein kleiner Fahrzeugkontext und Phone/Laptop mit den logischen Modulen;
+rechts liegen Collector, überprüftes Archiv und Decode/Publish. Das entspricht
+dem ersten Architekturbild, ergänzt um das gewünschte Fahrzeugmotiv und die
+aktiven Fähigkeiten. Keine Leiterplatte und keine Feature-Marker im Fahrzeug.
 
 **Headline:** `Build the application. Reuse the infrastructure.`
 
@@ -94,14 +94,12 @@ Host-Datenkette folgt in Motiv 2.
 
 **Aussage:** Aufzeichnung und spätere automatische Abholung bilden einen Workflow.
 
-**Bild:** Ein kleines Fahrzeug-/Prüfstandsmotiv verbindet sich mit dem großen
-ESP32-Recorder. Aufnahme, RAM-Puffer und SD-Aufzeichnung werden innerhalb des
-Gerätebereichs beschrieben. Datenfluss und Host-Pull liegen ausschließlich
-zwischen Gerät und Host; am Fahrzeug sind keine Funktionen lokalisiert.
-`WiFi unavailable` und fortgesetzte SD-Aufzeichnung werden dem Gerät zugeordnet.
-Im erreichbaren Netz zieht der Host die versiegelten Dateien; danach folgen
-Verifikation, Archiv und Dekodierung. Der Collector wird ausdrücklich als Host
-dargestellt, nicht als automatischer Cloud-Push aus dem Gerät.
+**Bild:** Die drei Phasen des ersten Ablaufbilds bleiben erhalten: Configure/Verify
+am Prüfstand, lokale Aufzeichnung während der Testfahrt, anschließende Abholung
+und Auswertung. Das ursprüngliche Auto-Symbol wird durch das kleine Fahrzeug-
+Rendering ersetzt. Bus-Recording und SD stehen als eigene Blöcke unter dem Auto,
+ohne Funktionen darin zu lokalisieren. Die Host-Phase zeigt Pull, Prüfung, Archiv,
+Bestätigung und Dekodierung. Keine Platinenabbildung.
 
 **Headline:** `Record on the road. Analyse when you return.`
 

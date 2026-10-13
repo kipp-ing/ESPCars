@@ -1,13 +1,14 @@
 # ESPCars architecture illustrations
 
 README edition, 2026-10-13. Visual direction: technical OEM presentations,
-white background, navy typography and blue data paths. High-quality vehicle and
-board renders provide the visual base; SVG labels and data paths explain the
-system. The board is the main subject. The smaller car is a connection context:
+white background, navy typography and blue data paths. The original SVG block
+diagrams provide the layout: application, firmware, components and host tools
+are logical modules. A small vehicle render is the only raster illustration.
+There are no PCB renderings in the current README images. The car is a connection context:
 no functions, nodes, storage or feature leaders are placed within the vehicle.
 The current three illustrations are embedded in the main README. They use the
-requested replacement vehicle render with an intact exterior and preserve the
-device-first composition and schematic connections.
+requested replacement vehicle render with an intact exterior and restore the
+first platform-architecture and three-stage workflow layouts.
 
 ## README illustrations
 
@@ -24,10 +25,11 @@ device-first composition and schematic connections.
 ![Inline CAN gateway and calibration](inline-gateway.png)
 
 The replacement vehicle source is [vehicle-render-v5.png](assets/vehicle-render-v5.png).
-The board remains a hardware concept. Connections remain schematic and do not
-identify installation positions, wiring locations or a hardware pinout.
+Connections remain schematic and do not identify installation positions,
+wiring locations or a hardware pinout. The gateway illustration uses application,
+bridge, filter, rewrite and runtime-value blocks in place of the previous board render.
 
-## Earlier device-centred drafts (v3/v4)
+## Earlier board-render drafts (v3/v4, superseded)
 
 | Draft | Preview | Editable SVG composition |
 |---|---|---|
@@ -71,7 +73,8 @@ paths are schematic. The hardware illustration is not a pinout or wiring guide.
 
 All versions use a 1600 × 900 SVG viewBox and 3200 × 1800 PNG previews.
 Text uses Arial with Helvetica/sans-serif fallbacks. V1 contains only vector
-geometry; v2–v5 combine embedded raster illustrations and vector annotations.
+geometry; current README diagrams combine vector geometry with only the vehicle
+illustration. Earlier rendering experiments also contained PCB illustrations.
 No version requests remote assets or fonts. V3 and v4 reuse the existing render assets;
 no new raster generation was needed for this composition change.
 
