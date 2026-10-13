@@ -39,15 +39,22 @@ oder öffentliche Demo bereits existiert.
 ## Visuelle Richtung
 
 Stil technischer Präsentationen großer OEMs: weißer Hintergrund, präzises
-16:9-Raster, sachliche Sans-Serif-Typografie, flache Blockdiagramme und viel
-Freiraum. Dunkles Navy trägt Titel und Anwendungsebene; ein klares technisches
+16:9-Raster, sachliche Sans-Serif-Typografie und viel Freiraum. Hochwertige
+Fahrzeug- und Board-Renderings bilden die visuelle Basis; editierbare SVG-Labels,
+Leader-Lines und Datenpfade erklären die Funktionen darüber. Das Fahrzeug darf
+attraktiv und hochwertig wirken; der Board-Ausschnitt zeigt ESP32 und Peripherie.
+Dunkles Navy trägt Titel und Anwendungsebene; ein klares technisches
 Blau markiert Datenflüsse und aktive Elemente. Grau zeigt Systemgrenzen und
 Anfragen; Amber ist für fehlende Konnektivität oder Hinweise reserviert.
 Gerät und Host bleiben als getrennte Bereiche erkennbar. Farben und Linienstile
 haben eine durchgängige Bedeutung. Eigenständige ESPCars-Gestaltung ohne
 Übernahme einer OEM-Marke.
 
-Diagramme mit editierbarem Text als SVG anlegen, PNG für Einbettungen exportieren.
+Renderings und SVG-Overlay getrennt halten; für portable SVGs werden die Raster-
+Assets eingebettet. Texte, Verbindungslinien und Diagramme bleiben editierbar.
+PNG für Einbettungen exportieren. Fahrzeug und Board sind konzeptionelle
+Illustrationen, keine Abbildungen eines bestimmten OEM-Modells oder des exakten
+Referenz-PCBs.
 Querformat für README und Präsentationen, separat komponierte Hochformate für
 Social Media. Erste Layoutentwürfe für Motive 1 und 2 liegen unter
 [`marketing/figures/`](marketing/figures/README.md); sie werden vor einer
@@ -58,11 +65,12 @@ bleiben Vorschläge.
 
 **Aussage:** Eine Anwendung bekommt eine gemeinsame Infrastruktur.
 
-**Bild:** Ein großer zentraler Block `Your application` auf einem ESPHome-Fundament.
-Links kommen CAN und LIN an; rechts verlassen Daten das Gerät in Richtung
-Collector, Archiv und Auswertung. Diagnose, Logger und lokales Portal sitzen als
-klar getrennte Funktionsbereiche am Gerät. Eine kleine Legende trennt Device
-und Host. Typografischer Fokus auf der Anwendung, keine gleich großen Feature-Kacheln.
+**Bild:** Ein hochwertiges Fahrzeug-Rendering mit dezentem Cutaway bildet den
+Anwendungskontext. SVG-Callouts zeigen CAN/LIN, Diagnose, lokales Logging und
+Browser-Zugriff. Ein Detail-Leader führt zu einem vergrößerten ESP32-Board-
+Rendering mit Transceivern, GPIO und SD. Die ESPHome-Grundlage wird als ruhiges
+gemeinsames Fundament darunter sichtbar. Die v1-Blockarchitektur bleibt als
+ergänzendes technisches Diagramm erhalten; die Host-Datenkette folgt in Motiv 2.
 
 **Headline:** `Build the application. Reuse the infrastructure.`
 
@@ -72,8 +80,9 @@ und Host. Typografischer Fokus auf der Anwendung, keine gleich großen Feature-K
 
 **Aussage:** Aufzeichnung und spätere automatische Abholung bilden einen Workflow.
 
-**Bild:** Drei große Szenen entlang einer Zeitachse: Bench, Vehicle, Archive.
-Ein blauer Datenpfad läuft durch alle Szenen. Unter der Fahrt liegt ein
+**Bild:** Board-Rendering, Fahrzeug-Rendering und Host-Datenkette bilden die drei
+Stationen Konfiguration, Fahrzeugbetrieb und Auswertung. Ein blauer Datenpfad
+verbindet die Stationen; das Fahrzeug trägt ein SVG-SD-Overlay. Unter der Fahrt liegt ein
 Abschnitt `WiFi unavailable`, während die SD-Aufzeichnung weiterläuft. Zurück im
 erreichbaren Netz zieht der Host die versiegelten Dateien; danach folgen
 Verifikation, Archiv und Dekodierung. Der Collector wird ausdrücklich als Host
