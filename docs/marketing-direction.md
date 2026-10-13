@@ -38,14 +38,21 @@ oder öffentliche Demo bereits existiert.
 
 ## Visuelle Richtung
 
-Technische Präzision mit einer starken Bildidee pro Grafik. Große Typografie,
-wenige Labels, klare Hierarchie und viel Freiraum. Graphit und gebrochenes Weiß
-bilden die Basis; Türkis markiert Datenflüsse, Amber markiert Hinweise und
-Unterbrechungen. Farben haben eine durchgängige Bedeutung.
+Stil technischer Präsentationen großer OEMs: weißer Hintergrund, präzises
+16:9-Raster, sachliche Sans-Serif-Typografie, flache Blockdiagramme und viel
+Freiraum. Dunkles Navy trägt Titel und Anwendungsebene; ein klares technisches
+Blau markiert Datenflüsse und aktive Elemente. Grau zeigt Systemgrenzen und
+Anfragen; Amber ist für fehlende Konnektivität oder Hinweise reserviert.
+Gerät und Host bleiben als getrennte Bereiche erkennbar. Farben und Linienstile
+haben eine durchgängige Bedeutung. Eigenständige ESPCars-Gestaltung ohne
+Übernahme einer OEM-Marke.
 
 Diagramme mit editierbarem Text als SVG anlegen, PNG für Einbettungen exportieren.
 Querformat für README und Präsentationen, separat komponierte Hochformate für
-Social Media. Die folgenden Motive sind Vorschläge, noch keine fertigen Assets.
+Social Media. Erste Layoutentwürfe für Motive 1 und 2 liegen unter
+[`marketing/figures/`](marketing/figures/README.md); sie werden vor einer
+Einbettung in den öffentlichen README gemeinsam überarbeitet. Motive 3–5
+bleiben Vorschläge.
 
 ### 1. The infrastructure around your application
 
@@ -66,7 +73,7 @@ und Host. Typografischer Fokus auf der Anwendung, keine gleich großen Feature-K
 **Aussage:** Aufzeichnung und spätere automatische Abholung bilden einen Workflow.
 
 **Bild:** Drei große Szenen entlang einer Zeitachse: Bench, Vehicle, Archive.
-Ein türkisfarbener Datenpfad läuft durch alle Szenen. Unter der Fahrt liegt ein
+Ein blauer Datenpfad läuft durch alle Szenen. Unter der Fahrt liegt ein
 Abschnitt `WiFi unavailable`, während die SD-Aufzeichnung weiterläuft. Zurück im
 erreichbaren Netz zieht der Host die versiegelten Dateien; danach folgen
 Verifikation, Archiv und Dekodierung. Der Collector wird ausdrücklich als Host
