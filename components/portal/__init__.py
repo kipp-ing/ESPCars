@@ -8,10 +8,16 @@ The component consumes no bus frames itself; it reads other components' already-
 entities, only from the main loop and only when the YAML declares the action.
 
 Another external component can add data providers at import time with
-`register_absent_provider()` and `register_series_provider()`; the portal ships none.
+`register_absent_provider()` and `register_series_provider()`; the portal ships one of its own,
+the absent provider `switch_off` (spec 4.6).
+
+Static UI hints (spec 4.9: `lang`, `layout`, value `expert`/limits, action `confirm`/`group`/
+`before`, node `borrow`) are written into the page source at codegen (`inject_ui`), so they cost
+flash only.
 """
 
 import gzip
+import json
 import logging
 import re
 from pathlib import Path
@@ -98,6 +104,28 @@ CONF_EQUALS = "equals"
 CONF_WHY = "why"
 CONF_SOURCE = "source"
 CONF_PROVIDER = "provider"
+# Spec v1.5 (4.3, 4.7, 4.9).
+CONF_LANG = "lang"
+CONF_LAYOUT = "layout"
+CONF_TABS = "tabs"
+CONF_GLANCE = "glance"
+CONF_NODES = "nodes"
+CONF_EXPERT = "expert"
+CONF_WARN = "warn"
+CONF_BAD = "bad"
+CONF_BELOW = "below"
+CONF_ABOVE = "above"
+CONF_WARN_WHEN = "warn_when"
+CONF_BAD_WHEN = "bad_when"
+CONF_CONFIRM = "confirm"
+CONF_GROUP = "group"
+CONF_BEFORE = "before"
+CONF_ACTION = "action"
+CONF_ON_DEMAND = "on_demand"
+CONF_BORROW = "borrow"
+
+# The page placeholder the UI hints replace (spec 4.9). A page without it is embedded unchanged.
+UI_TOKEN = "/*PORTAL_UI*/null"
 
 # Written back during validation so `esphome config` shows the effective result, and so to_code
 # reads the very values the tests assert on.
@@ -109,6 +137,8 @@ CONF_RESOLVED_COMPONENTS = "resolved_components"
 SUBMODULE_CELL_FRAME = "submodule_cell"
 
 _IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_REF_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*/[a-z][a-z0-9_]*$")
+_NODE_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
 _MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 # Top-level config keys that are infrastructure, not behaviour: never part of served_by.components.
@@ -161,7 +191,9 @@ ABSENT_PROVIDERS: dict = {}
 SERIES_PROVIDERS: dict = {}
 
 
-def register_absent_provider(name, *, args, source_type, body, evidence=None, for_why=()):
+def register_absent_provider(name, *, args, source_type, body, evidence=None, for_why=(), default_why=None):
+    """`default_why`: the why-code a node gets when it declares `absent_when` with this provider
+    but no `absent:` of its own (spec 4.1)."""
     ABSENT_PROVIDERS[name] = {
         "args": dict(args),
         "source_type": source_type,
@@ -169,6 +201,7 @@ def register_absent_provider(name, *, args, source_type, body, evidence=None, fo
         "body": body,
         "evidence": evidence,
         "for_why": tuple(for_why),
+        "default_why": default_why,
     }
 
 
@@ -314,6 +347,14 @@ def _unique_segments(nodes):
     return nodes
 
 
+def _limit_bound(value):
+    """`{below: x, above: y}`, at least one (spec 4.3)."""
+    value = cv.Schema({cv.Optional(CONF_BELOW): cv.float_, cv.Optional(CONF_ABOVE): cv.float_})(value)
+    if not value:
+        raise cv.Invalid("a limit needs at least one of 'below' or 'above'")
+    return value
+
+
 VALUE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_KEY): _value_key,
@@ -321,6 +362,11 @@ VALUE_SCHEMA = cv.Schema(
         cv.Optional(CONF_UNIT): cv.string_strict,
         cv.Optional(CONF_DECIMALS, default=0): cv.int_range(min=0, max=6),
         cv.Optional(CONF_CADENCE_MS): cv.int_range(min=1),
+        cv.Optional(CONF_EXPERT, default=False): cv.boolean,
+        cv.Optional(CONF_WARN): _limit_bound,
+        cv.Optional(CONF_BAD): _limit_bound,
+        cv.Optional(CONF_WARN_WHEN): cv.boolean,
+        cv.Optional(CONF_BAD_WHEN): cv.boolean,
         cv.Exclusive(CONF_SENSOR, "entity"): cv.use_id(sensor.Sensor),
         cv.Exclusive(CONF_TEXT_SENSOR, "entity"): cv.use_id(text_sensor.TextSensor),
         cv.Exclusive(CONF_BINARY_SENSOR, "entity"): cv.use_id(binary_sensor.BinarySensor),
@@ -349,7 +395,20 @@ def _no_cadence_on_binary_sensor(value):
     return value
 
 
-VALUE_SCHEMA = cv.All(VALUE_SCHEMA, _require_one_entity, _no_cadence_on_binary_sensor)
+def _limits_fit_entity(value):
+    """Spec 4.3: numeric limits on `sensor` values, `*_when` on `binary_sensor` values, none on text."""
+    numeric = [k for k in (CONF_WARN, CONF_BAD) if k in value]
+    boolean = [k for k in (CONF_WARN_WHEN, CONF_BAD_WHEN) if k in value]
+    if CONF_TEXT_SENSOR in value and (numeric or boolean):
+        raise cv.Invalid(f"a 'text_sensor' value carries no limits ({numeric + boolean})")
+    if CONF_BINARY_SENSOR in value and numeric:
+        raise cv.Invalid(f"{numeric} are numeric limits; a 'binary_sensor' value uses 'warn_when'/'bad_when'")
+    if CONF_SENSOR in value and boolean:
+        raise cv.Invalid(f"{boolean} are boolean limits; a 'sensor' value uses 'warn'/'bad' with below/above")
+    return value
+
+
+VALUE_SCHEMA = cv.All(VALUE_SCHEMA, _require_one_entity, _no_cadence_on_binary_sensor, _limits_fit_entity)
 
 _index_frame_name = _identifier("index_frame")
 
@@ -421,6 +480,33 @@ UNKNOWN_WHEN_SCHEMA = cv.Schema(
 )
 
 _ACTION_CONTROL_KEYS = (CONF_SWITCH, CONF_BUTTON, CONF_SELECT, CONF_NUMBER)
+
+
+def _ref(what):
+    def validate(value):
+        value = cv.string_strict(value)
+        if not _REF_RE.match(value):
+            raise cv.Invalid(f"{what} {value!r} must be '<node id>/<key>' (e.g. 'bus.unit/rate')")
+        return value
+
+    return validate
+
+
+def _node_id_ref(value):
+    value = cv.string_strict(value)
+    if not _NODE_ID_RE.match(value):
+        raise cv.Invalid(f"node id {value!r} must be a dotted id (e.g. 'bus.unit')")
+    return value
+
+
+# `value` is typed against the target control once the whole tree is known (_check_ui_refs).
+BEFORE_SCHEMA = cv.Schema({cv.Required(CONF_ACTION): _ref("action ref"), cv.Required(CONF_VALUE): cv.valid})
+BORROW_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_ACTION): _ref("action ref"),
+        cv.Optional(CONF_BEFORE): cv.All(cv.ensure_list(BEFORE_SCHEMA), cv.Length(min=1)),
+    }
+)
 DEFAULT_ACTION_DECIMALS = 2
 
 
@@ -446,6 +532,9 @@ ACTION_SCHEMA = cv.All(
             cv.Optional(CONF_SELECT): cv.use_id(select.Select),
             cv.Optional(CONF_NUMBER): cv.use_id(number.Number),
             cv.Optional(CONF_DECIMALS): cv.int_range(min=0, max=6),
+            cv.Optional(CONF_CONFIRM): cv.one_of("hold", lower=True),
+            cv.Optional(CONF_GROUP): _nonempty_string,
+            cv.Optional(CONF_BEFORE): cv.All(cv.ensure_list(BEFORE_SCHEMA), cv.Length(min=1)),
         }
     ),
     _validate_action,
@@ -458,7 +547,16 @@ def _node_schema(value):
 
 def _validate_node_cross_fields(value):
     if CONF_ABSENT_WHEN in value and CONF_ABSENT not in value:
-        raise cv.Invalid("'absent_when' requires 'absent' on the same node")
+        default_why = ABSENT_PROVIDERS[value[CONF_ABSENT_WHEN][CONF_PROVIDER]].get("default_why")
+        if default_why is None:
+            raise cv.Invalid("'absent_when' requires 'absent' on the same node")
+        value[CONF_ABSENT] = default_why
+
+    if value.get(CONF_ON_DEMAND) and CONF_VALUES not in value:
+        raise cv.Invalid(
+            "'on_demand: true' needs 'values': the node is 'not_requested' until one of its own "
+            "values has a reading, so without values it would be for ever"
+        )
 
     if CONF_ABSENT in value:
         if CONF_ABSENT_WHEN in value:
@@ -561,6 +659,8 @@ NODE_SCHEMA = cv.All(
             cv.Optional(CONF_TRUST_FROM): _value_key,
             cv.Optional(CONF_SERIES): SERIES_SCHEMA,
             cv.Optional(CONF_SUBMODULE_POSITION): cv.int_range(min=1),
+            cv.Optional(CONF_ON_DEMAND, default=False): cv.boolean,
+            cv.Optional(CONF_BORROW): cv.All(cv.ensure_list(BORROW_SCHEMA), cv.Length(min=1)),
         }
     ),
     _validate_node_cross_fields,
@@ -693,12 +793,129 @@ def _validate_owns(config):
     config[CONF_RESOLVED_OWNS] = owns
 
 
+def _tree_refs(config):
+    """(node ids, value refs -> value conf, action refs -> (control, action conf)), refs as
+    `<node id>/<key>` (spec 4.9)."""
+    node_ids, value_refs, action_refs = [], {}, {}
+    for node_id, node in _iter_tree(config[CONF_TREE], ""):
+        node_ids.append(node_id)
+        for value_conf in node.get(CONF_VALUES, []):
+            value_refs[f"{node_id}/{value_conf[CONF_KEY]}"] = value_conf
+        for action_conf in node.get(CONF_ACTIONS, []):
+            control = next(k for k in _ACTION_CONTROL_KEYS if k in action_conf)
+            action_refs[f"{node_id}/{action_conf[CONF_KEY]}"] = (control, action_conf)
+    return node_ids, value_refs, action_refs
+
+
+def _unknown_ref(what, ref, valid):
+    return cv.Invalid(f"{what} {ref!r} names nothing in 'tree'; valid: {sorted(valid) or 'none'}")
+
+
+_BEFORE_VALUE = {CONF_SELECT: cv.string, CONF_NUMBER: cv.float_, CONF_SWITCH: cv.boolean}
+
+
+def _check_before(where, entries, action_refs, own_ref=None):
+    """Spec 4.7: each `before` entry names a select/number/switch action (not the action itself)
+    and carries a value of that control's type; written back typed."""
+    settable = {ref for ref, (control, _) in action_refs.items() if control in _BEFORE_VALUE}
+    for entry in entries:
+        ref = entry[CONF_ACTION]
+        if ref not in action_refs:
+            raise _unknown_ref(f"{where}: before.action", ref, settable)
+        control, _ = action_refs[ref]
+        if control not in _BEFORE_VALUE:
+            raise cv.Invalid(
+                f"{where}: before.action {ref!r} is a {control}; 'before' can only set a select, number or "
+                f"switch (valid: {sorted(settable) or 'none'})"
+            )
+        if ref == own_ref:
+            raise cv.Invalid(f"{where}: before.action {ref!r} is the action itself")
+        if isinstance(entry[CONF_VALUE], bool) and control != CONF_SWITCH:
+            raise cv.Invalid(f"{where}: before {ref!r} is a {control}; a bool value fits only a switch")
+        try:
+            entry[CONF_VALUE] = _BEFORE_VALUE[control](entry[CONF_VALUE])
+        except cv.Invalid as err:
+            raise cv.Invalid(f"{where}: before {ref!r} is a {control}: {err}") from err
+
+
+def _check_ui_refs(config):
+    """Spec 4.9: every ref in `layout`, `before` and `borrow` names something in the tree."""
+    node_ids, value_refs, action_refs = _tree_refs(config)
+    tabs = config.get(CONF_LAYOUT, {}).get(CONF_TABS, [])
+    for i, tab in enumerate(tabs):
+        for ref in tab.get(CONF_GLANCE, []):
+            if ref not in value_refs:
+                raise _unknown_ref(f"layout.tabs[{i}].glance", ref, value_refs)
+        for node_id in tab.get(CONF_NODES, []):
+            if node_id not in node_ids:
+                raise _unknown_ref(f"layout.tabs[{i}].nodes", node_id, node_ids)
+    for node_id, node in _iter_tree(config[CONF_TREE], ""):
+        for action_conf in node.get(CONF_ACTIONS, []):
+            own = f"{node_id}/{action_conf[CONF_KEY]}"
+            if CONF_BEFORE in action_conf:
+                _check_before(f"action {own!r}", action_conf[CONF_BEFORE], action_refs, own)
+        for entry in node.get(CONF_BORROW, []):
+            if entry[CONF_ACTION] not in action_refs:
+                raise _unknown_ref(f"node {node_id!r}: borrow.action", entry[CONF_ACTION], action_refs)
+            if CONF_BEFORE in entry:
+                _check_before(f"node {node_id!r} borrow {entry[CONF_ACTION]!r}", entry[CONF_BEFORE], action_refs)
+
+
+def _entity_config(full, domain, entity_id):
+    for item in full.get(domain, []) or []:
+        if isinstance(item, dict) and CONF_ID in item and str(item[CONF_ID]) == str(entity_id):
+            return item
+    return None
+
+
+def _check_before_against_entities(config, full):
+    """Spec 4.7: where the target entity's config is known (a select's `options`, a number's
+    `min_value`/`max_value`), the `before` value must fit it."""
+    _, _, action_refs = _tree_refs(config)
+    entries = []
+    for node_id, node in _iter_tree(config[CONF_TREE], ""):
+        for action_conf in node.get(CONF_ACTIONS, []):
+            entries += [(f"action '{node_id}/{action_conf[CONF_KEY]}'", e) for e in action_conf.get(CONF_BEFORE, [])]
+        for b in node.get(CONF_BORROW, []):
+            entries += [(f"node {node_id!r} borrow {b[CONF_ACTION]!r}", e) for e in b.get(CONF_BEFORE, [])]
+    for where, entry in entries:
+        control, action_conf = action_refs[entry[CONF_ACTION]]
+        target = _entity_config(full, control, action_conf[control])
+        if target is None:
+            continue
+        value = entry[CONF_VALUE]
+        options = target.get("options")
+        if control == CONF_SELECT and isinstance(options, list) and value not in [str(o) for o in options]:
+            raise cv.Invalid(
+                f"{where}: before {entry[CONF_ACTION]!r} value {value!r} is not an option of "
+                f"{action_conf[control]} ({[str(o) for o in options]})"
+            )
+        if control == CONF_NUMBER:
+            low, high = target.get("min_value"), target.get("max_value")
+            if (isinstance(low, (int, float)) and value < low) or (isinstance(high, (int, float)) and value > high):
+                raise cv.Invalid(
+                    f"{where}: before {entry[CONF_ACTION]!r} value {value} is outside "
+                    f"[{low}, {high}] of {action_conf[control]}"
+                )
+
+
 def _check_tree(config):
     """Rules that need the whole tree. Run at schema time (also reachable without the loader) and
     again in the final validation; both are idempotent."""
     _validate_owns(config)
     _resolve_submodule_positions(config)
+    _check_ui_refs(config)
     return config
+
+
+TAB_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_LABEL): _nonempty_string,
+        cv.Optional(CONF_GLANCE, default=[]): cv.All(cv.ensure_list(_ref("glance ref")), cv.Length(max=4)),
+        cv.Optional(CONF_NODES, default=[]): cv.ensure_list(_node_id_ref),
+    }
+)
+LAYOUT_SCHEMA = cv.Schema({cv.Optional(CONF_TABS, default=[]): cv.All(cv.ensure_list(TAB_SCHEMA), cv.Length(max=5))})
 
 
 def _consume_sockets(config):
@@ -726,6 +943,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SUBMODULE_SIZE): cv.int_range(min=1),
             cv.Optional(CONF_WEB_ASSET): _web_asset,
             cv.Optional(CONF_AUTH): AUTH_SCHEMA,
+            cv.Optional(CONF_LANG, default="en"): cv.one_of("en", "de", lower=True),
+            cv.Optional(CONF_LAYOUT): LAYOUT_SCHEMA,
             cv.Required(CONF_TREE): cv.All(cv.ensure_list(_node_schema), cv.Length(min=1), _unique_segments),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -747,11 +966,89 @@ def _final_validate(config):
         )
 
     _check_tree(config)
+    _check_before_against_entities(config, full)
     config[CONF_RESOLVED_COMPONENTS] = sorted(key for key in full if key not in _NON_COMPONENT_TOP_LEVEL_KEYS)
     return config
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
+
+
+def _num(x):
+    """Whole floats as ints in the hints JSON (`95.0` -> `95`)."""
+    return int(x) if isinstance(x, float) and x.is_integer() else x
+
+
+def _before_json(entries):
+    return [{"action": e[CONF_ACTION], "value": _num(e[CONF_VALUE])} for e in entries]
+
+
+def build_ui_hints(config) -> dict:
+    """The static UI hints of spec 4.9 from a validated config."""
+    tabs = [
+        {"label": tab[CONF_LABEL], "glance": list(tab[CONF_GLANCE]), "nodes": list(tab[CONF_NODES])}
+        for tab in config.get(CONF_LAYOUT, {}).get(CONF_TABS, [])
+    ]
+    values, actions, borrow = {}, {}, {}
+    for node_id, node in _iter_tree(config[CONF_TREE], ""):
+        for v in node.get(CONF_VALUES, []):
+            hint = {}
+            if v.get(CONF_EXPERT):
+                hint["expert"] = True
+            for key in (CONF_WARN, CONF_BAD):
+                if key in v:
+                    hint[key] = {k: _num(v[key][k]) for k in (CONF_BELOW, CONF_ABOVE) if k in v[key]}
+            for key in (CONF_WARN_WHEN, CONF_BAD_WHEN):
+                if key in v:
+                    hint[key] = v[key]
+            if hint:
+                values[f"{node_id}/{v[CONF_KEY]}"] = hint
+        for a in node.get(CONF_ACTIONS, []):
+            hint = {}
+            for key in (CONF_CONFIRM, CONF_GROUP):
+                if key in a:
+                    hint[key] = a[key]
+            if CONF_BEFORE in a:
+                hint["before"] = _before_json(a[CONF_BEFORE])
+            if hint:
+                actions[f"{node_id}/{a[CONF_KEY]}"] = hint
+        if CONF_BORROW in node:
+            borrow[node_id] = [
+                {"action": b[CONF_ACTION], **({"before": _before_json(b[CONF_BEFORE])} if CONF_BEFORE in b else {})}
+                for b in node[CONF_BORROW]
+            ]
+    return {"lang": config.get(CONF_LANG, "en"), "tabs": tabs, "values": values, "actions": actions, "borrow": borrow}
+
+
+def inject_ui(page: bytes, hints: dict) -> bytes:
+    """Spec 4.9: every `/*PORTAL_UI*/null` in the page becomes the compact hints JSON, with `<`
+    escaped so no string can close the surrounding <script>. No token -> the page unchanged."""
+    token = UI_TOKEN.encode()
+    if token not in page:
+        return page
+    text = json.dumps(hints, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
+    return page.replace(token, text.encode("utf-8"))
+
+
+def _limit_initializer(v) -> str | None:
+    """C++ aggregate initializer of core::ValueLimit, or None for a value without limits."""
+    if not any(k in v for k in (CONF_WARN, CONF_BAD, CONF_WARN_WHEN, CONF_BAD_WHEN)):
+        return None
+
+    def f(x):
+        return f"{float(x)!r}f"
+
+    def bound(key):
+        b = v.get(key, {})
+        return (
+            f"{{{str(CONF_BELOW in b).lower()}, {str(CONF_ABOVE in b).lower()}, "
+            f"{f(b.get(CONF_BELOW, 0.0))}, {f(b.get(CONF_ABOVE, 0.0))}}}"
+        )
+
+    def when(key):
+        return f"{str(key in v).lower()}, {str(bool(v.get(key, False))).lower()}"
+
+    return f"{{{bound(CONF_WARN)}, {bound(CONF_BAD)}, {when(CONF_WARN_WHEN)}, {when(CONF_BAD_WHEN)}}}"
 
 
 def _string_array(prefix, values):
@@ -818,7 +1115,8 @@ async def to_code(config):
     cg.add(paren.set_port(config[CONF_PORT]))
 
     asset_path = Path(config[CONF_WEB_ASSET]) if CONF_WEB_ASSET in config else BUILTIN_ASSET
-    compressed = gzip.compress(asset_path.read_bytes(), compresslevel=9, mtime=0)
+    page = inject_ui(asset_path.read_bytes(), build_ui_hints(config))
+    compressed = gzip.compress(page, compresslevel=9, mtime=0)
     asset = cg.progmem_array(config[CONF_WEB_ASSET_ID], list(compressed))
     cg.add(var.set_web_asset(asset, len(compressed)))
 
@@ -844,6 +1142,22 @@ async def to_code(config):
 
     null = cg.RawExpression("nullptr")
     counter = {"next": 0}
+    limit_counter = {"next": 0}
+    # switch_off evidence (spec 4.6): the first action, pre-order, bound to the same switch.
+    action_of_switch: dict[str, str] = {}
+    for node_id, node in _iter_tree(config[CONF_TREE], ""):
+        for action_conf in node.get(CONF_ACTIONS, []):
+            if CONF_SWITCH in action_conf:
+                action_of_switch.setdefault(str(action_conf[CONF_SWITCH]), f"{node_id}/{action_conf[CONF_KEY]}")
+
+    def emit_limit(value_conf):
+        init = _limit_initializer(value_conf)
+        if init is None:
+            return null
+        name = f"portal_limit_{limit_counter['next']}"
+        limit_counter["next"] += 1
+        cg.add_global(cg.RawStatement(f"static const esphome::portal::core::ValueLimit {name} = {init};"))
+        return cg.RawExpression(f"&{name}")
     # One thunk per distinct (provider, args), deduplicated by its deterministic name and scoped
     # to this call: dedup must hold within one image and never leak across validation runs.
     emitted_thunks: set[str] = set()
@@ -885,6 +1199,9 @@ async def to_code(config):
             absent_ctx = await cg.get_variable(absent_when[CONF_SOURCE])
             if spec.get("evidence"):
                 absent_evidence = spec["evidence"]
+            if spec.get("action_evidence"):
+                ref = action_of_switch.get(str(absent_when[CONF_SOURCE]))
+                absent_evidence = f'"action":"{ref}"' if ref is not None else null
 
         cg.add(
             var.add_node(
@@ -904,6 +1221,7 @@ async def to_code(config):
                 absent_fn,
                 absent_ctx,
                 absent_evidence,
+                node_conf.get(CONF_ON_DEMAND, False),
             )
         )
 
@@ -913,7 +1231,11 @@ async def to_code(config):
             decimals = value_conf[CONF_DECIMALS]
             if CONF_SENSOR in value_conf:
                 entity = await cg.get_variable(value_conf[CONF_SENSOR])
-                cg.add(var.add_value_sensor(value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, decimals, entity))
+                cg.add(
+                    var.add_value_sensor(
+                        value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, decimals, entity, emit_limit(value_conf)
+                    )
+                )
             elif CONF_TEXT_SENSOR in value_conf:
                 entity = await cg.get_variable(value_conf[CONF_TEXT_SENSOR])
                 cg.add(
@@ -921,7 +1243,11 @@ async def to_code(config):
                 )
             else:
                 entity = await cg.get_variable(value_conf[CONF_BINARY_SENSOR])
-                cg.add(var.add_value_binary_sensor(value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, entity))
+                cg.add(
+                    var.add_value_binary_sensor(
+                        value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, entity, emit_limit(value_conf)
+                    )
+                )
 
         series_conf = node_conf.get(CONF_SERIES)
         if series_conf is not None:
@@ -987,3 +1313,15 @@ async def to_code(config):
         "car",
         0xFFFF,
     )
+
+
+# The one provider the portal ships (spec 4.6): the node is absent while a switch is off. Its
+# evidence names the first action bound to the same switch (resolved in to_code).
+register_absent_provider(
+    "switch_off",
+    args={},
+    source_type=switch.Switch,
+    body="return source == nullptr || !source->state;",
+    default_why="switched_off",
+)
+ABSENT_PROVIDERS["switch_off"]["action_evidence"] = True

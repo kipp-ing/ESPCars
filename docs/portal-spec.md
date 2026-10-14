@@ -47,7 +47,7 @@ this repository may name that project, its boards, MACs, IPs or captures
 **Non-goals (v1)**
 
 - Peer mounting (`peers` stays `[]`), runtime roles, live CAN frame views.
-- Any built-in data provider for series/absence (the registry ships empty, §4.6).
+- Any built-in data provider for series, and any absence provider beyond `switch_off` (§4.6).
 - Arduino or non-ESP32 targets.
 
 ---
@@ -216,7 +216,8 @@ other frame -> null. Two nodes with the same `submodule_position` -> config erro
 
 ```python
 register_absent_provider(name, *, args: dict[str, validator], source_type: MockObjClass,
-                         body: str, evidence: str | None = None, for_why: tuple[str, ...] = ())
+                         body: str, evidence: str | None = None, for_why: tuple[str, ...] = (),
+                         default_why: str | None = None)
 register_series_provider(name, *, args: dict[str, validator], source_type: MockObjClass,
                          body: str)
 ```
@@ -723,7 +724,7 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M1-01 | `components/portal/{__init__.py,portal.h,portal.cpp,portal_core.h,index.html}` exist; `portal_core.h` includes only `<cstddef>`, `<cstdint>`, `<cstring>` and compiles in the host build | host, py (include grep) |
 | PS-M1-02 | Every schema rule of §4.1, 4.3–4.5 has an accepting and a rejecting pytest case (segment/key patterns, duplicates, exclusivity, evidence-gated codes, budget derivation incl. all null spellings, binary_sensor cadence/budget, series frame/provider rules, role rules, unknown_when/trust_from targets, text_max range, port 32767/65535) | py |
 | PS-M1-03 | `owns` rules of §4.2: unknown id, duplicate, identity-without-owns rejected; a config that compiles `uds`/`isotp` but declares `owns: []` without identity is valid; `resolved` owns equal YAML | py |
-| PS-M1-04 | Provider registry: empty by default; unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) whose text has each `{arg}` replaced by the validated value, `{{`/`}}` as literal braces, and the §4.6 names in scope | py |
+| PS-M1-04 | Provider registry: only `switch_off` by default (v1.5); unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) whose text has each `{arg}` replaced by the validated value, `{{`/`}}` as literal braces, and the §4.6 names in scope | py |
 | PS-M1-05 | Root node: id `car`, kind `car`, label `root_label` (default `Vehicle`) | py (codegen), host |
 | PS-M1-06 | `submodule_position`/`submodule_size` rules of §4.5 incl. the derived `resolved_pack_index_base` | py |
 | PS-M1-07 | Envelope emitter: all ported core cases pass (ChunkWriter framing at 4096, JSON escaping, number formatting, `parse_after`, `has_node`, resolve/derivation table, child propagation, skeleton provenance, `path`/`ancestor_role` order and cycle guard, series pairing/clamp/legend, absent_fn single evaluation, fingerprint ignores age but not state, flush failure propagates) under ASan/UBSan | host |
