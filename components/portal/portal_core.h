@@ -124,12 +124,14 @@ struct ValueSample {
   uint32_t age_ms;
   int8_t decimals;  ///< 0..6; unused when is_bool
   bool is_text;
-  bool is_bool;                      ///< value is a JSON true/false, not a number or a string; "raw" is always
-                                     ///< null for these -- a boolean has no separate raw form
-  bool has_value;                    ///< false -> no reading at all
-  bool age_known;                    ///< false -> never published
-  bool text_overflow;                ///< text was longer than PORTAL_TEXT_MAX; never true when is_bool
-  const ValueLimit *limit{nullptr};  ///< nullptr -> no limits, `level: null` (§4.3, §5.3)
+  bool is_bool;        ///< value is a JSON true/false, not a number or a string; "raw" is always
+                       ///< null for these -- a boolean has no separate raw form
+  bool has_value;      ///< false -> no reading at all
+  bool age_known;      ///< false -> never published
+  bool text_overflow;  ///< text was longer than PORTAL_TEXT_MAX; never true when is_bool
+  /// §4.3/§5.3: 1-based slot into Snapshot::limits, 0 -> no limits (`level: null`). An index,
+  /// not a pointer, so it sits in the struct's padding and costs no RAM per value.
+  uint16_t limit_slot{0};
 };
 
 /// One series element as the emitter sees it, filled by one call to
@@ -294,10 +296,13 @@ struct NodeDef {
   uint16_t parent;  ///< NO_PARENT for the root; parents always precede children
   uint16_t value_first;
   uint16_t value_count;
-  uint32_t budget_ms;             ///< meaningless unless budget_known
-  bool budget_known;              ///< false -> "budget_ms": null; no value under this node can be STALE
-                                  ///< (most bound entities publish on change with no cadence, and
-                                  ///< no invented number is honest for those)
+  uint32_t budget_ms;  ///< meaningless unless budget_known
+  bool budget_known;   ///< false -> "budget_ms": null; no value under this node can be STALE
+                       ///< (most bound entities publish on change with no cadence, and
+                       ///< no invented number is honest for those)
+  /// §4.1/§5.3: until any own value has a reading the node is `unknown` / `not_requested`, and
+  /// it never upgrades its parent in that state. Placed here to fill padding.
+  bool on_demand{false};
   const char *absent_why;         ///< non-null -> node is ABSENT with this why.code
   const char *role;               ///< nullptr when the node has no role
   const char *roles_available;    ///< comma-separated; nullptr iff role is nullptr
@@ -313,9 +318,6 @@ struct NodeDef {
   const char *absent_evidence{nullptr};
   uint16_t action_first{0};  ///< index of this node's first action in Snapshot::actions
   uint16_t action_count{0};
-  /// §4.1/§5.3: until any own value has a reading the node is `unknown` / `not_requested`, and
-  /// it never upgrades its parent in that state.
-  bool on_demand{false};
 };
 
 /// The absence predicate. Within a response `resolve()` is its ONE caller (`fingerprint()` also
@@ -359,6 +361,9 @@ struct Snapshot {
   size_t action_count{0};
   const LinkDef *links{nullptr};
   size_t link_count{0};
+  /// §4.3: the limits table ValueSample::limit_slot indexes (constant data, in flash).
+  const ValueLimit *limits{nullptr};
+  size_t limit_count{0};
 };
 
 /// Caller-owned scratch, one entry per node. Freestanding cores never allocate.
@@ -627,13 +632,20 @@ inline bool bound_hit(const LimitBound &b, float x, LimitHit *hit, Level level) 
 
 /// §5.3: a value's level. NONE without limits or without a reading (classification sna); text
 /// carries no limits (the config refuses them). `bad` is checked before `warn`.
-inline LimitHit limit_hit(const ValueSample &v) {
+inline const ValueLimit *limit_of(const Snapshot &s, const ValueSample &v) {
+  if (v.limit_slot == 0 || s.limits == nullptr || v.limit_slot > s.limit_count)
+    return nullptr;
+  return &s.limits[v.limit_slot - 1];
+}
+
+inline LimitHit limit_hit(const Snapshot &s, const ValueSample &v) {
   LimitHit hit;
-  if (v.limit == nullptr || v.is_text || !v.has_value || !v.age_known)
+  const ValueLimit *limit = limit_of(s, v);
+  if (limit == nullptr || v.is_text || !v.has_value || !v.age_known)
     return hit;
   if (!v.is_bool && !is_finite_float(v.number))
     return hit;
-  const ValueLimit &lim = *v.limit;
+  const ValueLimit &lim = *limit;
   if (v.is_bool) {
     const bool reading = v.number != 0.0f;
     if (lim.has_bad_when && reading == lim.bad_when)
@@ -654,7 +666,7 @@ inline int worst_limit(const Snapshot &s, const NodeDef &node, LimitHit *out) {
   int index = -1;
   LimitHit worst;
   for (uint16_t k = 0; k < node.value_count; k++) {
-    const LimitHit hit = limit_hit(s.values[node.value_first + k]);
+    const LimitHit hit = limit_hit(s, s.values[node.value_first + k]);
     if ((hit.level == Level::WARN || hit.level == Level::BAD) &&
         static_cast<uint8_t>(hit.level) > static_cast<uint8_t>(worst.level)) {
       worst = hit;
@@ -897,7 +909,8 @@ inline bool write_csv_as_json_array(ChunkWriter &w, const char *csv) {
   return true;
 }
 
-inline bool write_value(ChunkWriter &w, const ValueSample &v, uint32_t node_budget_ms, bool budget_known) {
+inline bool write_value(ChunkWriter &w, const Snapshot &s, const ValueSample &v, uint32_t node_budget_ms,
+                        bool budget_known) {
   const ValueVerdict verdict = classify_value(v, node_budget_ms, budget_known);
   const bool is_sna = verdict.classification == Classification::SNA;
   if (!w.literal("{\"key\":") || !w.json_string(v.key))
@@ -958,7 +971,7 @@ inline bool write_value(ChunkWriter &w, const ValueSample &v, uint32_t node_budg
       return false;
   }
   // §5.3: `level` after the v2 keys; null without limits or without a reading.
-  const char *level = level_name(limit_hit(v).level);
+  const char *level = level_name(limit_hit(s, v).level);
   if (!w.literal(",\"level\":") || !(level != nullptr ? w.json_string(level) : w.literal("null")))
     return false;
   return w.literal("}");
@@ -1369,7 +1382,7 @@ inline bool write_node(ChunkWriter &w, const Snapshot &s, const Resolved &r, siz
   for (uint16_t k = 0; k < node.value_count; k++) {
     if (k != 0 && !w.literal(","))
       return false;
-    if (!write_value(w, s.values[node.value_first + k], node.budget_ms, node.budget_known))
+    if (!write_value(w, s, s.values[node.value_first + k], node.budget_ms, node.budget_known))
       return false;
   }
   if (!w.literal("],\"series\":"))

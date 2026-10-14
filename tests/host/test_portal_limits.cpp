@@ -16,6 +16,18 @@ bool lim_flush(void *ctx, const char *data, size_t size) {
   return true;
 }
 
+// One limits table for the whole file, as codegen emits one per image: a helper that is handed a
+// ValueLimit copies it in and gives the value its 1-based slot (ValueSample::limit_slot).
+ValueLimit g_limits[256];
+size_t g_limit_count = 0;
+
+uint16_t slot_of(const ValueLimit *limit) {
+  if (limit == nullptr || g_limit_count >= 256)
+    return 0;
+  g_limits[g_limit_count++] = *limit;
+  return static_cast<uint16_t>(g_limit_count);
+}
+
 ValueSample lnum(const char *key, float x, const ValueLimit *limit, uint32_t age = 0, int8_t decimals = 0) {
   ValueSample v{};
   v.key = key;
@@ -25,7 +37,7 @@ ValueSample lnum(const char *key, float x, const ValueLimit *limit, uint32_t age
   v.has_value = true;
   v.age_known = true;
   v.age_ms = age;
-  v.limit = limit;
+  v.limit_slot = slot_of(limit);
   return v;
 }
 
@@ -39,7 +51,7 @@ ValueSample lnever(const char *key, const ValueLimit *limit = nullptr) {
   ValueSample v{};
   v.key = key;
   v.label = key;
-  v.limit = limit;
+  v.limit_slot = slot_of(limit);
   return v;
 }
 
@@ -64,8 +76,12 @@ Snapshot lsnap(const NodeDef *nodes, size_t n, const ValueSample *values, size_t
   s.node_count = n;
   s.values = values;
   s.value_count = v;
+  s.limits = g_limits;
+  s.limit_count = g_limit_count;
   return s;
 }
+
+detail::LimitHit hit(const ValueSample &v) { return detail::limit_hit(lsnap(nullptr, 0, nullptr, 0), v); }
 
 struct Out {
   State states[16];
@@ -112,28 +128,33 @@ bool switch_off_fn(void *ctx) { return !*static_cast<bool *>(ctx); }
 // --- level derivation (PS-M6-05) -----------------------------------------------------------
 
 TEST(portal_level_is_null_without_limits_and_without_a_reading) {
+  {
+    ValueSample out_of_table = lnum("z", 500, nullptr);
+    out_of_table.limit_slot = 999;  // a slot past the table reads as "no limits", never out of bounds
+    CHECK(hit(out_of_table).level == Level::NONE);
+  }
   const ValueLimit lim = above(95, 127);
-  CHECK(detail::limit_hit(lnum("a", 500, nullptr)).level == Level::NONE);
-  CHECK(detail::limit_hit(lnever("b", &lim)).level == Level::NONE);
+  CHECK(hit(lnum("a", 500, nullptr)).level == Level::NONE);
+  CHECK(hit(lnever("b", &lim)).level == Level::NONE);
   ValueSample nan = lnum("c", __builtin_nanf(""), &lim);
-  CHECK(detail::limit_hit(nan).level == Level::NONE);
+  CHECK(hit(nan).level == Level::NONE);
   ValueSample text = lnum("d", 0, &lim);
   text.is_text = true;
   text.text = "x";
-  CHECK(detail::limit_hit(text).level == Level::NONE);
+  CHECK(hit(text).level == Level::NONE);
 }
 
 TEST(portal_level_above_and_below_are_strict) {
   const ValueLimit hi = above(95, 127);
-  CHECK(detail::limit_hit(lnum("a", 95, &hi)).level == Level::OK);
-  CHECK(detail::limit_hit(lnum("a", 95.5f, &hi)).level == Level::WARN);
-  CHECK(detail::limit_hit(lnum("a", 127, &hi)).level == Level::WARN);
-  CHECK(detail::limit_hit(lnum("a", 128, &hi)).level == Level::BAD);
+  CHECK(hit(lnum("a", 95, &hi)).level == Level::OK);
+  CHECK(hit(lnum("a", 95.5f, &hi)).level == Level::WARN);
+  CHECK(hit(lnum("a", 127, &hi)).level == Level::WARN);
+  CHECK(hit(lnum("a", 128, &hi)).level == Level::BAD);
   const ValueLimit lo = below(12.0f, 11.0f);
-  CHECK(detail::limit_hit(lnum("v", 12.0f, &lo)).level == Level::OK);
-  CHECK(detail::limit_hit(lnum("v", 11.9f, &lo)).level == Level::WARN);
-  CHECK(detail::limit_hit(lnum("v", 11.0f, &lo)).level == Level::WARN);
-  CHECK(detail::limit_hit(lnum("v", 10.9f, &lo)).level == Level::BAD);
+  CHECK(hit(lnum("v", 12.0f, &lo)).level == Level::OK);
+  CHECK(hit(lnum("v", 11.9f, &lo)).level == Level::WARN);
+  CHECK(hit(lnum("v", 11.0f, &lo)).level == Level::WARN);
+  CHECK(hit(lnum("v", 10.9f, &lo)).level == Level::BAD);
 }
 
 TEST(portal_level_bad_beats_warn_and_a_one_sided_limit_works) {
@@ -144,25 +165,25 @@ TEST(portal_level_bad_beats_warn_and_a_one_sided_limit_works) {
   l.warn.above = 15.0f;
   l.bad.has_below = true;
   l.bad.below = 11.0f;
-  CHECK(detail::limit_hit(lnum("v", 10.0f, &l)).level == Level::BAD);  // matches warn too
-  CHECK(detail::limit_hit(lnum("v", 15.5f, &l)).level == Level::WARN);
-  CHECK(detail::limit_hit(lnum("v", 13.0f, &l)).level == Level::OK);
-  const detail::LimitHit hit = detail::limit_hit(lnum("v", 10.0f, &l));
-  CHECK_EQ(hit.which, 0);
-  CHECK(hit.bound == 11.0f);
+  CHECK(hit(lnum("v", 10.0f, &l)).level == Level::BAD);  // matches warn too
+  CHECK(hit(lnum("v", 15.5f, &l)).level == Level::WARN);
+  CHECK(hit(lnum("v", 13.0f, &l)).level == Level::OK);
+  const detail::LimitHit h = hit(lnum("v", 10.0f, &l));
+  CHECK_EQ(h.which, 0);
+  CHECK(h.bound == 11.0f);
 }
 
 TEST(portal_level_boolean_bad_when_then_warn_when) {
   ValueLimit l{};
   l.has_bad_when = true;
   l.bad_when = true;
-  CHECK(detail::limit_hit(lbool("off", true, &l)).level == Level::BAD);
-  CHECK(detail::limit_hit(lbool("off", false, &l)).level == Level::OK);
+  CHECK(hit(lbool("off", true, &l)).level == Level::BAD);
+  CHECK(hit(lbool("off", false, &l)).level == Level::OK);
   ValueLimit w{};
   w.has_warn_when = true;
   w.warn_when = false;
-  CHECK(detail::limit_hit(lbool("awake", false, &w)).level == Level::WARN);
-  CHECK(detail::limit_hit(lbool("awake", true, &w)).level == Level::OK);
+  CHECK(hit(lbool("awake", false, &w)).level == Level::WARN);
+  CHECK(hit(lbool("awake", true, &w)).level == Level::OK);
 }
 
 TEST(portal_value_emits_level_after_the_v2_keys) {

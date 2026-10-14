@@ -417,12 +417,17 @@ def test_codegen_limits_are_static_const_and_switch_off_carries_the_action_evide
     gen = generate(tmp_path, text)
     assert gen.returncode == 0, gen.output
     cpp = gen.main_cpp
-    limits = re.findall(r"static const esphome::portal::core::ValueLimit (portal_limit_\d+) = (\{.*?\});", cpp)
-    assert [n for n, _ in limits] == ["portal_limit_0", "portal_limit_1"]
-    assert limits[0][1] == "{{false, true, 0.0f, 95.0f}, {false, true, 0.0f, 127.0f}, false, false, false, false}"
-    assert limits[1][1] == "{{false, false, 0.0f, 0.0f}, {false, false, 0.0f, 0.0f}, false, false, true, true}"
-    assert re.search(r"add_value_sensor\([^;]*&portal_limit_0\)", cpp)
-    assert re.search(r"add_value_binary_sensor\([^;]*&portal_limit_1\)", cpp)
+    table = re.search(r"static const esphome::portal::core::ValueLimit (\w+)\[\] = \{\n(.*?)\n\};", cpp, re.S)
+    assert table and table.group(1) == "ui_limits", cpp
+    rows = [r.strip().rstrip(",") for r in table.group(2).splitlines()]
+    assert rows == [
+        "{{false, true, 0.0f, 95.0f}, {false, true, 0.0f, 127.0f}, false, false, false, false}",
+        "{{false, false, 0.0f, 0.0f}, {false, false, 0.0f, 0.0f}, false, false, true, true}",
+    ]
+    assert re.search(r"ui->set_limits\(ui_limits, 2\);", cpp)
+    assert re.search(r'add_value_sensor\("rec",[^;]*, 1\);', cpp)
+    assert re.search(r'add_value_binary_sensor\("off",[^;]*, 2\);', cpp)
+    assert re.search(r'add_value_sensor\("dtc",[^;]*, 0\);', cpp)
     # one thunk for both nodes, a switch's state read; evidence = the first action on that switch
     assert cpp.count("inline bool portal_prov_switch_off(void *ctx)") == 1
     assert "return source == nullptr || !source->state;" in cpp

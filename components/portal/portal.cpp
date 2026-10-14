@@ -47,9 +47,11 @@ uint16_t Portal::add_node(const char *id, const char *kind, const char *label, u
 }
 
 void Portal::add_value_sensor(const char *key, const char *label, const char *unit, int8_t decimals,
-                              sensor::Sensor *value_sensor, const core::ValueLimit *limit) {
+                              sensor::Sensor *value_sensor, uint16_t limit_slot) {
+  // The slot lives in the sample itself (sample_() never rewrites it) and so reaches every
+  // request copy without a field of its own in the binding.
+  this->samples_[this->value_count_].limit_slot = limit_slot;
   auto &def = this->value_defs_[this->value_count_];
-  def.limit = limit;
   def.key = key;
   def.label = label;
   def.unit = unit;
@@ -73,9 +75,9 @@ void Portal::add_value_text_sensor(const char *key, const char *label, const cha
 }
 
 void Portal::add_value_binary_sensor(const char *key, const char *label, const char *unit,
-                                     binary_sensor::BinarySensor *value_sensor, const core::ValueLimit *limit) {
+                                     binary_sensor::BinarySensor *value_sensor, uint16_t limit_slot) {
+  this->samples_[this->value_count_].limit_slot = limit_slot;
   auto &def = this->value_defs_[this->value_count_];
-  def.limit = limit;
   def.key = key;
   def.label = label;
   def.unit = unit;
@@ -265,7 +267,6 @@ void Portal::sample_() {
     sample.decimals = def.decimals;
     sample.is_text = def.is_text;
     sample.is_bool = def.is_bool;
-    sample.limit = def.limit;
     sample.text = nullptr;
     sample.number = 0.0f;
     sample.text_overflow = false;
@@ -453,6 +454,8 @@ bool Portal::copy_snapshot_(core::Snapshot *out) {
   out->action_count = this->action_count_;
   out->links = this->links_;
   out->link_count = this->link_count_;
+  out->limits = this->limits_;
+  out->limit_count = this->limit_count_;
   return true;
 }
 

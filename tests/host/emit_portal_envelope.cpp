@@ -126,6 +126,8 @@ int run(const std::string &scenario, const char *path) {
   static std::vector<std::string> names;  // keeps generated ids alive
   bool full = true;
   uint32_t seq = 7;
+  const ValueLimit *s_limits = nullptr;
+  size_t s_limit_count = 0;
 
   nodes.push_back(node("car", "car", "Vehicle", NO_PARENT, 0, 0, 0, false));
   nodes.push_back(node("ecu", "ecu", "Demo ECU", 0, 0, 3, 1500));
@@ -180,25 +182,26 @@ int run(const std::string &scenario, const char *path) {
   } else if (scenario == "narrowed") {
     nodes[2].series = &sdef;
   } else if (scenario == "daumen") {
-    static ValueLimit rec_limit{};
+    static ValueLimit limits[3]{};
+    ValueLimit &rec_limit = limits[0];
     rec_limit.warn.has_above = true;
     rec_limit.warn.above = 95.0f;
     rec_limit.bad.has_above = true;
     rec_limit.bad.above = 127.0f;
-    static ValueLimit off_limit{};
+    ValueLimit &off_limit = limits[1];
     off_limit.has_bad_when = true;
     off_limit.bad_when = true;
-    static ValueLimit vcc_limit{};
+    ValueLimit &vcc_limit = limits[2];
     vcc_limit.warn.has_below = true;
     vcc_limit.warn.below = 12.0f;
     vcc_limit.bad.has_below = true;
     vcc_limit.bad.below = 11.5f;
-    values[0].limit = &vcc_limit;  // ecu/vcc 3.3 V: bad (fictional limits)
+    values[0].limit_slot = 3;  // ecu/vcc 3.3 V: bad (fictional limits)
     nodes.push_back(node("bus", "bus", "Demo bus", 0, 5, 2, 0, false));
     values.push_back(num("rec", "RX errors", 100.0f, 10, nullptr, 0));
-    values.back().limit = &rec_limit;
+    values.back().limit_slot = 1;
     values.push_back(boolean("bus_off", "Bus off", false));
-    values.back().limit = &off_limit;
+    values.back().limit_slot = 2;
     nodes.push_back(node("ecus", "ecu", "Units", 0, 7, 0, 0, false));
     nodes.push_back(node("ecus.a", "ecu", "Unit A", 5, 7, 1, 0, false));
     nodes.back().on_demand = true;
@@ -208,6 +211,8 @@ int run(const std::string &scenario, const char *path) {
     nodes.back().absent_fn = always_off;
     nodes.back().absent_evidence = "\"action\":\"bat/polling\"";
     values.push_back(num("soc", "SOC", 55.0f, 10, "%", 0));
+    s_limits = limits;
+    s_limit_count = 3;
   } else if (scenario != "basic" && scenario != "actions") {
     std::fprintf(stderr, "unknown scenario %s\n", scenario.c_str());
     return 2;
@@ -254,6 +259,8 @@ int run(const std::string &scenario, const char *path) {
   s.node_count = nodes.size();
   s.values = values.data();
   s.value_count = values.size();
+  s.limits = s_limits;
+  s.limit_count = s_limit_count;
   resolve(s, r);
   ChunkWriter w;
   w.init(buf, sizeof buf, flush_stdout, nullptr);

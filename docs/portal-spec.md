@@ -180,8 +180,9 @@ Limits (`warn`, `bad`, `warn_when`, `bad_when`) drive the value's `level` (5.3).
 `below: x` matches a reading `< x`, `above: x` a reading `> x`; `bad` is checked before `warn`.
 Boolean: `bad_when: b` matches a reading `== b`, then `warn_when`. Limits on a `text_sensor`
 value, numeric limits on a `binary_sensor` value and `*_when` on a `sensor` value are config
-errors. The limits are compiled into flash as constant data (one small struct per limited
-value); they cost no heap and nothing per request.
+errors. The limits are compiled into flash as one constant table (one small struct per limited
+value); a value names its row by a 16-bit slot that sits in existing struct padding, so limits
+cost no heap and nothing per request.
 
 ### 4.4 Budget derivation
 

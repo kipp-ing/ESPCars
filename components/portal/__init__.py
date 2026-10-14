@@ -1142,7 +1142,8 @@ async def to_code(config):
 
     null = cg.RawExpression("nullptr")
     counter = {"next": 0}
-    limit_counter = {"next": 0}
+    # Every value's limits, in value order; one static const table (flash), indexed by slot.
+    limit_inits: list[str] = []
     # switch_off evidence (spec 4.6): the first action, pre-order, bound to the same switch.
     action_of_switch: dict[str, str] = {}
     for node_id, node in _iter_tree(config[CONF_TREE], ""):
@@ -1151,13 +1152,12 @@ async def to_code(config):
                 action_of_switch.setdefault(str(action_conf[CONF_SWITCH]), f"{node_id}/{action_conf[CONF_KEY]}")
 
     def emit_limit(value_conf):
+        """The value's 1-based slot in the limits table, 0 without limits."""
         init = _limit_initializer(value_conf)
         if init is None:
-            return null
-        name = f"portal_limit_{limit_counter['next']}"
-        limit_counter["next"] += 1
-        cg.add_global(cg.RawStatement(f"static const esphome::portal::core::ValueLimit {name} = {init};"))
-        return cg.RawExpression(f"&{name}")
+            return 0
+        limit_inits.append(init)
+        return len(limit_inits)
     # One thunk per distinct (provider, args), deduplicated by its deterministic name and scoped
     # to this call: dedup must hold within one image and never leak across validation runs.
     emitted_thunks: set[str] = set()
@@ -1313,6 +1313,14 @@ async def to_code(config):
         "car",
         0xFFFF,
     )
+
+    if limit_inits:
+        table = f"{config[CONF_ID]}_limits"
+        rows = ",\n    ".join(limit_inits)
+        cg.add_global(
+            cg.RawStatement(f"static const esphome::portal::core::ValueLimit {table}[] = {{\n    {rows},\n}};")
+        )
+        cg.add(var.set_limits(cg.RawExpression(table), len(limit_inits)))
 
 
 # The one provider the portal ships (spec 4.6): the node is absent while a switch is off. Its
