@@ -1,6 +1,8 @@
 # portal on a fictional vehicle: one bus node, one device node, one logger node. Values of all
 # three entity kinds, a series, all four action kinds (template entities, nothing is transmitted
-# on any bus), `auth:` for the actions, an AP with the captive portal.
+# on any bus), `auth:` for the actions, an AP with the captive portal. Spec v1.5: lang, layout
+# tabs, expert, limits, confirm/group/before, on_demand units borrowing the device's actions, and
+# a monitor node switched off by the logger switch (switch_off provider).
 packages:
   entities: !include common_entities.yaml
 
@@ -24,6 +26,12 @@ portal:
   owns: [vehicle]
   root_label: Demo vehicle
   submodule_size: 12
+  lang: de
+  layout:
+    tabs:
+      - {label: Fahrt, glance: [vehicle.bus/supply, vehicle.logger/rate], nodes: []}
+      - {label: Bus, glance: [vehicle.bus/supply], nodes: [vehicle.bus, vehicle.units]}
+      - {label: Gerät, nodes: [vehicle.device, vehicle.logger, vehicle.monitor]}
   auth:
     username: demo
     password: demo-pass
@@ -42,9 +50,18 @@ portal:
               decimals: 2
               cadence_ms: 1000
               sensor: supply_voltage
+              warn: {below: 12.0, above: 15.0}
+              bad: {below: 11.0}
             - key: link
               label: Link
               binary_sensor: link_up
+              bad_when: false
+            - key: errors
+              label: RX errors
+              sensor: bus_errors
+              expert: true
+              warn: {above: 95}
+              bad: {above: 127}
           children:
             - segment: cells
               kind: module
@@ -68,13 +85,19 @@ portal:
             - key: mode
               label: Mode
               select: mode_select
+              group: Settings
             - key: interval
               label: Interval
               number: interval_number
               decimals: 1
+              group: Settings
             - key: restart
               label: Restart
               button: restart_button
+              confirm: hold
+              before:
+                - {action: vehicle.device/mode, value: idle}
+                - {action: vehicle.device/interval, value: 5}
         - segment: logger
           kind: logger
           label: Demo logger
@@ -88,6 +111,31 @@ portal:
             - key: logging
               label: Logging
               switch: logging_switch
+        - segment: units
+          kind: ecu
+          label: Units
+          children:
+            - segment: a
+              kind: ecu
+              label: Unit A
+              on_demand: true
+              values:
+                - key: dtc
+                  label: DTC count
+                  sensor: unit_a_dtc
+              borrow:
+                - {action: vehicle.device/mode}
+                - action: vehicle.device/restart
+                  before: [{action: vehicle.device/mode, value: test}]
+        - segment: monitor
+          kind: module
+          label: Monitor
+          absent_when: {provider: switch_off, source: logging_switch}
+          values:
+            - key: level
+              label: Level
+              unit: "%"
+              sensor: monitor_level
         - segment: spare
           kind: ecu
           label: Spare unit
