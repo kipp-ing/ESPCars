@@ -73,16 +73,17 @@ class Portal : public Component, public AsyncWebHandler {
                     bool budget_known, const char *absent_why, const char *role, const char *roles_available,
                     const char *unknown_value_key, const char *unknown_equals, const char *unknown_why,
                     const char *trust_value_key, core::NodeAbsentFn absent_fn = nullptr, void *absent_ctx = nullptr,
-                    const char *absent_evidence = nullptr);
+                    const char *absent_evidence = nullptr, bool on_demand = false);
   /// The add_value_* / add_series / add_action_* calls attach to whichever node the most recent
   /// add_node() started: codegen emits a node's own members before its children, which keeps
   /// each node's ranges contiguous without tracking offsets.
+  /// `limit` (§4.3) points at constant data codegen emits into flash; nullptr -> no limits.
   void add_value_sensor(const char *key, const char *label, const char *unit, int8_t decimals,
-                        sensor::Sensor *value_sensor);
+                        sensor::Sensor *value_sensor, const core::ValueLimit *limit = nullptr);
   void add_value_text_sensor(const char *key, const char *label, const char *unit, int8_t decimals,
                              text_sensor::TextSensor *value_sensor);
   void add_value_binary_sensor(const char *key, const char *label, const char *unit,
-                               binary_sensor::BinarySensor *value_sensor);
+                               binary_sensor::BinarySensor *value_sensor, const core::ValueLimit *limit = nullptr);
   void add_series(const char *key, const char *label, const char *unit, const char *index_frame, int32_t index_base,
                   int32_t pack_index_base, bool pack_index_known, uint16_t count, int8_t decimals,
                   core::SeriesElementFn element = nullptr, void *ctx = nullptr);
@@ -120,6 +121,7 @@ class Portal : public Component, public AsyncWebHandler {
     sensor::Sensor *value_sensor{nullptr};
     text_sensor::TextSensor *value_text_sensor{nullptr};
     binary_sensor::BinarySensor *value_binary_sensor{nullptr};
+    const core::ValueLimit *limit{nullptr};
   };
   // age_ms is the time since the entity last PUBLISHED, not since its bits last changed: stamped
   // from add_on_state_callback, which Sensor / TextSensor fire on every publish_state(). A

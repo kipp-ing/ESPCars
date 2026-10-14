@@ -4,9 +4,10 @@
 ///
 ///   emit_portal_envelope <scenario> [path]     compact JSON to stdout, no trailing newline
 ///
-/// Scenarios: actions (new core only, -DEMIT_SERIES_SCRATCH), basic, narrowed, no_identity, stale, large, series, actions.
-/// `basic`, `narrowed`, `no_identity`, `stale`, `large` and `series` use no action field, so they
-/// compile and run against any core with the wire format of schema_version 2.
+/// Scenarios: actions (new core only, -DEMIT_SERIES_SCRATCH), basic, narrowed, no_identity, stale, large, series,
+/// daumen (spec v1.5: value limits / level, not_requested, switched_off).
+/// `basic`, `narrowed`, `no_identity`, `stale`, `large` and `series` use no action field. Since
+/// spec v1.5 every value carries `level` (null without limits).
 
 #include "portal_core.h"
 
@@ -87,6 +88,8 @@ bool cell(void *, uint16_t i, SeriesElement *out) {
   out->value = 3300.0f + static_cast<float>(i);
   return true;
 }
+
+bool always_off(void *) { return true; }
 
 const char *OWNS[] = {"ecu"};
 const char *COMPONENTS[] = {"logger", "portal", "sensor"};
@@ -176,6 +179,35 @@ int run(const std::string &scenario, const char *path) {
     }
   } else if (scenario == "narrowed") {
     nodes[2].series = &sdef;
+  } else if (scenario == "daumen") {
+    static ValueLimit rec_limit{};
+    rec_limit.warn.has_above = true;
+    rec_limit.warn.above = 95.0f;
+    rec_limit.bad.has_above = true;
+    rec_limit.bad.above = 127.0f;
+    static ValueLimit off_limit{};
+    off_limit.has_bad_when = true;
+    off_limit.bad_when = true;
+    static ValueLimit vcc_limit{};
+    vcc_limit.warn.has_below = true;
+    vcc_limit.warn.below = 12.0f;
+    vcc_limit.bad.has_below = true;
+    vcc_limit.bad.below = 11.5f;
+    values[0].limit = &vcc_limit;  // ecu/vcc 3.3 V: bad (fictional limits)
+    nodes.push_back(node("bus", "bus", "Demo bus", 0, 5, 2, 0, false));
+    values.push_back(num("rec", "RX errors", 100.0f, 10, nullptr, 0));
+    values.back().limit = &rec_limit;
+    values.push_back(boolean("bus_off", "Bus off", false));
+    values.back().limit = &off_limit;
+    nodes.push_back(node("ecus", "ecu", "Units", 0, 7, 0, 0, false));
+    nodes.push_back(node("ecus.a", "ecu", "Unit A", 5, 7, 1, 0, false));
+    nodes.back().on_demand = true;
+    values.push_back(never("dtc", "DTC count"));
+    nodes.push_back(node("bat", "battery", "Demo battery", 0, 8, 1, 0, false));
+    nodes.back().absent_why = "switched_off";
+    nodes.back().absent_fn = always_off;
+    nodes.back().absent_evidence = "\"action\":\"bat/polling\"";
+    values.push_back(num("soc", "SOC", 55.0f, 10, "%", 0));
   } else if (scenario != "basic" && scenario != "actions") {
     std::fprintf(stderr, "unknown scenario %s\n", scenario.c_str());
     return 2;
