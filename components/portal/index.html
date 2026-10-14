@@ -385,6 +385,7 @@ function fbHtml(e) {
   if (p) { s = p.s; t = p.t || ""; }
   else if (r && (r.state === "running" || r.age_ms < (r.state === "refused" ? 600000 : 30000))) { s = r.state; t = (s === "refused" ? wtxt(r.why) + " · " : "") + ago(r.age_ms); }
   else return "";
+  if (s === "early") return E('div role="status"', "fb", esc(t));
   return E('div role="status"', "fb", tag(s === "running" ? "run" : s === "accepted" ? "ok" : "bad", L[s] || s) + esc(t));
 }
 function ctlHtml(e, cls) {
@@ -615,7 +616,7 @@ function holdEnd() {
   if (!h) return;
   clearTimeout(h.t);
   app.hold = null;
-  app.pend[h.e.ref] = {s:"refused", t:L.early, at:Date.now()};
+  app.pend[h.e.ref] = {s:"early", t:L.early, at:Date.now()};
   render(true);
 }
 function pick(ev) {
