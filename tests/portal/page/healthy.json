@@ -1,0 +1,1116 @@
+{
+ "schema_version": 2,
+ "seq": 17,
+ "series_legend": {
+  "r": "real",
+  "s": "SNA",
+  "i": "implausible",
+  "-": "not measured"
+ },
+ "served_by": {
+  "board": "demo-board",
+  "node_id": "0xA",
+  "mac": "02:00:00:00:00:01",
+  "state": "ok",
+  "why": null,
+  "uptime_ms": 6817390,
+  "build": "demo-1",
+  "owns": [
+   "bat.main"
+  ],
+  "components": [
+   "portal",
+   "sensor",
+   "switch"
+  ]
+ },
+ "peers": [],
+ "links": [],
+ "tree": {
+  "id": "car",
+  "kind": "car",
+  "label": "Vehicle",
+  "state": "ok",
+  "why": null,
+  "provenance": null,
+  "values": [],
+  "series": null,
+  "children": [
+   {
+    "id": "bat",
+    "kind": "battery",
+    "label": "Traction battery",
+    "state": "ok",
+    "why": null,
+    "provenance": null,
+    "values": [],
+    "series": null,
+    "children": [
+     {
+      "id": "bat.main",
+      "kind": "battery",
+      "label": "Pack",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 380,
+       "budget_ms": 180000,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "soc",
+        "label": "State of charge",
+        "unit": "%",
+        "value": 62.4,
+        "raw": 62.4,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "power",
+        "label": "Power",
+        "unit": "kW",
+        "value": -12.9,
+        "raw": -12.9,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "voltage",
+        "label": "Voltage",
+        "unit": "V",
+        "value": 341.8,
+        "raw": 341.8,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "current",
+        "label": "Current",
+        "unit": "A",
+        "value": -37.8,
+        "raw": -37.8,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "temp_min",
+        "label": "Temperature min",
+        "unit": "°C",
+        "value": 18.5,
+        "raw": 18.5,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "temp_max",
+        "label": "Temperature max",
+        "unit": "°C",
+        "value": 21.0,
+        "raw": 21.0,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "iso",
+        "label": "Isolation",
+        "unit": "kΩ",
+        "value": 3000,
+        "raw": 3000,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": "ok"
+       },
+       {
+        "key": "contactor",
+        "label": "Contactor",
+        "unit": null,
+        "value": "closed",
+        "raw": "closed",
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": [
+       {
+        "key": "polling",
+        "label": "Battery polling",
+        "method": "POST",
+        "path": "/api/v1/actions/bat.main/polling",
+        "enabled": true,
+        "why": null,
+        "body": {
+         "value": "bool"
+        },
+        "control": "switch",
+        "value": true,
+        "options": null,
+        "min": null,
+        "max": null,
+        "step": null,
+        "unit": null,
+        "result": null
+       }
+      ]
+     },
+     {
+      "id": "bat.cells",
+      "kind": "module",
+      "label": "Cell monitor",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "spread",
+        "label": "Cell spread",
+        "unit": "mV",
+        "value": 23,
+        "raw": 23,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": "ok"
+       },
+       {
+        "key": "min",
+        "label": "Cell min",
+        "unit": "V",
+        "value": 3.661,
+        "raw": 3.661,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "max",
+        "label": "Cell max",
+        "unit": "V",
+        "value": 3.684,
+        "raw": 3.684,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "hex",
+        "label": "Raw response",
+        "unit": null,
+        "value": "62 02 08 0E 54 0E 55 0E 53 …",
+        "raw": "62 02 08 0E 54 0E 55 0E 53 …",
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "rtt",
+        "label": "Response time",
+        "unit": "ms",
+        "value": 42,
+        "raw": 42,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": {
+       "key": "cells",
+       "label": "Cell voltages",
+       "unit": "V",
+       "index_base": 1,
+       "index": null,
+       "index_frame": "pack_cell",
+       "values": [
+        3.672,
+        3.67,
+        3.676,
+        3.669,
+        3.674,
+        3.672,
+        3.669,
+        3.674,
+        3.668,
+        3.673,
+        3.669,
+        3.684,
+        3.673,
+        3.678,
+        3.669,
+        3.671,
+        3.676,
+        3.679,
+        3.675,
+        3.673,
+        3.68,
+        3.669,
+        3.678,
+        3.671,
+        3.67,
+        3.669,
+        3.672,
+        3.678,
+        3.67,
+        3.661,
+        3.676,
+        3.672,
+        3.675,
+        3.669,
+        3.669,
+        3.67,
+        3.676,
+        3.673,
+        3.672,
+        3.675
+       ],
+       "class": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+       "pack_index_base": null
+      },
+      "children": [],
+      "actions": [
+       {
+        "key": "monitor",
+        "label": "Cell monitor",
+        "method": "POST",
+        "path": "/api/v1/actions/bat.cells/monitor",
+        "enabled": true,
+        "why": null,
+        "body": {
+         "value": "bool"
+        },
+        "control": "switch",
+        "value": true,
+        "options": null,
+        "min": null,
+        "max": null,
+        "step": null,
+        "unit": null,
+        "result": null
+       },
+       {
+        "key": "period",
+        "label": "Period",
+        "method": "POST",
+        "path": "/api/v1/actions/bat.cells/period",
+        "enabled": true,
+        "why": null,
+        "body": {
+         "value": "number"
+        },
+        "control": "number",
+        "value": 500.0,
+        "options": null,
+        "min": 250.0,
+        "max": 10000.0,
+        "step": 50.0,
+        "unit": "ms",
+        "result": null
+       }
+      ]
+     },
+     {
+      "id": "bat.ident",
+      "kind": "battery",
+      "label": "Battery identity",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "serial",
+        "label": "Serial number",
+        "unit": null,
+        "value": "DEMO-PACK-0001",
+        "raw": "DEMO-PACK-0001",
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       },
+       {
+        "key": "cap_loss",
+        "label": "Capacity loss",
+        "unit": "%",
+        "value": 11.8,
+        "raw": 11.8,
+        "raw_hex": null,
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     }
+    ],
+    "actions": []
+   },
+   {
+    "id": "can0",
+    "kind": "bus",
+    "label": "Bus A",
+    "state": "ok",
+    "why": null,
+    "provenance": {
+     "origin": "local",
+     "board": "demo-board",
+     "node_id": "0xA",
+     "age_ms": 420,
+     "budget_ms": null,
+     "trust": "assumed",
+     "seq": 41
+    },
+    "values": [
+     {
+      "key": "awake",
+      "label": "Bus awake",
+      "unit": null,
+      "value": true,
+      "raw": null,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": null
+     },
+     {
+      "key": "load",
+      "label": "Bus load",
+      "unit": "%",
+      "value": 23.4,
+      "raw": 23.4,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": null
+     },
+     {
+      "key": "rec",
+      "label": "RX error counter",
+      "unit": null,
+      "value": 0,
+      "raw": 0,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": "ok"
+     },
+     {
+      "key": "tec",
+      "label": "TX error counter",
+      "unit": null,
+      "value": 0,
+      "raw": 0,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": "ok"
+     },
+     {
+      "key": "bus_off",
+      "label": "Bus off",
+      "unit": null,
+      "value": false,
+      "raw": null,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": "ok"
+     },
+     {
+      "key": "frames",
+      "label": "Frames received",
+      "unit": null,
+      "value": 9811042,
+      "raw": 9811042,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": null
+     }
+    ],
+    "series": null,
+    "children": [],
+    "actions": [
+     {
+      "key": "wake_mode",
+      "label": "Wake method",
+      "method": "POST",
+      "path": "/api/v1/actions/can0/wake_mode",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "string"
+      },
+      "control": "select",
+      "value": "Tester present",
+      "options": [
+       "Tester present",
+       "Wake frame",
+       "Network management"
+      ],
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "wake",
+      "label": "Wake bus",
+      "method": "POST",
+      "path": "/api/v1/actions/can0/wake",
+      "enabled": true,
+      "why": null,
+      "body": null,
+      "control": "button",
+      "value": null,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     }
+    ]
+   },
+   {
+    "id": "ecus",
+    "kind": "component",
+    "label": "Control units",
+    "state": "ok",
+    "why": null,
+    "provenance": {
+     "origin": "local",
+     "board": "demo-board",
+     "node_id": "0xA",
+     "age_ms": 420,
+     "budget_ms": null,
+     "trust": "assumed",
+     "seq": 41
+    },
+    "values": [],
+    "series": null,
+    "children": [
+     {
+      "id": "ecus.a",
+      "kind": "ecu",
+      "label": "Engine control",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "reply",
+        "label": "Last reply",
+        "unit": null,
+        "value": "Ident DEMO-A1",
+        "raw": "Ident DEMO-A1",
+        "raw_hex": "62F190444D4F",
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     },
+     {
+      "id": "ecus.b",
+      "kind": "ecu",
+      "label": "Charger",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "reply",
+        "label": "Last reply",
+        "unit": null,
+        "value": "Ident DEMO-B1",
+        "raw": "Ident DEMO-B1",
+        "raw_hex": "62F190444D4F",
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     },
+     {
+      "id": "ecus.c",
+      "kind": "ecu",
+      "label": "Inverter",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "reply",
+        "label": "Last reply",
+        "unit": null,
+        "value": "Ident DEMO-C1",
+        "raw": "Ident DEMO-C1",
+        "raw_hex": "62F190444D4F",
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     },
+     {
+      "id": "ecus.d",
+      "kind": "ecu",
+      "label": "Climate",
+      "state": "ok",
+      "why": null,
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "reply",
+        "label": "Last reply",
+        "unit": null,
+        "value": "Ident DEMO-D1",
+        "raw": "Ident DEMO-D1",
+        "raw_hex": "62F190444D4F",
+        "classification": "real",
+        "state": "ok",
+        "why": null,
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     },
+     {
+      "id": "ecus.e",
+      "kind": "ecu",
+      "label": "Instrument cluster",
+      "state": "unknown",
+      "why": {
+       "code": "not_requested",
+       "detail": null,
+       "since_ms": null,
+       "evidence": {}
+      },
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "reply",
+        "label": "Last reply",
+        "unit": null,
+        "value": null,
+        "raw": null,
+        "raw_hex": null,
+        "classification": "sna",
+        "state": "absent",
+        "why": {
+         "code": "value_not_available",
+         "detail": null,
+         "since_ms": null,
+         "evidence": {}
+        },
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     },
+     {
+      "id": "ecus.f",
+      "kind": "ecu",
+      "label": "Body controller",
+      "state": "unknown",
+      "why": {
+       "code": "not_requested",
+       "detail": null,
+       "since_ms": null,
+       "evidence": {}
+      },
+      "provenance": {
+       "origin": "local",
+       "board": "demo-board",
+       "node_id": "0xA",
+       "age_ms": 420,
+       "budget_ms": null,
+       "trust": "assumed",
+       "seq": 41
+      },
+      "values": [
+       {
+        "key": "reply",
+        "label": "Last reply",
+        "unit": null,
+        "value": null,
+        "raw": null,
+        "raw_hex": null,
+        "classification": "sna",
+        "state": "absent",
+        "why": {
+         "code": "value_not_available",
+         "detail": null,
+         "since_ms": null,
+         "evidence": {}
+        },
+        "level": null
+       }
+      ],
+      "series": null,
+      "children": [],
+      "actions": []
+     }
+    ],
+    "actions": [
+     {
+      "key": "scan",
+      "label": "Query all",
+      "method": "POST",
+      "path": "/api/v1/actions/ecus/scan",
+      "enabled": true,
+      "why": null,
+      "body": null,
+      "control": "button",
+      "value": null,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": {
+       "state": "accepted",
+       "why": {
+        "code": "applied",
+        "detail": null,
+        "since_ms": null,
+        "evidence": {}
+       },
+       "age_ms": 4200,
+       "value": null
+      }
+     },
+     {
+      "key": "target",
+      "label": "Target",
+      "method": "POST",
+      "path": "/api/v1/actions/ecus/target",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "string"
+      },
+      "control": "select",
+      "value": "a",
+      "options": [
+       "a",
+       "b",
+       "c",
+       "d",
+       "e",
+       "f"
+      ],
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "service",
+      "label": "Service",
+      "method": "POST",
+      "path": "/api/v1/actions/ecus/service",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "string"
+      },
+      "control": "select",
+      "value": "Identify",
+      "options": [
+       "Identify",
+       "Software version",
+       "Read faults",
+       "Clear faults"
+      ],
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "send",
+      "label": "Send",
+      "method": "POST",
+      "path": "/api/v1/actions/ecus/send",
+      "enabled": true,
+      "why": null,
+      "body": null,
+      "control": "button",
+      "value": null,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     }
+    ]
+   },
+   {
+    "id": "device",
+    "kind": "device",
+    "label": "Device",
+    "state": "ok",
+    "why": null,
+    "provenance": {
+     "origin": "local",
+     "board": "demo-board",
+     "node_id": "0xA",
+     "age_ms": 420,
+     "budget_ms": null,
+     "trust": "assumed",
+     "seq": 41
+    },
+    "values": [
+     {
+      "key": "supply",
+      "label": "Supply",
+      "unit": "V",
+      "value": 13.9,
+      "raw": 13.9,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": "ok"
+     },
+     {
+      "key": "firmware",
+      "label": "Firmware",
+      "unit": null,
+      "value": "demo-1",
+      "raw": "demo-1",
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": null
+     },
+     {
+      "key": "heap_free",
+      "label": "Heap free",
+      "unit": "B",
+      "value": 142312,
+      "raw": 142312,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": null
+     },
+     {
+      "key": "heap_block",
+      "label": "Heap largest block",
+      "unit": "B",
+      "value": 61440,
+      "raw": 61440,
+      "raw_hex": null,
+      "classification": "real",
+      "state": "ok",
+      "why": null,
+      "level": "ok"
+     }
+    ],
+    "series": null,
+    "children": [],
+    "actions": [
+     {
+      "key": "deep_sleep",
+      "label": "Deep sleep",
+      "method": "POST",
+      "path": "/api/v1/actions/device/deep_sleep",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "bool"
+      },
+      "control": "switch",
+      "value": true,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "stay_awake",
+      "label": "Stay awake",
+      "method": "POST",
+      "path": "/api/v1/actions/device/stay_awake",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "bool"
+      },
+      "control": "switch",
+      "value": false,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "sleep_rail",
+      "label": "Rail in sleep",
+      "method": "POST",
+      "path": "/api/v1/actions/device/sleep_rail",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "string"
+      },
+      "control": "select",
+      "value": "off",
+      "options": [
+       "off",
+       "held"
+      ],
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "sleep_idle",
+      "label": "Sleep after bus idle",
+      "method": "POST",
+      "path": "/api/v1/actions/device/sleep_idle",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "number"
+      },
+      "control": "number",
+      "value": 120.0,
+      "options": null,
+      "min": 30.0,
+      "max": 3600.0,
+      "step": 30.0,
+      "unit": "s",
+      "result": null
+     },
+     {
+      "key": "sleep_now",
+      "label": "Sleep now",
+      "method": "POST",
+      "path": "/api/v1/actions/device/sleep_now",
+      "enabled": true,
+      "why": null,
+      "body": null,
+      "control": "button",
+      "value": null,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "log_tx",
+      "label": "Log own TX",
+      "method": "POST",
+      "path": "/api/v1/actions/device/log_tx",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "bool"
+      },
+      "control": "switch",
+      "value": false,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "upload_wait",
+      "label": "Upload wait max",
+      "method": "POST",
+      "path": "/api/v1/actions/device/upload_wait",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "number"
+      },
+      "control": "number",
+      "value": 30.0,
+      "options": null,
+      "min": 0.0,
+      "max": 240.0,
+      "step": 5.0,
+      "unit": "min",
+      "result": null
+     },
+     {
+      "key": "status_led",
+      "label": "Status LED",
+      "method": "POST",
+      "path": "/api/v1/actions/device/status_led",
+      "enabled": true,
+      "why": null,
+      "body": {
+       "value": "bool"
+      },
+      "control": "switch",
+      "value": true,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     },
+     {
+      "key": "restart",
+      "label": "Restart",
+      "method": "POST",
+      "path": "/api/v1/actions/device/restart",
+      "enabled": true,
+      "why": null,
+      "body": null,
+      "control": "button",
+      "value": null,
+      "options": null,
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "result": null
+     }
+    ]
+   }
+  ],
+  "actions": []
+ }
+}
