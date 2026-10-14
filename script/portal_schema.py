@@ -13,6 +13,10 @@ Section 5.4/5.5 extend the action entry (``control``, ``value``, ``options``, ``
 ``step``, ``unit``, ``result``). An action without the extension keys (an older producer) is
 still valid; once ``control`` is present every extension key is required and typed.
 
+Spec v1.5 adds a value's optional ``level`` and the node why-codes ``limit``, ``not_requested``
+and ``switched_off``; each rule applies only when its key/code is present, so older envelopes
+pass unchanged.
+
 This validator speaks ``schema_version: 2`` only. It never raises on malformed input: a non-dict,
 a missing key or a wrong type all come back as ordinary ``Violation`` objects, so it is safe to
 point at arbitrary JSON, including a board's raw HTTP response.
@@ -123,6 +127,10 @@ VALUE_KEYS: tuple[str, ...] = (
     "state",
     "why",
 )
+# Spec 5.3 (v1.5): optional, after the v2 value keys.
+OPTIONAL_VALUE_KEYS: tuple[str, ...] = ("level",)
+LEVELS = _Vocab({"ok", "warn", "bad"})
+
 SERIES_KEYS: tuple[str, ...] = (
     "key",
     "label",
@@ -587,7 +595,16 @@ def _validate_value(value: object, path: str, violations: list[Violation]) -> No
     for key in VALUE_KEYS:
         if key not in value:
             violations.append(Violation(path, "missing_key", f"missing {key!r}"))
-    _check_key_order(value, VALUE_KEYS, path, "value", violations)
+    _check_key_order(value, VALUE_KEYS + OPTIONAL_VALUE_KEYS, path, "value", violations)
+
+    if "level" in value:
+        level = value["level"]
+        if level is not None and level not in LEVELS:
+            violations.append(Violation(f"{path}.level", "unknown_level", f"unknown level {level!r}"))
+        elif level is not None and value.get("value", 0) is None:
+            violations.append(
+                Violation(f"{path}.level", "level_without_reading", f"level {level!r} on a value without a reading")
+            )
 
     if "key" in value and (not _is_str(value["key"]) or value["key"] == ""):
         violations.append(Violation(f"{path}.key", "wrong_type", "key must be a non-empty string"))
@@ -1274,6 +1291,11 @@ def _validate_node(
                         "node state ok but a value is not",
                     )
                 )
+            if state == "ok" and any(isinstance(v, dict) and v.get("level") in ("warn", "bad") for v in values):
+                violations.append(
+                    Violation(f"{path}.values", "node_ok_with_limit", "node state ok but a value is at warn/bad")
+                )
+    _check_v15_why(node, state, values if values_ok else [], path, violations)
 
     if "series" in node:
         _validate_series(node["series"], f"{path}.series", violations)
@@ -1322,6 +1344,38 @@ def _validate_node(
             violations.append(
                 Violation(f"{path}.role", "role_not_available", f"{role!r} not in roles_available")
             )
+
+
+def _check_v15_why(node: dict, state: object, values: list, path: str, violations: list[Violation]) -> None:
+    """Spec 5.3/5.6 (v1.5): `limit`, `not_requested` and `switched_off` must agree with the node."""
+    why = node.get("why")
+    if not isinstance(why, dict):
+        return
+    code = why.get("code")
+    evidence = why.get("evidence")
+    if code == "limit":
+        ok = isinstance(evidence, dict)
+        ok = ok and _is_str(evidence.get("value")) and evidence.get("level") in ("warn", "bad")
+        ok = ok and "reading" in evidence and isinstance(evidence.get("bound"), dict)
+        if ok:
+            named = [v for v in values if isinstance(v, dict) and v.get("key") == evidence["value"]]
+            if named and "level" in named[0] and named[0]["level"] != evidence["level"]:
+                ok = False
+        if not ok:
+            violations.append(
+                Violation(
+                    f"{path}.why.evidence",
+                    "limit_evidence_mismatch",
+                    "limit needs evidence {value, level warn|bad, reading, bound} agreeing with that value's level",
+                )
+            )
+    elif code == "not_requested":
+        if state != "unknown" or any(isinstance(v, dict) and v.get("value") is not None for v in values):
+            violations.append(
+                Violation(path, "not_requested_inconsistent", "not_requested needs state unknown and no reading")
+            )
+    elif code == "switched_off" and state != "absent":
+        violations.append(Violation(path, "switched_off_inconsistent", f"switched_off on state {state!r}"))
 
 
 # --- ancestor_role ----------------------------------------------------------------
