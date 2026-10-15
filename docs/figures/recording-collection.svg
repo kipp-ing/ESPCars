@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+<title id="title">Recording and collection</title><desc id="desc">A three-phase workflow shows configuration and local checks at the bench, bus recording to SD while WiFi is unavailable, and subsequent host-based retrieval, verification, archiving and signal decoding. Connectivity and data flow sketches are schematic, not measurements.</desc>
+<defs>
+<marker id="blue-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0L8 4L0 8Z" fill="#006EB6"/></marker>
+<marker id="grey-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0L8 4L0 8Z" fill="#627486"/></marker>
+</defs><g font-family="Arial, Helvetica, sans-serif">
+<rect x="0" y="0" width="1600" height="900" fill="#FFFFFF" stroke="none" stroke-width="1" rx="0"/>
+<rect x="80" y="43" width="7" height="25" fill="#006EB6" stroke="none" stroke-width="1" rx="0"/>
+<text x="101" y="64" fill="#142B43" font-size="25" font-weight="700" text-anchor="start">ESPCars</text>
+<text x="1520" y="62" fill="#627486" font-size="14" font-weight="400" text-anchor="end" letter-spacing="2">RECORDING &amp; COLLECTION</text>
+<text x="80" y="145" fill="#142B43" font-size="48" font-weight="700" text-anchor="start">Recording and collection</text>
+<text x="80" y="191" fill="#627486" font-size="22" font-weight="400" text-anchor="start">Local recording continues offline. The host collects sealed files when the device is reachable.</text>
+<path d="M80 226H1520" fill="none" stroke="#CDD6DF" stroke-width="1" stroke-linejoin="round"/>
+<path d="M80 843H1520" fill="none" stroke="#CDD6DF" stroke-width="1" stroke-linejoin="round"/>
+<text x="80" y="878" fill="#627486" font-size="15" font-weight="400" text-anchor="start">ESPCars  /  ESPHome components for vehicle buses</text>
+<text x="1520" y="878" fill="#627486" font-size="15" font-weight="400" text-anchor="end">02</text>
+<rect x="80" y="267" width="34" height="34" fill="#006EB6" stroke="none" stroke-width="1" rx="0"/>
+<text x="97" y="291" fill="#FFFFFF" font-size="20" font-weight="700" text-anchor="middle">1</text>
+<text x="129" y="292" fill="#142B43" font-size="28" font-weight="700" text-anchor="start">Configure &amp; verify</text>
+<text x="129" y="322" fill="#627486" font-size="18" font-weight="400" text-anchor="start">On the bench</text>
+<rect x="80" y="350" width="450" height="364" fill="#F4F7FA" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<rect x="575" y="267" width="34" height="34" fill="#006EB6" stroke="none" stroke-width="1" rx="0"/>
+<text x="592" y="291" fill="#FFFFFF" font-size="20" font-weight="700" text-anchor="middle">2</text>
+<text x="624" y="292" fill="#142B43" font-size="28" font-weight="700" text-anchor="start">Record locally</text>
+<text x="624" y="322" fill="#627486" font-size="18" font-weight="400" text-anchor="start">During the test run</text>
+<rect x="575" y="350" width="450" height="364" fill="#F4F7FA" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<rect x="1070" y="267" width="34" height="34" fill="#006EB6" stroke="none" stroke-width="1" rx="0"/>
+<text x="1087" y="291" fill="#FFFFFF" font-size="20" font-weight="700" text-anchor="middle">3</text>
+<text x="1119" y="292" fill="#142B43" font-size="28" font-weight="700" text-anchor="start">Collect &amp; analyse</text>
+<text x="1119" y="322" fill="#627486" font-size="18" font-weight="400" text-anchor="start">When the device is reachable</text>
+<rect x="1070" y="350" width="450" height="364" fill="#F4F7FA" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<rect x="106" y="398" width="105" height="61" fill="#FFFFFF" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<text x="158" y="435" fill="#142B43" font-size="20" font-weight="700" text-anchor="middle">CAN / LIN</text>
+<path d="M211 430H250" fill="none" stroke="#006EB6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<rect x="258" y="387" width="233" height="90" fill="#FFFFFF" stroke="#006EB6" stroke-width="1" rx="0"/>
+<text x="375" y="427" fill="#142B43" font-size="25" font-weight="700" text-anchor="middle">ESPCars</text>
+<text x="375" y="455" fill="#627486" font-size="17" font-weight="400" text-anchor="middle">Application on ESP32</text>
+<path d="M375 486L375 513" fill="none" stroke="#627486" stroke-width="2" stroke-linejoin="round" marker-end="url(#grey-arrow)"/>
+<rect x="222" y="522" width="269" height="72" fill="#FFFFFF" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<rect x="233" y="535" width="19" height="33" fill="#EAF3FA" stroke="#006EB6" stroke-width="1" rx="2"/>
+<text x="270" y="552" fill="#142B43" font-size="23" font-weight="700" text-anchor="start">Local portal</text>
+<text x="270" y="577" fill="#627486" font-size="16" font-weight="400" text-anchor="start">State · values · controls</text>
+<text x="106" y="651" fill="#21384E" font-size="19" font-weight="400" text-anchor="start">Define signals and diagnostic access.</text>
+<text x="106" y="682" fill="#21384E" font-size="19" font-weight="400" text-anchor="start">Check the application before the run.</text>
+<path d="M641 449L670 433L701 396H829L869 433H923V474H641Z" fill="#FFFFFF" stroke="#142B43" stroke-width="2.2" stroke-linejoin="round"/>
+<path d="M707 404H820L848 433H685Z" fill="#EAF3FA" stroke="#627486" stroke-width="1.5" stroke-linejoin="round"/>
+<circle cx="692" cy="474" r="18" fill="#FFFFFF" stroke="#142B43" stroke-width="2.2"/>
+<circle cx="692" cy="474" r="7" fill="#CDD6DF"/>
+<circle cx="873" cy="474" r="18" fill="#FFFFFF" stroke="#142B43" stroke-width="2.2"/>
+<circle cx="873" cy="474" r="7" fill="#CDD6DF"/>
+<path d="M784 500L784 521" fill="none" stroke="#006EB6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<rect x="624" y="531" width="223" height="62" fill="#FFFFFF" stroke="#006EB6" stroke-width="1" rx="0"/>
+<text x="735" y="569" fill="#142B43" font-size="23" font-weight="700" text-anchor="middle">Bus recording</text>
+<path d="M855 562H889" fill="none" stroke="#006EB6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<path d="M901 530H945L959 544V594H901Z" fill="#FFFFFF" stroke="#006EB6" stroke-width="1.8" stroke-linejoin="round"/>
+<text x="930" y="571" fill="#142B43" font-size="23" font-weight="700" text-anchor="middle">SD</text>
+<rect x="625" y="624" width="251" height="32" fill="#FFF5E2" stroke="none" stroke-width="1" rx="0"/>
+<text x="642" y="647" fill="#A96B00" font-size="18" font-weight="700" text-anchor="start">WiFi unavailable</text>
+<text x="601" y="687" fill="#21384E" font-size="19" font-weight="400" text-anchor="start">Frames and firmware events stay local.</text>
+<text x="1096" y="386" fill="#627486" font-size="15" font-weight="700" text-anchor="start" letter-spacing="1.5">DEVICE</text>
+<text x="1340" y="386" fill="#627486" font-size="15" font-weight="700" text-anchor="start" letter-spacing="1.5">HOST</text>
+<rect x="1096" y="405" width="131" height="92" fill="#FFFFFF" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<text x="1161" y="443" fill="#142B43" font-size="22" font-weight="700" text-anchor="middle">SD files</text>
+<text x="1161" y="474" fill="#627486" font-size="15" font-weight="400" text-anchor="middle">Sealed chunks</text>
+<rect x="1340" y="405" width="154" height="92" fill="#FFFFFF" stroke="#006EB6" stroke-width="1" rx="0"/>
+<text x="1417" y="443" fill="#142B43" font-size="22" font-weight="700" text-anchor="middle">Collector</text>
+<text x="1417" y="474" fill="#627486" font-size="15" font-weight="400" text-anchor="middle">Scheduled pull</text>
+<path d="M1330 421H1236" fill="none" stroke="#627486" stroke-width="1.8" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#grey-arrow)"/>
+<text x="1283" y="412" fill="#627486" font-size="13" font-weight="400" text-anchor="middle">request</text>
+<path d="M1237 470H1331" fill="none" stroke="#006EB6" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<text x="1283" y="458" fill="#006EB6" font-size="14" font-weight="400" text-anchor="middle">files</text>
+<path d="M1417 505L1417 532" fill="none" stroke="#006EB6" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<rect x="1096" y="541" width="398" height="55" fill="#FFFFFF" stroke="#CDD6DF" stroke-width="1" rx="0"/>
+<text x="1295" y="575" fill="#142B43" font-size="20" font-weight="700" text-anchor="middle">Verify → archive → acknowledge</text>
+<path d="M1106 569H1083V451H1089" fill="none" stroke="#627486" stroke-width="1.8" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#grey-arrow)"/>
+<path d="M1295 604L1295 625" fill="none" stroke="#006EB6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<rect x="1096" y="634" width="398" height="54" fill="#EAF3FA" stroke="#006EB6" stroke-width="1" rx="0"/>
+<text x="1295" y="668" fill="#142B43" font-size="21" font-weight="700" text-anchor="middle">DBC decode → query / publish</text>
+<text x="80" y="755" fill="#627486" font-size="15" font-weight="700" text-anchor="start" letter-spacing="1.5">CONNECTIVITY</text>
+<text x="80" y="795" fill="#627486" font-size="15" font-weight="400" text-anchor="start">Schematic sequence</text>
+<path d="M285 779H567" fill="none" stroke="#006EB6" stroke-width="3" stroke-linejoin="round"/>
+<path d="M588 779H1027" fill="none" stroke="#A96B00" stroke-width="2.2" stroke-linejoin="round" stroke-dasharray="7 6"/>
+<path d="M1048 779H1516" fill="none" stroke="#006EB6" stroke-width="3" stroke-linejoin="round" marker-end="url(#blue-arrow)"/>
+<text x="425" y="759" fill="#627486" font-size="17" font-weight="400" text-anchor="middle">Local access</text>
+<text x="805" y="759" fill="#A96B00" font-size="17" font-weight="400" text-anchor="middle">Offline recording</text>
+<text x="1277" y="759" fill="#006EB6" font-size="17" font-weight="400" text-anchor="middle">Automatic collection</text>
+<text x="285" y="818" fill="#627486" font-size="18" font-weight="400" text-anchor="start">Original recordings are retained in the host archive; decoded signals are derived from them.</text>
+</g></svg>
