@@ -2,9 +2,11 @@
 
 The golden files in fixtures/envelopes/ are compact JSON, byte for byte what a schema_version 2
 producer emits for the snapshots built in tests/host/emit_portal_envelope.cpp (basic, narrowed,
-no_identity, series, stale: produced by the pre-portal v2 core, so they pin wire compatibility, G2).
-`actions.json` is the portal's own extension (5.4/5.5) and was reviewed against the spec by hand.
-Everything is fictional.
+no_identity, series, stale: produced by the pre-portal v2 core, so they pin wire compatibility, G2;
+since spec v1.5 each value additionally carries `"level":null`, and nothing else changed).
+`actions.json` is the portal's own extension (5.4/5.5) and was reviewed against the spec by hand,
+`daumen.json` the v1.5 additions (PS-M6-05..07). `legacy_v14_basic.json` is `basic` as a v1.4
+producer emitted it (no `level`): the validator must keep accepting it (5.6). Everything is fictional.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ EMITTER = REPO / "tests" / "host" / "emit_portal_envelope.cpp"
 GOLDEN = Path(__file__).parent / "fixtures" / "envelopes"
 CORE_DIR = REPO / "components" / "portal"
 
-BYTE_IDENTICAL = ["basic", "narrowed", "no_identity", "series", "stale"]
+BYTE_IDENTICAL = ["basic", "narrowed", "no_identity", "series", "stale", "daumen"]
 
 
 @pytest.fixture(scope="module")
@@ -136,3 +138,29 @@ def test_cli_validates_all_fixtures() -> None:
     """PS-M1-08: the CLI exit code on the golden set."""
     r = subprocess.run(["python3", str(REPO / "script" / "portal_schema.py"), *map(str, sorted(GOLDEN.glob("*.json")))])
     assert r.returncode == 0
+
+
+def test_v15_goldens_differ_from_v14_only_by_level_null(emit) -> None:
+    """5.6 / G2: the v1.5 producer adds `level` and changes nothing else for a tree without limits."""
+    legacy = (GOLDEN / "legacy_v14_basic.json").read_bytes()
+    assert emit("basic").replace(b',"level":null', b"") == legacy
+    assert portal_schema.validate_envelope(json.loads(legacy)) == []
+    assert b'"level"' not in legacy
+
+
+def test_daumen_golden_carries_limit_not_requested_and_switched_off() -> None:
+    """PS-M6-05..07 on the wire: limit evidence, a quiet not_requested child, switched_off evidence."""
+    env = json.loads((GOLDEN / "daumen.json").read_text())
+    by_id = {n["id"]: n for _, n in portal_schema.iter_nodes(env["tree"])}
+    bus = by_id["bus"]
+    assert bus["state"] == "degraded" and bus["why"]["code"] == "limit"
+    assert bus["why"]["evidence"] == {"value": "rec", "level": "warn", "reading": 100, "bound": {"above": 95}}
+    assert [v["level"] for v in bus["values"]] == ["warn", "ok"]
+    a = by_id["ecus.a"]
+    assert a["state"] == "unknown" and a["why"]["code"] == "not_requested" and a["why"]["evidence"] == {}
+    assert by_id["ecus"]["state"] == "ok"
+    assert "ecus" not in env["tree"]["why"]["evidence"]["children"]
+    bat = by_id["bat"]
+    assert bat["state"] == "absent" and bat["why"]["code"] == "switched_off"
+    assert bat["why"]["evidence"] == {"action": "bat/polling"}
+    assert bat["values"][0]["value"] == 55

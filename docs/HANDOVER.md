@@ -145,6 +145,16 @@ has no exception → TEC to 256 → bus-off → recovery → flap ~1/s. Unblocks
 - Ledger leftovers: Todo 7b (§3.7), Todo 4's counter and `reclaim_head` check
   (§3.4), Todo 8's two never-compiled config shapes (§3.8).
 
+**1.8 `portal` spec v1.5 ("Daumen", branch `feat/portal-daumen`): no board run yet.**
+Backend is in (UI hints injected into the page at codegen, value limits / `level`, `limit`
+why, `on_demand` / `not_requested`, built-in `switch_off` provider, `borrow`; spec
+[`portal-spec.md`](portal-spec.md) §4.9, §5.3, PS-M6). Host, pytest, `check.sh` and `esphome
+compile` of `tests/build/portal/test.esp32-c6-idf.yaml` green. Static RAM of that build: 151316 B
+before, 151324 B with the new code on the unchanged config (+8: the limits table pointer), 152324 B
+with the extended config (its 3 extra template sensors and 4 nodes, not the feature). Owed on a
+board: a limit crossing advances `seq` and shows `limit` evidence; `switch_off` node goes absent
+when its switch is turned off over the portal; heap with the new page open (largest block ± 1 KB).
+
 ## 2. Where the detail lives
 
 | document | what it carries |

@@ -76,6 +76,42 @@ inline const char *classification_name(Classification classification) {
   return "real";
 }
 
+/// One limit pair of a value (§4.3): `below: x` matches a reading `< x`, `above: x` one `> x`.
+struct LimitBound {
+  bool has_below;
+  bool has_above;
+  float below;
+  float above;
+};
+
+/// The static limits of one value (§4.3), compiled into flash by codegen. Value-initialised
+/// (`ValueLimit{}`) it declares nothing, which derives `level: ok` for a reading.
+struct ValueLimit {
+  LimitBound warn;
+  LimitBound bad;
+  bool has_warn_when;  ///< boolean values only
+  bool warn_when;
+  bool has_bad_when;
+  bool bad_when;
+};
+
+/// A value's `level` (§5.3). NONE is the JSON null: no limits, or no reading.
+enum class Level : uint8_t { NONE, OK, WARN, BAD };
+
+inline const char *level_name(Level level) {
+  switch (level) {
+    case Level::OK:
+      return "ok";
+    case Level::WARN:
+      return "warn";
+    case Level::BAD:
+      return "bad";
+    case Level::NONE:
+      break;
+  }
+  return nullptr;
+}
+
 /// One scalar as the emitter sees it. No ESPHome types.
 struct ValueSample {
   const char *key;    ///< non-empty
@@ -93,6 +129,9 @@ struct ValueSample {
   bool has_value;      ///< false -> no reading at all
   bool age_known;      ///< false -> never published
   bool text_overflow;  ///< text was longer than PORTAL_TEXT_MAX; never true when is_bool
+  /// §4.3/§5.3: 1-based slot into Snapshot::limits, 0 -> no limits (`level: null`). An index,
+  /// not a pointer, so it sits in the struct's padding and costs no RAM per value.
+  uint16_t limit_slot{0};
 };
 
 /// One series element as the emitter sees it, filled by one call to
@@ -257,10 +296,13 @@ struct NodeDef {
   uint16_t parent;  ///< NO_PARENT for the root; parents always precede children
   uint16_t value_first;
   uint16_t value_count;
-  uint32_t budget_ms;             ///< meaningless unless budget_known
-  bool budget_known;              ///< false -> "budget_ms": null; no value under this node can be STALE
-                                  ///< (most bound entities publish on change with no cadence, and
-                                  ///< no invented number is honest for those)
+  uint32_t budget_ms;  ///< meaningless unless budget_known
+  bool budget_known;   ///< false -> "budget_ms": null; no value under this node can be STALE
+                       ///< (most bound entities publish on change with no cadence, and
+                       ///< no invented number is honest for those)
+  /// §4.1/§5.3: until any own value has a reading the node is `unknown` / `not_requested`, and
+  /// it never upgrades its parent in that state. Placed here to fill padding.
+  bool on_demand{false};
   const char *absent_why;         ///< non-null -> node is ABSENT with this why.code
   const char *role;               ///< nullptr when the node has no role
   const char *roles_available;    ///< comma-separated; nullptr iff role is nullptr
@@ -278,7 +320,8 @@ struct NodeDef {
   uint16_t action_count{0};
 };
 
-/// The absence predicate. `resolve()` is its ONE caller: `absent_fn` reads live state at call
+/// The absence predicate. Within a response `resolve()` is its ONE caller (`fingerprint()` also
+/// mixes it in, on the main loop, for `seq` only): `absent_fn` reads live state at call
 /// time by design, so a second evaluation later in the same response could see a different
 /// answer and pair `state:"absent"` with a `why.code` from a re-read that no longer says
 /// absent. `describe_node_reason()` therefore reads `r.states[index] == State::ABSENT`, the one
@@ -318,6 +361,9 @@ struct Snapshot {
   size_t action_count{0};
   const LinkDef *links{nullptr};
   size_t link_count{0};
+  /// §4.3: the limits table ValueSample::limit_slot indexes (constant data, in flash).
+  const ValueLimit *limits{nullptr};
+  size_t limit_count{0};
 };
 
 /// Caller-owned scratch, one entry per node. Freestanding cores never allocate.
@@ -564,6 +610,86 @@ inline ValueVerdict classify_value(const ValueSample &v, uint32_t node_budget_ms
   return {Classification::REAL, State::OK, nullptr, nullptr};
 }
 
+/// Which limit matched a reading (§5.3 `limit` evidence).
+struct LimitHit {
+  Level level{Level::NONE};
+  uint8_t which{0};  ///< 0 below, 1 above, 2 when (boolean)
+  float bound{0.0f};
+  bool when{false};
+};
+
+inline bool bound_hit(const LimitBound &b, float x, LimitHit *hit, Level level) {
+  if (b.has_below && x < b.below) {
+    *hit = {level, 0, b.below, false};
+    return true;
+  }
+  if (b.has_above && x > b.above) {
+    *hit = {level, 1, b.above, false};
+    return true;
+  }
+  return false;
+}
+
+/// §5.3: a value's level. NONE without limits or without a reading (classification sna); text
+/// carries no limits (the config refuses them). `bad` is checked before `warn`.
+inline const ValueLimit *limit_of(const Snapshot &s, const ValueSample &v) {
+  if (v.limit_slot == 0 || s.limits == nullptr || v.limit_slot > s.limit_count)
+    return nullptr;
+  return &s.limits[v.limit_slot - 1];
+}
+
+inline LimitHit limit_hit(const Snapshot &s, const ValueSample &v) {
+  LimitHit hit;
+  const ValueLimit *limit = limit_of(s, v);
+  if (limit == nullptr || v.is_text || !v.has_value || !v.age_known)
+    return hit;
+  if (!v.is_bool && !is_finite_float(v.number))
+    return hit;
+  const ValueLimit &lim = *limit;
+  if (v.is_bool) {
+    const bool reading = v.number != 0.0f;
+    if (lim.has_bad_when && reading == lim.bad_when)
+      return {Level::BAD, 2, 0.0f, lim.bad_when};
+    if (lim.has_warn_when && reading == lim.warn_when)
+      return {Level::WARN, 2, 0.0f, lim.warn_when};
+  } else {
+    if (bound_hit(lim.bad, v.number, &hit, Level::BAD) || bound_hit(lim.warn, v.number, &hit, Level::WARN))
+      return hit;
+  }
+  hit.level = Level::OK;
+  return hit;
+}
+
+/// The node's worst limited value (`bad` over `warn`, ties to the first in order); -1 if none
+/// is at `warn` or `bad`.
+inline int worst_limit(const Snapshot &s, const NodeDef &node, LimitHit *out) {
+  int index = -1;
+  LimitHit worst;
+  for (uint16_t k = 0; k < node.value_count; k++) {
+    const LimitHit hit = limit_hit(s, s.values[node.value_first + k]);
+    if ((hit.level == Level::WARN || hit.level == Level::BAD) &&
+        static_cast<uint8_t>(hit.level) > static_cast<uint8_t>(worst.level)) {
+      worst = hit;
+      index = k;
+    }
+  }
+  if (out != nullptr)
+    *out = worst;
+  return index;
+}
+
+/// §5.3 `not_requested`: an on_demand node none of whose own values has a reading.
+inline bool not_requested(const Snapshot &s, const NodeDef &node) {
+  if (!node.on_demand || node.value_count == 0)
+    return false;
+  for (uint16_t k = 0; k < node.value_count; k++) {
+    const ValueSample &v = s.values[node.value_first + k];
+    if (v.has_value && v.age_known)
+      return false;
+  }
+  return true;
+}
+
 inline const ValueSample *find_value(const Snapshot &s, const NodeDef &node, const char *key) {
   if (key == nullptr)
     return nullptr;
@@ -602,6 +728,9 @@ struct NodeReason {
   bool evidence_children;
   // Carry-through of NodeDef::absent_evidence. nullptr -> no pre-rendered fragment.
   const char *evidence{nullptr};
+  // `limit`: the worst limited value and the limit it hit (§5.3).
+  const ValueSample *limit_value{nullptr};
+  LimitHit limit_hit{};
 };
 
 inline NodeReason describe_node_reason(const Snapshot &s, const Resolved &r, size_t index) {
@@ -614,6 +743,8 @@ inline NodeReason describe_node_reason(const Snapshot &s, const Resolved &r, siz
     return {node.absent_why, nullptr, false, node.absent_evidence};
   if (unknown_when_matches(s, node))
     return {node.unknown_why, nullptr, false};
+  if (r.states[index] == State::UNKNOWN && not_requested(s, node))
+    return {"not_requested", nullptr, false};
   bool any_unavailable = false;
   bool any_stale = false;
   for (uint16_t k = 0; k < node.value_count; k++) {
@@ -625,9 +756,23 @@ inline NodeReason describe_node_reason(const Snapshot &s, const Resolved &r, siz
   }
   if (any_unavailable)
     return {"entities_unavailable", nullptr, false};
+  LimitHit hit;
+  const int limited = worst_limit(s, node, &hit);
+  if (limited >= 0) {
+    NodeReason reason{"limit", nullptr, false};
+    reason.limit_value = &s.values[node.value_first + limited];
+    reason.limit_hit = hit;
+    return reason;
+  }
   if (any_stale)
     return {"stale_data", nullptr, false};
   return {"child_degraded", nullptr, true};
+}
+
+/// A child that does not upgrade its parent and is left out of `child_degraded` evidence:
+/// `unknown` / `not_requested` (§5.3).
+inline bool child_is_quiet(const Snapshot &s, const Resolved &r, size_t index) {
+  return r.states[index] == State::UNKNOWN && not_requested(s, s.nodes[index]);
 }
 
 }  // namespace detail
@@ -673,7 +818,11 @@ inline void resolve(const Snapshot &s, Resolved &out) {
         age_known = false;
         age_ms = 0;
       }
-    } else if (any_unavailable) {
+    } else if (detail::not_requested(s, node)) {
+      state = State::UNKNOWN;
+      age_known = false;
+      age_ms = 0;
+    } else if (any_unavailable || detail::worst_limit(s, node, nullptr) >= 0) {
       state = State::DEGRADED;
     } else if (any_stale) {
       state = State::STALE;
@@ -696,7 +845,7 @@ inline void resolve(const Snapshot &s, Resolved &out) {
     for (size_t j = idx + 1; j < limit; j++) {
       if (s.nodes[j].parent != static_cast<uint16_t>(idx))
         continue;
-      if (out.states[j] != State::OK)
+      if (out.states[j] != State::OK && !detail::child_is_quiet(s, out, j))
         any_child_not_ok = true;
     }
     if (any_child_not_ok)
@@ -715,6 +864,25 @@ inline bool has_node(const Snapshot &s, const char *path) {
 }
 
 namespace detail {
+
+/// The fewest decimals (0..6) that write `x` without visible rounding (a limit bound from YAML:
+/// 127 -> "127", 11.5 -> "11.5", 0.05 -> "0.05").
+inline int8_t shortest_decimals(float x) {
+  double v = static_cast<double>(x);
+  if (v < 0)
+    v = -v;
+  if (!is_finite_float(x) || v >= 1e12)
+    return 0;
+  double scale = 1.0;
+  for (int8_t d = 0; d < 6; d++) {
+    const double scaled = v * scale;
+    const double frac = scaled - static_cast<double>(static_cast<uint64_t>(scaled));
+    if (frac < 1e-3 || frac > 1.0 - 1e-3)
+      return d;
+    scale *= 10.0;
+  }
+  return 6;
+}
 
 inline bool write_csv_as_json_array(ChunkWriter &w, const char *csv) {
   if (csv == nullptr)
@@ -741,7 +909,8 @@ inline bool write_csv_as_json_array(ChunkWriter &w, const char *csv) {
   return true;
 }
 
-inline bool write_value(ChunkWriter &w, const ValueSample &v, uint32_t node_budget_ms, bool budget_known) {
+inline bool write_value(ChunkWriter &w, const Snapshot &s, const ValueSample &v, uint32_t node_budget_ms,
+                        bool budget_known) {
   const ValueVerdict verdict = classify_value(v, node_budget_ms, budget_known);
   const bool is_sna = verdict.classification == Classification::SNA;
   if (!w.literal("{\"key\":") || !w.json_string(v.key))
@@ -801,6 +970,10 @@ inline bool write_value(ChunkWriter &w, const ValueSample &v, uint32_t node_budg
     if (!w.literal(",\"since_ms\":null,\"evidence\":{}}"))
       return false;
   }
+  // §5.3: `level` after the v2 keys; null without limits or without a reading.
+  const char *level = level_name(limit_hit(s, v).level);
+  if (!w.literal(",\"level\":") || !(level != nullptr ? w.json_string(level) : w.literal("null")))
+    return false;
   return w.literal("}");
 }
 
@@ -824,6 +997,28 @@ inline bool write_node_why(ChunkWriter &w, const Snapshot &s, const Resolved &r,
       return false;
     wrote_evidence = true;
   }
+  if (reason.limit_value != nullptr) {
+    const ValueSample &v = *reason.limit_value;
+    const LimitHit &hit = reason.limit_hit;
+    if (!w.literal("\"value\":") || !w.json_string(v.key))
+      return false;
+    if (!w.literal(",\"level\":") || !w.json_string(level_name(hit.level)))
+      return false;
+    if (!w.literal(",\"reading\":"))
+      return false;
+    if (!(v.is_bool ? w.literal(v.number != 0.0f ? "true" : "false") : w.number_float(v.number, v.decimals)))
+      return false;
+    if (hit.which == 2) {
+      if (!w.literal(",\"bound\":{\"when\":") || !w.literal(hit.when ? "true}" : "false}"))
+        return false;
+    } else {
+      if (!w.literal(hit.which == 0 ? ",\"bound\":{\"below\":" : ",\"bound\":{\"above\":"))
+        return false;
+      if (!w.number_float(hit.bound, shortest_decimals(hit.bound)) || !w.literal("}"))
+        return false;
+    }
+    wrote_evidence = true;
+  }
   if (reason.evidence_children) {
     if (wrote_evidence && !w.literal(","))
       return false;
@@ -833,7 +1028,7 @@ inline bool write_node_why(ChunkWriter &w, const Snapshot &s, const Resolved &r,
     for (size_t j = index + 1; j < s.node_count; j++) {
       if (s.nodes[j].parent != static_cast<uint16_t>(index))
         continue;
-      if (r.states[j] == State::OK)
+      if (r.states[j] == State::OK || child_is_quiet(s, r, j))
         continue;
       if (!first && !w.literal(","))
         return false;
@@ -1187,7 +1382,7 @@ inline bool write_node(ChunkWriter &w, const Snapshot &s, const Resolved &r, siz
   for (uint16_t k = 0; k < node.value_count; k++) {
     if (k != 0 && !w.literal(","))
       return false;
-    if (!write_value(w, s.values[node.value_first + k], node.budget_ms, node.budget_known))
+    if (!write_value(w, s, s.values[node.value_first + k], node.budget_ms, node.budget_known))
       return false;
   }
   if (!w.literal("],\"series\":"))
@@ -1429,6 +1624,9 @@ inline uint32_t fingerprint(const Snapshot &s) {
   };
   for (size_t n = 0; n < s.node_count; n++) {
     const NodeDef &node = s.nodes[n];
+    // §5.1: an `absent_when` verdict is derived state (e.g. `switch_off` follows a switch).
+    if (node.absent_fn != nullptr)
+      mix(node_is_absent(node) ? 1u : 0u);
     for (uint16_t k = 0; k < node.value_count; k++) {
       const ValueSample &v = s.values[node.value_first + k];
       const detail::ValueVerdict verdict = detail::classify_value(v, node.budget_ms, node.budget_known);

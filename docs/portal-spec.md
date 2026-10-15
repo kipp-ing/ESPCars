@@ -8,10 +8,13 @@ This document is the contract between implementer and tester. Behaviour that is 
 not required; behaviour that contradicts it is a bug in one of the two, and the spec owner
 decides which (see §11).
 
-**Status:** v1.4, 2026-10-12 (v1.1: access model and AP behaviour decided, §6, §6.3, §10;
+**Status:** v1.5, 2026-10-14 (v1.1: access model and AP behaviour decided, §6, §6.3, §10;
 v1.2: provider body contract §4.6, number traits non-null §5.4, validator contract §5.6;
 v1.3: rejections outside the portal and 503 §6.2, shutdown rule §6.2, kind views §7;
-v1.4: page repaint hold and local clocks §7, from the bench). Origin: the `webui_node` component of a private bench-simulator
+v1.4: page repaint hold and local clocks §7, from the bench;
+v1.5: UI hints injected into the page §4.9, value limits and `level` §4.3/§5.3, `on_demand` /
+`not_requested` §4.1/§5.3, the built-in absent provider `switch_off` §4.6, derivation
+precedence §5.3, validator rules §5.6). Origin: the `webui_node` component of a private bench-simulator
 project (wire format `schema_version: 2`), lifted here and made vehicle-neutral. Nothing in
 this repository may name that project, its boards, MACs, IPs or captures
 (`script/check_no_private_data.py`, `docs/CONVENTIONS.md`).
@@ -27,8 +30,8 @@ this repository may name that project, its boards, MACs, IPs or captures
   embedded HTML page at `GET /`.
 - G2 Wire format of `/api/v1/state` stays compatible with `schema_version: 2` consumers:
   every key and every rule of §5 that existed before still holds; new information is added
-  only as new keys: inside `actions[]` entries and the envelope's `links` (both ignored by a
-  consumer that does not know them).
+  only as new keys: inside `actions[]` entries, the envelope's `links` and a value's `level`
+  (all ignored by a consumer that does not know them).
 - G3 Vehicle-neutral: nothing in the component, the asset or its tests names a specific
   vehicle, board or bench. Position (`owns`) is declared in YAML, never derived from which
   components are compiled.
@@ -44,7 +47,7 @@ this repository may name that project, its boards, MACs, IPs or captures
 **Non-goals (v1)**
 
 - Peer mounting (`peers` stays `[]`), runtime roles, live CAN frame views.
-- Any built-in data provider for series/absence (the registry ships empty, §4.6).
+- Any built-in data provider for series, and any absence provider beyond `switch_off` (§4.6).
 - Arduino or non-ESP32 targets.
 
 ---
@@ -95,6 +98,9 @@ portal:
   text_max: 48                 # optional 16..256, default 48; text value cap in bytes
   submodule_size: 12           # optional int >= 1; required iff any node declares submodule_position
   web_asset: my_page.html      # optional path (relative to the YAML); replaces index.html
+  lang: en                     # optional en (default) | de; page render texts only (4.9)
+  layout:                      # optional; static UI hints for the page (4.9)
+    tabs: [ <tab>, ... ]
   auth:                        # optional, also with actions; guards only POST actions
     username: !secret web_username
     password: !secret web_password
@@ -119,6 +125,8 @@ portal:
 | `unknown_when` | `{value, equals, why}` | `value` must be one of this node's own value keys; not combinable with `children` |
 | `trust_from` | value key | must be one of this node's own value keys |
 | `submodule_position` | int >= 1 | optional; unique across the whole tree |
+| `on_demand` | bool, default false | the node's values are only published when asked for (5.3 `not_requested`); requires `values` |
+| `borrow` | list of `{action, before?}` | optional, UI hint only (4.9): render another node's action on this node's page |
 
 Node ids are dotted paths: a top-level node's id is its `segment`, a child's id is
 `<parent id>.<segment>`. The synthetic root has id `car`, kind `car`, label `root_label`
@@ -128,7 +136,12 @@ Cross-field rules (each a config error naming the node):
 
 - `absent` without `absent_when` is exclusive with `values`, `children`, `role`,
   `unknown_when`, `series`, `actions`. With `absent_when` only `role` and `unknown_when` stay
-  exclusive.
+  exclusive: a conditionally absent node keeps its values, and they still emit while it is
+  absent (classification as usual), so a page can show them as "off" with the reason.
+- `absent_when` requires `absent`, unless the provider declares a default why-code
+  (`switch_off`: `switched_off`, 4.6); then `absent` may be omitted and is filled in.
+- `on_demand: true` without `values` is an error (a node with nothing to publish would be
+  `not_requested` for ever).
 - The evidence-gated why-codes `never_announced`, `no_transfer`, `crc_fail`,
   `negative_response` are refused in `unknown_when.why`, and in `absent` unless the chosen
   `absent_when` provider declares evidence for exactly that code.
@@ -159,6 +172,17 @@ Cross-field rules (each a config error naming the node):
 | `decimals` | 0..6, default 0 |
 | `cadence_ms` | int >= 1, optional; forbidden on `binary_sensor` |
 | exactly one of `sensor` / `text_sensor` / `binary_sensor` | entity id |
+| `expert` | bool, default false; UI hint (4.9): the page hides the value unless "expert" is on or the value is not fine |
+| `warn`, `bad` | `{below: float, above: float}`, at least one key; `sensor` values only |
+| `warn_when`, `bad_when` | bool; `binary_sensor` values only |
+
+Limits (`warn`, `bad`, `warn_when`, `bad_when`) drive the value's `level` (5.3). Numeric:
+`below: x` matches a reading `< x`, `above: x` a reading `> x`; `bad` is checked before `warn`.
+Boolean: `bad_when: b` matches a reading `== b`, then `warn_when`. Limits on a `text_sensor`
+value, numeric limits on a `binary_sensor` value and `*_when` on a `sensor` value are config
+errors. The limits are compiled into flash as one constant table (one small struct per limited
+value); a value names its row by a 16-bit slot that sits in existing struct padding, so limits
+cost no heap and nothing per request.
 
 ### 4.4 Budget derivation
 
@@ -193,13 +217,14 @@ other frame -> null. Two nodes with the same `submodule_position` -> config erro
 
 ```python
 register_absent_provider(name, *, args: dict[str, validator], source_type: MockObjClass,
-                         body: str, evidence: str | None = None, for_why: tuple[str, ...] = ())
+                         body: str, evidence: str | None = None, for_why: tuple[str, ...] = (),
+                         default_why: str | None = None)
 register_series_provider(name, *, args: dict[str, validator], source_type: MockObjClass,
                          body: str)
 ```
 
 Another external component calls these at import time to add providers. The portal ships
-**no** providers. Unknown provider -> error listing the registered names. Missing/extra
+exactly one provider of its own, `switch_off` (below). Unknown provider -> error listing the registered names. Missing/extra
 provider args -> error. `source` is `cv.use_id(source_type)`. Codegen emits one thunk per
 distinct (provider, args) into `main.cpp` via `cg.add_global`, named deterministically
 (`portal_prov_<provider>_<argletter><value>...`), deduplicated within one build.
@@ -220,6 +245,22 @@ inside `body`:
 The thunk text is emitted after `#include "esphome.h"`, so every compiled component's
 headers are visible; the portal includes nothing of the provider's component.
 
+**Built-in absent provider `switch_off`** (generic, no extra args, `source`: a `switch` id):
+
+```yaml
+- segment: monitor
+  values: [ ... ]                       # kept, see 4.1
+  absent_when: {provider: switch_off, source: monitor_switch}
+  # absent: switched_off                # optional, this is the default
+```
+
+- The node is `absent` while the switch is off (or the switch is missing), `why.code`
+  `switched_off` (the provider's default why-code; any other non-gated code may be declared).
+- `why.evidence` is `{"action": "<node id>/<key>"}`: the first action in the tree (pre-order,
+  YAML order) whose `switch:` is that same entity, resolved at codegen. No such action ->
+  `evidence: {}`. This lets a page put the switch next to the cause.
+- The switch's state is part of the fingerprint (5.1), so turning it advances `seq`.
+
 ### 4.7 Action
 
 ```yaml
@@ -237,6 +278,13 @@ actions:
     label: Interval
     number: interval_number
     decimals: 1             # number only, 0..6, default 2
+    group: Settings         # optional UI hint (4.9): non-empty section name
+  - key: send
+    label: Send
+    button: send_button
+    confirm: hold           # optional UI hint (4.9): only `hold` exists
+    before:                 # optional UI hint (4.9): set these first, in order
+      - {action: ecus/target, value: "a"}
 ```
 
 - Exactly one entity key -> else error `an action needs exactly one of ...`.
@@ -248,6 +296,13 @@ actions:
 - A domain's control code compiles only when that domain exists in the build
   (`USE_SWITCH`, `USE_BUTTON`, `USE_SELECT`, `USE_NUMBER`).
 - The portal never changes an entity's own state logic (`restore_mode`, optimistic, etc.).
+- `confirm`, `group` and `before` are UI hints (4.9). They never change what the device does
+  with a POST: a client that ignores them gets the plain action.
+- `before[]`: each entry is `{action: <ref>, value: <v>}`. `<ref>` is `<node id>/<key>` of a
+  `select`, `number` or `switch` action anywhere in the tree (not the action itself). `value`
+  must fit the control: select a string, number a float, switch a bool. Where the target
+  entity's config is known at config time, the value is checked against it too: a select's
+  `options`, a number's `min_value`/`max_value`. Any mismatch is a config error naming the ref.
 
 ### 4.8 Component-level validation
 
@@ -265,6 +320,55 @@ actions:
 - Sizing defines from Python: `PORTAL_MAX_NODES` (tree nodes + root), `PORTAL_MAX_VALUES`,
   `PORTAL_MAX_SERIES`, `PORTAL_MAX_ACTIONS`, `PORTAL_TEXT_MAX` (each >= 1). Feature define
   `USE_PORTAL`. With `auth:`: `USE_WEBSERVER_AUTH` and `USE_WEBSERVER_AUTH_DIGEST`.
+
+### 4.9 UI hints (static, injected into the page at codegen)
+
+The page-only keys (`lang`, `layout`, value `expert` and limits, action `confirm` / `group` /
+`before`, node `borrow`) become one JSON object that codegen writes **into the page source**
+before it is gzipped: every occurrence of the literal token `/*PORTAL_UI*/null` in the page
+(built-in `index.html` or `web_asset:`) is replaced by the JSON. A page reads it as
+`const UI = /*PORTAL_UI*/null;` (null = no hints, use defaults). A page without the token
+(an older custom page) is embedded byte for byte as before. The hints cost flash only, no heap
+and no bytes per request; the device never reads them back.
+
+```json
+{"lang": "de",
+ "tabs": [{"label": "Drive", "glance": ["bat.main/soc"], "nodes": []},
+          {"label": "Bus", "glance": ["can0/awake"], "nodes": ["can0", "ecus"]}],
+ "values": {"can0/rec": {"expert": true, "warn": {"above": 95}, "bad": {"above": 127}},
+            "can0/bus_off": {"bad_when": true}},
+ "actions": {"dev/restart": {"confirm": "hold", "group": "Device"},
+             "ecus/send": {"before": [{"action": "ecus/target", "value": "A"}]}},
+ "borrow": {"ecus.a": [{"action": "ecus/service"},
+                       {"action": "ecus/send", "before": [{"action": "ecus/target", "value": "a"}]}]}}
+```
+
+- All five top-level keys are always present. `lang` is `en` or `de`. `tabs` is `[]` when
+  `layout` is omitted (the page then makes one tab per root node).
+- `values` / `actions` carry an entry only for a value / action that sets at least one hint,
+  and inside it only the keys that are set (`expert` only when true). Numbers that are whole
+  are written as integers. `borrow` carries an entry per node that declares `borrow:`.
+- Refs: a value ref and an action ref are `<node id>/<key>`, node id the dotted id the state
+  JSON uses. Codegen validates every ref: an unknown ref is a config error listing the valid
+  ones.
+- JSON is compact, UTF-8, and every `<` is written `\u003c`, so no string can close the
+  `<script>` element it lands in.
+
+`layout`:
+
+| key | rule |
+|---|---|
+| `tabs` | list of 0..5 tabs |
+| tab `label` | non-empty string, required |
+| tab `glance` | list of 0..4 value refs, default `[]` |
+| tab `nodes` | list of node ids (dotted), default `[]` |
+
+`borrow` (node key): a list of `{action: <action ref>, before: [...]}` (`before` optional, same
+rules as the action-level `before`, 4.7). The page renders the referenced action (any control,
+from any node) on this node's page and, when it is used there, first sets the `before`
+entries. This is a hint only: no runtime action, no heap; the POST still goes to the referenced
+action's own path. Use it instead of declaring the same select/button again per child node
+(each declared action costs RAM on the device).
 
 ---
 
@@ -285,8 +389,9 @@ Keys in this order: `schema_version` (2), `seq`, `series_legend`, `served_by`, `
   optional (older producers) and checks its shape when present.
 
 - `seq` advances (wraps 0 -> 1) when the fingerprint changes. The fingerprint covers every
-  value's reading and derived state (not raw ages), and every action's emitted `value`,
-  `enabled` and `result.state`/`result.why.code` (not `result.age_ms`).
+  value's reading and derived state (not raw ages), every `absent_when` verdict, and every
+  action's emitted `value`, `enabled` and `result.state`/`result.why.code` (not
+  `result.age_ms`).
 - `series_legend` is `{"r":"real","s":"SNA","i":"implausible","-":"not measured"}` when the
   emitted (possibly narrowed) tree carries at least one emitted series, else `null`.
 - `ancestor_role` (with `path` only): nearest strict ancestor declaring a role, as
@@ -307,11 +412,23 @@ Every node has exactly these keys, always present, in this order: `id`, `kind`, 
 - `state` in {ok, stale, degraded, refused, silent, absent, unknown} from this producer
   (`down`, `unreachable`, `incompatible` exist in the vocabulary, never emitted here).
 - `why` is null iff `state` is `ok`; otherwise `{code, detail, since_ms, evidence}`.
-- Derivation (unchanged): own value never published / non-finite -> `degraded`
+- Derivation: own value never published / non-finite -> `degraded`
   (`entities_unavailable`); text over `text_max` -> value `degraded`; any own value older than
   a known budget (booleans excepted) -> `stale` (`stale_data`); `absent` / `absent_when` ->
   `absent`; `unknown_when` match -> `unknown`; any non-ok child upgrades an ok/stale parent to
   `degraded` (`child_degraded`, evidence `children: {id: state}`).
+- `on_demand` node none of whose own values has a reading (never published since boot) ->
+  `unknown`, `why.code: "not_requested"`, `evidence: {}`. Such a child does **not** upgrade
+  its parent and is left out of the parent's `child_degraded` evidence. Once any own value has
+  a reading, normal derivation applies.
+- Any own value with `level` `warn` or `bad` -> `degraded`, `why.code: "limit"`,
+  `evidence: {"value": "<key>", "level": "warn"|"bad", "reading": <reading>, "bound": {...}}`.
+  The worst value wins (`bad` over `warn`), a tie goes to the first in YAML order. `reading`
+  is the value as emitted (number with the value's decimals, or bool). `bound` is the limit
+  that matched: `{"below": x}` or `{"above": x}` (x with the fewest decimals that represent
+  it, at most 6), or `{"when": b}` for a boolean.
+- **Precedence**, first match wins: `absent` (incl. `absent_when`) > `unknown_when` >
+  `not_requested` > `entities_unavailable` > `limit` > `stale_data` > `child_degraded`.
 - `provenance` is `null` on a strict ancestor of an owned node; otherwise
   `{origin:"local", board, node_id, age_ms, budget_ms, trust, seq}`.
 
@@ -319,6 +436,11 @@ Values, series, provenance and transport rules are exactly those of `schema_vers
 `value` null iff `classification` is `sna`; booleans have `raw: null`; series carry
 `key,label,unit,index_base,index(null),index_frame,values,class,pack_index_base`; an absent
 node carries `series: null`.
+
+Value entry (extended, additive): after the v2 keys (`key, label, unit, value, raw, raw_hex,
+classification, state, why`) comes `level`: `"ok"`, `"warn"`, `"bad"`, or `null` when the value
+declares no limits or has no reading (`classification: sna`). `level` never changes the value's
+own `state`/`why` (they keep their v2 meaning); it feeds the node's derivation above.
 
 ### 5.4 Action entry (extended)
 
@@ -377,8 +499,8 @@ the validator does not.
 - **Closed key sets.** Envelope, `served_by`, peer, node, value, series, action, action
   result, why, provenance, `ancestor_role` and `links` entries are closed: a key outside the
   required + optional set of §5 is a violation `unknown_key`. Optional keys are: envelope
-  `links`, `path`, `ancestor_role`; node `role`, `roles_available`; action `control`,
-  `value`, `options`, `min`, `max`, `step`, `unit`, `result`. A missing optional key is
+  `links`, `path`, `ancestor_role`; node `role`, `roles_available`; value `level`; action
+  `control`, `value`, `options`, `min`, `max`, `step`, `unit`, `result`. A missing optional key is
   never a violation; a missing required key is `missing_key`.
 - **Older envelopes must pass.** An otherwise valid v2 envelope with no `links`, actions
   carrying only the seven v2 keys, `series.class: null`, non-empty `peers` (validated per
@@ -389,6 +511,14 @@ the validator does not.
   §5.4) is pinned by the byte-identical golden fixture (PS-M1-08), not by the validator.
 - `series_legend`: exactly the four-entry object of §5.1 or `null`; anything else is a
   violation. It must be `null` iff the tree carries no non-null `series`.
+- v1.5 rules (each only when the key/code is present, so older envelopes pass): `level` outside
+  `ok`/`warn`/`bad`/`null` -> `unknown_level`; a non-null `level` on a value with
+  `value: null` -> `level_without_reading`; a node `ok` with a value at `warn`/`bad` ->
+  `node_ok_with_limit`; `why.code: "limit"` whose evidence lacks `value` (string), `level`
+  (`warn`/`bad`), `reading` or `bound` (object), or names a value of the node whose `level`
+  differs -> `limit_evidence_mismatch`; `not_requested` on a state other than `unknown`, or
+  on a node with a value that has a reading -> `not_requested_inconsistent`; `switched_off`
+  on a state other than `absent` -> `switched_off_inconsistent`.
 
 ---
 
@@ -595,7 +725,7 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M1-01 | `components/portal/{__init__.py,portal.h,portal.cpp,portal_core.h,index.html}` exist; `portal_core.h` includes only `<cstddef>`, `<cstdint>`, `<cstring>` and compiles in the host build | host, py (include grep) |
 | PS-M1-02 | Every schema rule of §4.1, 4.3–4.5 has an accepting and a rejecting pytest case (segment/key patterns, duplicates, exclusivity, evidence-gated codes, budget derivation incl. all null spellings, binary_sensor cadence/budget, series frame/provider rules, role rules, unknown_when/trust_from targets, text_max range, port 32767/65535) | py |
 | PS-M1-03 | `owns` rules of §4.2: unknown id, duplicate, identity-without-owns rejected; a config that compiles `uds`/`isotp` but declares `owns: []` without identity is valid; `resolved` owns equal YAML | py |
-| PS-M1-04 | Provider registry: empty by default; unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) whose text has each `{arg}` replaced by the validated value, `{{`/`}}` as literal braces, and the §4.6 names in scope | py |
+| PS-M1-04 | Provider registry: only `switch_off` by default (v1.5); unknown provider rejected with the (empty) list; a provider registered by the test validates, missing/extra args rejected, codegen emits one deduplicated thunk per (provider, args) whose text has each `{arg}` replaced by the validated value, `{{`/`}}` as literal braces, and the §4.6 names in scope | py |
 | PS-M1-05 | Root node: id `car`, kind `car`, label `root_label` (default `Vehicle`) | py (codegen), host |
 | PS-M1-06 | `submodule_position`/`submodule_size` rules of §4.5 incl. the derived `resolved_pack_index_base` | py |
 | PS-M1-07 | Envelope emitter: all ported core cases pass (ChunkWriter framing at 4096, JSON escaping, number formatting, `parse_after`, `has_node`, resolve/derivation table, child propagation, skeleton provenance, `path`/`ancestor_role` order and cycle guard, series pairing/clamp/legend, absent_fn single evaluation, fingerprint ignores age but not state, flush failure propagates) under ASan/UBSan | host |
@@ -652,6 +782,20 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 |---|---|---|
 | PS-M5-01 | One bench board identified by MAC, flashed with the M4 test config; its previous image restored afterwards (same build string as before) | bench |
 | PS-M5-02 | PS-M2-06..10 and PS-M3-06..07 run on that board, results in the PR | bench |
+
+### M6 — Daumen (v1.5)
+
+| ID | criterion | tier |
+|---|---|---|
+| PS-M6-01 | §4.3 limits: `warn`/`bad` (below/above, at least one) on sensor values, `warn_when`/`bad_when` on binary values accepted; on the wrong kind or on text rejected; `expert` accepted | py |
+| PS-M6-02 | §4.7/4.9 `confirm: hold`, `group`, `before` (select/number/switch ref, typed value, select options and number range where known) accepted; unknown ref, non-control ref, wrong type, unknown option rejected | py |
+| PS-M6-03 | §4.9 `lang`, `layout.tabs` (0..5, glance 0..4, node ids) and node `borrow` accepted; bad counts and unknown refs rejected with the valid list | py |
+| PS-M6-04 | §4.9 injection: the token in the page is replaced by the hints JSON (built-in and `web_asset:`), a page without the token is embedded unchanged, `<` is escaped | py |
+| PS-M6-05 | §5.3 `level` derivation (below/above strictness, bad over warn, bool, no reading -> null) and node `limit` with evidence, worst-wins, first-in-order tie | host |
+| PS-M6-06 | §5.3 precedence table, incl. `not_requested` (no parent upgrade, not in parent evidence, normal after first reading) | host |
+| PS-M6-07 | §4.6 `switch_off`: absent while off with `switched_off` and the action evidence, `{}` without an action, values still emitted, seq advances on a switch change | host, py |
+| PS-M6-08 | §5.6 v1.5 validator rules: each has a rejecting case; envelopes without `level` still pass | py |
+| PS-M6-09 | `tests/build/portal/test.esp32-c6-idf.yaml` carries every v1.5 key; cfg + cc green; static RAM before/after recorded in the PR | cfg, cc |
 
 ---
 

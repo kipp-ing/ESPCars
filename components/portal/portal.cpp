@@ -17,7 +17,7 @@ uint16_t Portal::add_node(const char *id, const char *kind, const char *label, u
                           bool budget_known, const char *absent_why, const char *role, const char *roles_available,
                           const char *unknown_value_key, const char *unknown_equals, const char *unknown_why,
                           const char *trust_value_key, core::NodeAbsentFn absent_fn, void *absent_ctx,
-                          const char *absent_evidence) {
+                          const char *absent_evidence, bool on_demand) {
   const uint16_t index = static_cast<uint16_t>(this->node_count_);
   auto &node = this->nodes_[this->node_count_];
   node.id = id;
@@ -40,13 +40,17 @@ uint16_t Portal::add_node(const char *id, const char *kind, const char *label, u
   node.absent_fn = absent_fn;
   node.absent_ctx = absent_ctx;
   node.absent_evidence = absent_evidence;
+  node.on_demand = on_demand;
   this->node_count_++;
   this->current_node_ = index;
   return index;
 }
 
 void Portal::add_value_sensor(const char *key, const char *label, const char *unit, int8_t decimals,
-                              sensor::Sensor *value_sensor) {
+                              sensor::Sensor *value_sensor, uint16_t limit_slot) {
+  // The slot lives in the sample itself (sample_() never rewrites it) and so reaches every
+  // request copy without a field of its own in the binding.
+  this->samples_[this->value_count_].limit_slot = limit_slot;
   auto &def = this->value_defs_[this->value_count_];
   def.key = key;
   def.label = label;
@@ -71,7 +75,8 @@ void Portal::add_value_text_sensor(const char *key, const char *label, const cha
 }
 
 void Portal::add_value_binary_sensor(const char *key, const char *label, const char *unit,
-                                     binary_sensor::BinarySensor *value_sensor) {
+                                     binary_sensor::BinarySensor *value_sensor, uint16_t limit_slot) {
+  this->samples_[this->value_count_].limit_slot = limit_slot;
   auto &def = this->value_defs_[this->value_count_];
   def.key = key;
   def.label = label;
@@ -449,6 +454,8 @@ bool Portal::copy_snapshot_(core::Snapshot *out) {
   out->action_count = this->action_count_;
   out->links = this->links_;
   out->link_count = this->link_count_;
+  out->limits = this->limits_;
+  out->limit_count = this->limit_count_;
   return true;
 }
 

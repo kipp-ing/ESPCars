@@ -1,0 +1,251 @@
+{
+ "lang": "de",
+ "tabs": [
+  {
+   "label": "Drive",
+   "glance": [
+    "bat.main/power",
+    "bat.main/soc",
+    "device/supply"
+   ],
+   "nodes": []
+  },
+  {
+   "label": "Battery",
+   "glance": [
+    "bat.main/soc",
+    "bat.cells/spread"
+   ],
+   "nodes": [
+    "bat.main",
+    "bat.cells",
+    "bat.ident"
+   ]
+  },
+  {
+   "label": "Bus",
+   "glance": [
+    "can0/awake"
+   ],
+   "nodes": [
+    "can0",
+    "ecus"
+   ]
+  },
+  {
+   "label": "Device",
+   "glance": [
+    "device/supply"
+   ],
+   "nodes": [
+    "device"
+   ]
+  }
+ ],
+ "values": {
+  "can0/rec": {
+   "expert": true,
+   "warn": {
+    "above": 95
+   },
+   "bad": {
+    "above": 127
+   }
+  },
+  "can0/tec": {
+   "expert": true,
+   "warn": {
+    "above": 95
+   },
+   "bad": {
+    "above": 127
+   }
+  },
+  "can0/bus_off": {
+   "expert": true,
+   "bad_when": true
+  },
+  "can0/frames": {
+   "expert": true
+  },
+  "bat.cells/spread": {
+   "warn": {
+    "above": 30
+   },
+   "bad": {
+    "above": 50
+   }
+  },
+  "bat.cells/hex": {
+   "expert": true
+  },
+  "bat.cells/rtt": {
+   "expert": true
+  },
+  "bat.main/iso": {
+   "warn": {
+    "below": 1000
+   },
+   "bad": {
+    "below": 500
+   }
+  },
+  "device/supply": {
+   "warn": {
+    "below": 12.0,
+    "above": 15.0
+   },
+   "bad": {
+    "below": 11.0
+   }
+  },
+  "device/heap_free": {
+   "expert": true
+  },
+  "device/heap_block": {
+   "expert": true,
+   "warn": {
+    "below": 20000
+   },
+   "bad": {
+    "below": 12000
+   }
+  }
+ },
+ "actions": {
+  "can0/wake": {
+   "before": [
+    {
+     "action": "can0/wake_mode",
+     "value": "Tester present"
+    }
+   ]
+  },
+  "bat.cells/period": {
+   "group": "Cell monitor"
+  },
+  "device/deep_sleep": {
+   "group": "Sleep"
+  },
+  "device/stay_awake": {
+   "group": "Sleep"
+  },
+  "device/sleep_rail": {
+   "group": "Sleep"
+  },
+  "device/sleep_idle": {
+   "group": "Sleep"
+  },
+  "device/sleep_now": {
+   "group": "Sleep",
+   "confirm": "hold"
+  },
+  "device/log_tx": {
+   "group": "Logger"
+  },
+  "device/upload_wait": {
+   "group": "Logger"
+  },
+  "device/status_led": {
+   "group": "Display"
+  },
+  "device/restart": {
+   "confirm": "hold"
+  },
+  "ecus/target": {
+   "group": "Manual request"
+  },
+  "ecus/service": {
+   "group": "Manual request"
+  },
+  "ecus/send": {
+   "group": "Manual request"
+  }
+ },
+ "borrow": {
+  "ecus.a": [
+   {
+    "action": "ecus/service"
+   },
+   {
+    "action": "ecus/send",
+    "before": [
+     {
+      "action": "ecus/target",
+      "value": "a"
+     }
+    ]
+   }
+  ],
+  "ecus.b": [
+   {
+    "action": "ecus/service"
+   },
+   {
+    "action": "ecus/send",
+    "before": [
+     {
+      "action": "ecus/target",
+      "value": "b"
+     }
+    ]
+   }
+  ],
+  "ecus.c": [
+   {
+    "action": "ecus/service"
+   },
+   {
+    "action": "ecus/send",
+    "before": [
+     {
+      "action": "ecus/target",
+      "value": "c"
+     }
+    ]
+   }
+  ],
+  "ecus.d": [
+   {
+    "action": "ecus/service"
+   },
+   {
+    "action": "ecus/send",
+    "before": [
+     {
+      "action": "ecus/target",
+      "value": "d"
+     }
+    ]
+   }
+  ],
+  "ecus.e": [
+   {
+    "action": "ecus/service"
+   },
+   {
+    "action": "ecus/send",
+    "before": [
+     {
+      "action": "ecus/target",
+      "value": "e"
+     }
+    ]
+   }
+  ],
+  "ecus.f": [
+   {
+    "action": "ecus/service"
+   },
+   {
+    "action": "ecus/send",
+    "before": [
+     {
+      "action": "ecus/target",
+      "value": "f"
+     }
+    ]
+   }
+  ]
+ }
+}

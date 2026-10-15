@@ -11,6 +11,19 @@ sensor:
     unit_of_measurement: Hz
     lambda: "return 10.0;"
     update_interval: 1s
+  - platform: template
+    id: bus_errors
+    lambda: "return 3.0;"
+    update_interval: 1s
+  # Published only on request (never, here): the on_demand unit stays not_requested.
+  - platform: template
+    id: unit_a_dtc
+    update_interval: never
+  - platform: template
+    id: monitor_level
+    unit_of_measurement: "%"
+    lambda: "return 42.0;"
+    update_interval: 5s
 
 text_sensor:
   - platform: template
