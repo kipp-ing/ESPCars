@@ -1,28 +1,131 @@
 # ESPCars
 
-**Monitor and modify your car with ESPHome — CAN and LIN, on cheap ESP32 hardware.**
+**ESPHome components for CAN, LIN and vehicle diagnostics on ESP32.**
 
-ESPCars is a collection of automotive ESPHome components. It turns an ESP32 into a
-vehicle bus node: observe traffic, decode signals into Home Assistant entities,
-bridge/filter/rewrite frames between buses, and talk to LIN devices — all configured
-in plain ESPHome YAML.
+ESPCars connects an ESP32 to a vehicle's CAN and LIN buses. It decodes bus
+traffic and diagnostic data into ESPHome entities, records frames to an SD card,
+and can forward or modify frames between two CAN segments. Everything is
+configured in ESPHome YAML. The components load through `external_components:`
+and run against stock ESPHome (2026.7 or later).
 
-## Components
+![System overview: CAN/LIN and a local browser connect to components on the ESP32; a host collects, archives and decodes recordings](docs/figures/system-overview.svg)
 
-| Component | What it does | Targets |
-|---|---|---|
-| `can_gateway` | ISR-level CAN⇄CAN gateway: bridge, filter, ID-translate and patch frames between two buses; single-bus observe mode with signal decode into sensors; `can_gateway.send`, cyclic sends, per-ID statistics, bus-off recovery automations. See [`docs/can_gateway-user-guide.md`](docs/can_gateway-user-guide.md) | Any TWAI-capable ESP32 — observe/decode on one bus needs one controller (ESP32, S2, S3, C3, H2), forwarding needs two (C6, P4). Not the C5, see below |
-| `linbus` | LIN bus master/slave: frame schedule, slave responses, sniffing (`rx_ids` / `on_frame`), checksum handling (classic/enhanced), self-test, detailed bus statistics. See [`docs/linbus-user-guide.md`](docs/linbus-user-guide.md) | ESP32, ESP32-C3, ESP32-C6 |
-| `isotp` | ISO-TP (ISO 15765-2) transport for diagnostics: segments requests and reassembles responses on top of a `can_gateway` port; normal / normal-fixed / extended addressing, flow control, `isotp.send`, `on_message` / `on_error`, per-instance diagnostic counters | ESP32-C6 (on `can_gateway`) |
-| `uds` | UDS (ISO 14229) diagnostic client on top of `isotp`: requests, decodes and schedules polling for fields defined in a flashed `.dcat` catalog — no decode rules in firmware or YAML — and publishes them as sensors/text sensors; `uds.read` / `uds.execute` / `uds.raw` / `uds.set_enabled`. See [`docs/uds-user-guide.md`](docs/uds-user-guide.md) | ESP32-C6 (on `isotp`) |
-| `sd_logger` | SD-card bus datalogger: buffers CAN/LIN frames (via the generic `sd_logger.log` action or a native `can_gateway` tap) and ESPHome's own log into a RAM ring, drained by a dedicated writer task so SD latency never touches bus timing; rotation, crash-safe writes, card-failure recovery, and optional chunk collection over WiFi. Pure sink — never transmits. See [`docs/sd_logger-user-guide.md`](docs/sd_logger-user-guide.md) | ESP32-C6 |
+## Application areas
+
+- **Bus analysis on the bench or in the vehicle.** Decode CAN signals into
+  sensors, watch per-ID statistics and bus errors, sniff LIN schedules.
+- **Diagnostic readout.** Read ECU data over UDS (ISO 14229) or CCP 2.1 and
+  publish it as ESPHome sensors.
+- **Recording on test drives.** Log CAN and LIN frames to SD without a network
+  connection; collect and decode the files on a host afterwards.
+- **LIN node simulation and testing.** Run a LIN master schedule or answer as a
+  slave.
+- **Gateway setups on the bench.** Bridge, filter and rewrite frames between two
+  CAN segments for integration tests and signal adaptation.
+- **Home Assistant integration.** Vehicle values arrive as ordinary ESPHome
+  entities; recorded values can be published over MQTT.
+
+## Functions
+
+### Bus access
+
+- CAN observe and decode: byte and bit-level signals (Intel and Motorola),
+  11- and 29-bit IDs, per-ID statistics, bus-off recovery with automations.
+  `script/dbc2yaml.py` generates the sensor YAML from a DBC file.
+- CAN gateway between two controllers: routes per direction, filter, ID
+  translation, signal rewrite with runtime values, optional CRC-8 (E2E)
+  correction, cyclic sends. The forwarding path runs in the RX interrupt.
+- LIN master and slave: frame schedule, slave responses, classic and enhanced
+  checksum, sniffing, self-test, bus statistics.
+
+### Diagnostics
+
+- ISO-TP (ISO 15765-2): normal, normal-fixed and extended addressing, flow
+  control.
+- UDS (ISO 14229) client: field definitions come from a separately flashed
+  catalog (`.dcat`), not from firmware or YAML. Read-only by default; active
+  services need `allow_active_services: true`.
+- CCP 2.1 master: memory access, DAQ measurement, calibration page selection.
+  Memory writes need `allow_write: true`.
+
+### Recording and data
+
+- SD logger for CAN and LIN frames and the ESPHome log. A RAM ring decouples
+  bus timing from SD write latency. Files rotate by size or time; power cuts
+  are detected per file, and card failures are retried.
+- Host tools: unattended collection over WiFi with verification and archive,
+  DBC decoding into ClickHouse, pipeline state and last known values to Home
+  Assistant over MQTT. The archive keeps the original files; decoded data can
+  be rebuilt from it.
+
+![Recording and collection: configure on the bench, record offline during the run, collect and decode when the device is reachable](docs/figures/recording-collection.svg)
+
+### Local web interface
+
+- One page and a JSON state API served by the device, built from a tree of
+  values and optional controls declared in YAML. Assets are embedded in the
+  firmware. An optional login guards the controls; reading state never needs
+  one.
+
+## Gateway operation
+
+With two CAN controllers, ESPCars sits between two bus segments. Each direction
+has its own rules: forward, drop, translate IDs or rewrite signal fields. Values
+for rewritten signals can be set at runtime from automations or from controls
+on the local web page.
+
+![Gateway operation: two CAN segments, bridge, filter and rewrite blocks, runtime values, optional CRC-8 correction](docs/figures/gateway.svg)
+
+A configured route transmits as soon as the device boots. Start every new bus
+with a single port and decode entities only, and add routes once the traffic on
+the wire is understood. See the safety model in the
+[gateway user guide](docs/can_gateway-user-guide.md#6-safety-model).
+
+## Technical data
+
+| Component | Function | Standard | Targets |
+|---|---|---|---|
+| [`can_gateway`](docs/can_gateway-user-guide.md) | CAN observe, decode, send, gateway | CAN 2.0A/B (classic CAN), 10 kbit/s – 1 Mbit/s | Observe/decode: any ESP32 with TWAI (ESP32, S2, S3, C3, C6, H2, P4). Gateway: two controllers (C6, P4). Not the C5. |
+| [`linbus`](docs/linbus-user-guide.md) | LIN master, slave, sniffer | LIN 1.x / 2.x, 1–20 kbit/s | ESP32, C3, C6 |
+| `isotp` | Diagnostic transport | ISO 15765-2 | ESP32-C6 |
+| [`uds`](docs/uds-user-guide.md) | Diagnostic client | ISO 14229 | ESP32-C6 |
+| `ccp` | Measurement and calibration | CCP 2.1 | ESP32-C6 |
+| [`sd_logger`](docs/sd_logger-user-guide.md) | Frame and log recording | — | ESP32-C6 |
+| [`portal`](docs/portal-spec.md) | Local web page and state API | HTTP/JSON | ESP32 (ESP-IDF), tested on C6 |
+
+Framework: ESP-IDF. Requires ESPHome 2026.7.0 or later. Complete, compiling
+configurations for every feature are in [`tests/build/`](tests/build/).
+
+**Reference hardware:** ESP32-C6 adapter board with CAN, LIN and Modbus
+transceivers. Any ESP32 with a CAN transceiver (e.g. TJA1051, SN65HVD230) or a
+LIN transceiver (e.g. TJA1021) works.
+
+## Verification
+
+- **CI** on every pull request: schema and code-generation tests, validation of
+  every build configuration, and a full compile across the target matrix.
+- **Host tests:** the interrupt-side gateway core (rule engine, frame rings,
+  recovery) is free of ESPHome and ESP-IDF dependencies and runs under
+  AddressSanitizer and UBSan on a desktop compiler.
+- **Hardware-in-the-loop bench:** three ESP32-C6 boards pass a token around a
+  ring over LIN and two CAN segments joined by an ESPCars gateway, at about 23%
+  bus load per segment. The release gate requires at least 75 laps in 45 s
+  with no error counter moving; the baseline is 19.4 laps/s, bounded by the
+  50 ms LIN schedule.
+  See [`tests/hil/HIL.md`](tests/hil/HIL.md).
+
+## Safety
+
+> **These components can transmit on vehicle buses.** Writing to a car's CAN or
+> LIN bus can trigger real actuators. Start with observe-only configurations,
+> send only frames you understand, and only on buses you own.
 
 ## Quick start
 
 ```yaml
 external_components:
   - source: github://kipp-ing/ESPCars
-    components: [can_gateway, linbus]
+    components: [can_gateway]
 
 can_gateway:
   ports:
@@ -30,6 +133,7 @@ can_gateway:
       rx_pin: GPIO3
       tx_pin: GPIO2
       bit_rate: 500kbps
+      listen_only: true     # controller never transmits, not even ACK
 
 sensor:
   - platform: can_gateway
@@ -42,42 +146,15 @@ sensor:
       - multiply: 0.01
 ```
 
-See `tests/build/` for complete, compiling example configurations of every feature.
+## Documentation
 
-## Hardware
-
-Developed against the ESP32-C6 reference adapter board (CAN + Modbus + LIN
-transceivers). Any ESP32 with the right transceiver works: a CAN transceiver
-(e.g. TJA1051, SN65HVD230) for `can_gateway`, a LIN transceiver (e.g. TJA1021)
-for `linbus`.
-
-> **Warning**: These components can *transmit* on vehicle buses. Writing to a
-> car's CAN or LIN bus can trigger real actuators. Start in observe/listen-only
-> configurations and only send frames you understand, on buses you own.
-
-## Development & testing
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt
-script/check.sh                              # pytest + clang-format + every config
-.venv/bin/python -m pytest tests/ -q         # component schema/codegen tests
-make -C tests/host                           # C++ unit tests for the ISR-side core
-.venv/bin/esphome config tests/build/can_gateway/test.esp32-c6-idf.yaml   # validate
-.venv/bin/esphome compile tests/build/can_gateway/test.esp32-c6-idf.yaml  # full build
-```
-
-`tests/host/` compiles `can_gateway/gateway_core.h` — the rule engine, slot
-pool, frame rings and recovery backoff that run inside the RX interrupt — with a
-plain host compiler under ASan/UBSan, because that header is deliberately free
-of ESPHome and ESP-IDF dependencies.
-
-CI runs the schema tests and the host tests, validates every build config, and
-compiles the full target matrix on every PR.
-
-Beyond CI there is a permanent hardware-in-the-loop bench — three reference
-boards (Mr. Green, Mr. Blue, Mr. Orange) running a token ring across LIN and
-two gateway-bridged CAN segments under load. See `tests/hil/HIL.md`;
-`script/hil/verify.py` must exit green before a release.
+- [CAN gateway user guide](docs/can_gateway-user-guide.md)
+- [LIN user guide](docs/linbus-user-guide.md)
+- [UDS user guide](docs/uds-user-guide.md) and [catalog format](docs/uds-catalog-format.md)
+- [SD logger user guide](docs/sd_logger-user-guide.md)
+- [Fleet collection](docs/sdlog-fleet-spec.md), [decoding](docs/sdlog-decode-spec.md) and [publishing](docs/sdlog-publish-spec.md)
+- [Portal specification](docs/portal-spec.md)
+- [Contributing and conventions](docs/CONVENTIONS.md)
 
 ## License
 
