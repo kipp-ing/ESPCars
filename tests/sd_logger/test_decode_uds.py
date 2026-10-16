@@ -521,6 +521,7 @@ def test_a_names_edit_redecodes_without_duplicates(setup) -> None:
     frames_before, events_before = len(sink.tables["frames"]), len(sink.tables["events"])
     (files / "mini.names.toml").write_text(NAMES.replace('"contactor"', '"main_contactor"'))
     assert run(config, sink) == 0
+    assert [table for table, _ in sink.deletes] == ["frames", "signals", "events"]  # D17: one sweep, events included
     got = signals(sink)
     assert "MINI.main_contactor" in got and "MINI.contactor" not in got
     assert len(sink.tables["signals"]) == len(EXPECTED)
@@ -608,6 +609,11 @@ def test_clickhouse_round_trip_with_uds(setup) -> None:
             sink._query(sql.replace(",\n            text LowCardinality(String) DEFAULT ''", ""))
         assert "text" not in sink._query(f"SELECT name FROM system.columns WHERE database='{database}' AND table='signals'")
         assert run(config, sink) == 0
+        # D18: the older tables got `chunk_idx` too
+        indexed = sink._query(
+            f"SELECT count() FROM system.data_skipping_indices WHERE database='{database}' AND name='chunk_idx'"
+        ).strip()
+        assert indexed == "3"
         assert run(config, sink) == 0  # idempotent
         rows = sink._query(
             f"SELECT signal, toString(value), text FROM {database}.signals ORDER BY signal FORMAT TSV"
