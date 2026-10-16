@@ -1,0 +1,7 @@
+# Readable signal names for a .dcat (docs/sdlog-decode-spec.md §7.2). Fictional: the MINI fixture.
+# A named field is <ECU>.<name>, every other field <ECU>.<group>.<field>. An array adds .<n>, 1-based.
+[fields]
+DT_Mini_Voltage_Maximum_Cell = "cell_voltage_max"
+DT_Mini_Voltage_Minimum_Cell = "cell_voltage_min"
+"0x0208/PRES_Mini_Cell_2Byte" = "cell_voltage"    # <service>/<field>: by DID or group name
+PRES_Mini_State = "contactor"

@@ -49,7 +49,7 @@ name = "demo-car"                                # as in decode.toml
 [[vehicle.sensor]]
 key = "soc"                                      # object id and JSON key
 name = "State of charge"
-signal = "DEMO_STATUS.Soc"                       # <Message>.<Signal> as in the signals table
+signal = "DEMO_STATUS.Soc"                       # as in the signals table: <Message>.<Signal>, or <ECU>.<name> (decode spec §7)
 unit = "%"                                       # optional
 device_class = "battery"                         # optional, HA sensor device class
 ```

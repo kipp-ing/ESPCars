@@ -14,3 +14,12 @@ name = "mr-orange"                      # = <archive>/<name>/ and the chunks' #o
 vehicle = "demo-car"                    # what its signals are filed under
 [device.dbc]
 EV = "/path/to/consuming-project/vehicles/demo/dbc/ev.dbc"   # bus label from #src → DBC
+
+# Diagnostic answers (docs/sdlog-decode-spec.md §7): one entry per ECU the device polls.
+# The .dcat is the one the device was flashed with; signal names and fault texts are optional.
+[[device.uds]]
+label = "EV"                            # the bus label the ECU answers on
+dcat = "/path/to/consuming-project/vehicles/demo/uds/mini.dcat"
+names = "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml"
+# ecu = "MINI"                          # needed only when the catalog holds several ECUs
+# dtc = "/path/to/consuming-project/vehicles/demo/dtc/mini.txt"   # CODE<TAB>text per line
