@@ -556,11 +556,24 @@ def test_reader_imports_stdlib_only() -> None:
 
 
 def test_the_example_config_loads(tmp_path: Path) -> None:
-    example = Path(__file__).parent.parent.parent / "deploy" / "sdlog-decode" / "decode.example.toml"
-    text = example.read_text().replace("/path/to/consuming-project/vehicles/demo/dbc/ev.dbc", str(MINI_DBC))
+    """D14/§7: the example, its DBC and catalog paths pointed at the fixtures, loads and
+    its names example resolves against the MINI catalog."""
+    root = Path(__file__).parent.parent.parent
+    deploy = root / "deploy" / "sdlog-decode"
+    text = deploy.joinpath("decode.example.toml").read_text()
+    for placeholder, real in {
+        "/path/to/consuming-project/vehicles/demo/dbc/ev.dbc": MINI_DBC,
+        "/path/to/consuming-project/vehicles/demo/uds/mini.dcat": root / "tests" / "uds" / "fixtures" / "mini.dcat",
+        "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml": deploy / "names.example.toml",
+    }.items():
+        assert placeholder in text
+        text = text.replace(placeholder, str(real))
     config = tmp_path / "decode.toml"
     config.write_text(text)
-    assert dec.load_config(config).devices[0].name == "mr-orange"
+    (device,) = dec.load_config(config).devices
+    assert device.name == "mr-orange"
+    (ecu,) = dec.load_uds(device, None)
+    assert ecu.names[(0, 0)] == "MINI.cell_voltage_max"
 
 
 # ------------------------------------------------------------------ ClickHouse round trip (optional)

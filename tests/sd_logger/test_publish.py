@@ -283,6 +283,12 @@ def test_the_example_config_loads(tmp_path: Path) -> None:
     deploy = _SCRIPT.parent / "deploy"
     decode = (deploy / "sdlog-decode" / "decode.example.toml").read_text()
     decode = decode.replace("/path/to/consuming-project/vehicles/demo/dbc/ev.dbc", str(MINI_DBC))
+    decode = decode.replace(
+        "/path/to/consuming-project/vehicles/demo/uds/mini.dcat", str(_SCRIPT.parent / "tests" / "uds" / "fixtures" / "mini.dcat")
+    )
+    decode = decode.replace(
+        "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml", str(deploy / "sdlog-decode" / "names.example.toml")
+    )
     (tmp_path / "decode.toml").write_text(decode)
     (tmp_path / "mqtt.pass").write_text("x")
     text = (deploy / "sdlog-publish" / "publish.example.toml").read_text()

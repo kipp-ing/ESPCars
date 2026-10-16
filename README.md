@@ -54,8 +54,9 @@ and run against stock ESPHome (2026.7 or later).
   bus timing from SD write latency. Files rotate by size or time; power cuts
   are detected per file, and card failures are retried.
 - Host tools: unattended collection over WiFi with verification and archive,
-  DBC decoding into ClickHouse, pipeline state and last known values to Home
-  Assistant over MQTT. The archive keeps the original files; decoded data can
+  DBC decoding into ClickHouse, diagnostic answers decoded with the device's own
+  `.dcat` catalog into signals and events (states, fault codes, negative answers),
+  pipeline state and last known values to Home Assistant over MQTT. The archive keeps the original files; decoded data can
   be rebuilt from it.
 
 ![Recording and collection: configure on the bench, record offline during the run, collect and decode when the device is reachable](docs/figures/recording-collection.svg)
