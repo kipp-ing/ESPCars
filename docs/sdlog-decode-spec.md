@@ -2,7 +2,9 @@
 
 2026-10-11. O1–O3 decided (cantools, HTTP via urllib, lightweight DELETE per chunk).
 2026-10-16: diagnostic answers (UDS over ISO-TP) decoded with the device's own `.dcat`
-catalog into signals and events (§7, U1–U16). This is the host-side step after `script/sdlog_fleet.py`. The fleet
+catalog into signals and events (§7, U1–U16).
+2026-10-16: deletes made cheap (D17, D18; O3 revised): a full re-decode spent 79 % of its time in
+per-chunk DELETEs (§6.1). This is the host-side step after `script/sdlog_fleet.py`. The fleet
 leaves sealed, verified chunks in `<archive>/<device>/`. This tool loads each
 chunk into a column store, once as raw frames and once as decoded signals. When the
 decode rules change, it replaces exactly that chunk's rows.
@@ -73,8 +75,12 @@ The tool creates these (`init`). They are written only by this tool.
   `[[device.uds]]` entry with the content of its `.dcat`, names and dtc files. It is a content
   hash, so no git is needed and any edit to a decode rule counts as a change.
 - **Schema upgrades are additive.** `init` (and every `run`, which calls it first) creates what is
-  missing — `events`, the `text` column of `signals` — with `IF NOT EXISTS`, so a database written by
-  an older version keeps its rows and the catalog change (D7) re-decodes them.
+  missing — `events`, the `text` column of `signals`, the `chunk_idx` skip index (D18) — with
+  `IF NOT EXISTS`, so a database written by an older version keeps its rows and the catalog change (D7)
+  re-decodes them.
+- **`frames`, `signals` and `events` carry `chunk_idx`**, a `bloom_filter(0.01)` skip index on `chunk`,
+  one per granule. `chunk` is in no sort key, so without it every lookup or DELETE by chunk reads the
+  whole column of every part (§6.1); a chunk is a contiguous slice of time, so a granule holds few keys.
 - **One time column, milliseconds.** `utc` is UTC truncated to ms. Boot-relative µs (`t`) stay in the
   archive only: µs buy nothing a query asks for, and a second time column was 73 % of `frames` and 97 % of
   `signals` on disk (measured 2026-10-11). Nullable key columns need `allow_nullable_key = 1`.
@@ -95,7 +101,7 @@ The tool creates these (`init`). They are written only by this tool.
 | D3 | **Frames are lossless up to the ms.** Every C/L/U/I record in a clean chunk becomes one `frames` row with identical label/id/flags/data; `utc` is the record's UTC truncated to ms, resolved as in §2 (backwards from the chunk's first UTC anchor, forward from each later one), NULL only in a chunk without one — a `#clock` estimate (`est`/`drift`) never fills it, and `#ident`/`#clock` lines change no row. | `test_frames_match_extract`, `test_utc_before_the_first_anchor_is_resolved_backwards`, `test_a_chunk_without_anchor_has_null_utc`, `test_utc_is_truncated_to_ms`, `test_ident_and_clock_lines_change_no_frame` |
 | D4 | **Decode.** With a DBC for the frame's label: every signal of the matched message becomes one `signals` row (physical value: factor/offset, signed, Intel and Motorola, multiplexed). A message matches only if standard/extended agrees with the `x` flag. Frames without a DBC message stay frames only; LIN is not DBC-decoded. | `test_decode_against_reference` (mini.dbc, hand-computed values), `test_unknown_id_is_frames_only`, `test_an_extended_flag_mismatch_does_not_match` |
 | D4a | **Real DBCs carry mistakes.** A DBC loads non-strict: a signal that does not fit its message fails only its own frames (counted in `chunks.detail`), the rest of the file decodes. A DBC that does not load at all exits 2. | `test_a_signal_that_does_not_fit_spares_the_rest_of_the_dbc`, `test_an_unloadable_dbc_exits_two` |
-| D5 | **Commit marker last.** For one chunk: delete its rows → insert frames → insert signals → insert events (§7) → write the `chunks` row. A chunk without a `chunks` row with `result=ok` and the current `catalog` is pending. | `test_a_crash_before_the_marker_redoes_the_chunk` |
+| D5 | **Commit marker last.** For one chunk: delete its rows → insert frames → insert signals → insert events (§7) → write the `chunks` row. The delete may be one statement for all of a run's pending chunks, issued before the first loads (D17). A chunk without a `chunks` row with `result=ok` and the current `catalog` is pending. | `test_a_crash_before_the_marker_redoes_the_chunk` |
 | D6 | **Idempotent.** Running `run` twice changes nothing: the row counts and the `chunks` rows stay the same. A chunk is pending iff it has no `chunks` row or one under another catalog; `.part` files are never loaded. | `test_second_run_is_a_noop`, `test_partials_are_not_loaded`, `test_a_reused_seq_is_a_new_chunk_key` |
 | D7 | **Catalog change.** If a device's DBC changes, all of its chunks become pending. A rerun replaces their signals with no duplicates, and the `frames` count is unchanged. | `test_dbc_edit_redecodes_without_duplicates` |
 | D8 | **Defect.** A chunk with a malformed line, an unknown write format, no `#close` (archived chunks are sealed; a torn file gets `#close,…,recovered` from the logger's boot scan, `sd_logger-spec.md` F2c — or the collector accepted it as torn, `sdlog-fleet-spec.md` C12: with a `<file>.torn` sidecar it loads up to its last complete line, `result=ok`, `detail` starts with `torn`) or an `#origin` naming another device: `chunks.result=defect` with the reason, no frames, no signals. A defect is not retried until the catalog changes (the file cannot change). A torn last line is not a defect. | `test_a_bad_chunk_is_a_defect_and_writes_nothing` (parametrized), `test_a_torn_last_line_is_not_a_defect`, `test_a_collector_accepted_torn_chunk_loads` |
@@ -107,6 +113,8 @@ The tool creates these (`init`). They are written only by this tool.
 | D14 | Example config and units in `deploy/sdlog-decode/` fictional, scanned by the private-data guard. | `test_the_example_config_loads`, `script/check_no_private_data.py` |
 | D15 | **ClickHouse round trip** (only with `SDLOG_CLICKHOUSE_URL`): init, load, idempotent rerun, values, `utc` in ms, re-decode after a DBC edit. Uses a throwaway database and drops it. | `test_clickhouse_round_trip` |
 | D16 | **Coverage.** `chunks.matched` = the chunk's CAN frames whose label has a DBC and whose id matched a DBC message (D4). `can_frames` = its CAN (`C`) frames. `status` prints per device `coverage = Σ matched / Σ can_frames` over its ok chunks under the current catalog, so a wrong or thin DBC shows as a number, not as empty signals. | `test_matched_counts_frames_with_a_message`, `test_status_prints_coverage` |
+| D17 | **Few deletes.** A DELETE costs a pass over every part it might touch, whatever it matches (§6.1), so the "delete its rows" step of D5 is done in as few statements as correctness allows: (a) before a device's pending chunks load, the rows under the chunk keys their files' latest markers name are deleted with one statement per table that holds any (at most 2000 keys per statement), found by one lookup per table; (b) a chunk whose key is not among those looks it up per table and deletes only where rows are there, so a new chunk issues no DELETE; (c) once a chunk is in, its key counts as not deleted again, so a second file with the same bytes deletes it before loading; (d) rows of a file that is not pending are never deleted (a file pruned from the archive keeps its last decode); (e) a file whose bytes changed loses the rows under its previous key too. D5–D7 hold: a crash before the marker leaves rows only under the chunk's key, which (a) deletes when the file had a marker and (b) finds when it had none. A run with nothing pending issues no lookup. | `test_new_chunks_need_no_delete`, `test_a_catalog_change_deletes_once_per_table`, `test_rows_a_crash_left_are_deleted_before_the_reload` (new chunk, re-decode), `test_rows_of_files_not_redone_stay`, `test_a_redone_file_loses_the_rows_of_its_previous_key`, `test_identical_bytes_under_two_names_do_not_duplicate`, `test_clickhouse_few_deletes` |
+| D18 | **Chunk index.** `init` adds `chunk_idx` (§2) to `frames`, `signals` and `events` with `IF NOT EXISTS`, and to a table that existed without it also materializes it once for the parts already there (a background mutation; a part without it is read in full, so this is speed, not correctness). Every DELETE waits until its rows are masked (`lightweight_deletes_sync = 2`, stated per query): the old rows of a chunk are never visible beside its new ones. | `test_clickhouse_few_deletes`, `test_clickhouse_round_trip_with_uds` |
 
 ## 4. Out of scope
 
@@ -125,7 +133,7 @@ The tool creates these (`init`). They are written only by this tool.
 |---|---|---|
 | O1 | [`cantools`](https://pypi.org/project/cantools/) at runtime, `sdlog_decode.py` only (D13) | A wrong decode is the expensive failure here; `dbc2yaml.py` refuses signals the component cannot decode for the same reason |
 | O2 | ClickHouse over its HTTP interface with `urllib`, TSV inserts | No second dependency; the interface is the official one |
-| O3 | Lightweight `DELETE … WHERE device=… AND chunk=…` per chunk | Partition replace is only for a full rebuild (drop the database and run) |
+| O3 | Lightweight [`DELETE`](https://clickhouse.com/docs/sql-reference/statements/delete) by chunk key, batched and looked up first (D17), on a [skip index](https://clickhouse.com/docs/optimize/skipping-indexes) (D18). Revised 2026-10-16 from one DELETE per chunk and table | Measured in §6.1. Rejected: `lightweight_deletes_sync = 0` (old and new rows of a chunk visible together until the mutation runs; still one full pass per chunk, queued; a re-decode of 678 chunks crosses `number_of_mutations_to_delay` = 500); [lightweight update / patch parts](https://clickhouse.com/docs/sql-reference/statements/update) as the delete mode (beta in 26.8, ~40 B per deleted row, meant for small updates — a re-decode deletes everything); partition replace (`signals`/`events` are partitioned by vehicle, which devices share; a new key means a migration, and D17 leaves ~10 s of deletes per full re-decode to win); more RAM or a larger background pool (§6.1: neither was a limit) |
 
 ## 6. Measured (real chunks, 2026-10-11)
 
@@ -135,6 +143,36 @@ on a laptop against ClickHouse 26.8 on a 2 GB container, over an SSH tunnel:
 - 2.2 s CPU, 8.3 s wall, 200 MB RSS for the decoder; ClickHouse peak 50 MB per query
 - 824,794 signal rows (172 signals); on disk before merges: frames 664 KiB, signals 1.8 MiB (about 2.2 B per signal row)
 - aggregate over all signals 58 ms, frames grouped by id 18 ms
+
+### 6.1 Where a re-decode spent its time (2026-10-16)
+
+A catalog change on a real host (ClickHouse 26.8, 8 cores, 1.5 GiB for ClickHouse, data on a USB SSD)
+made all 678 chunks of one device pending (~34M frames, ~136M signal rows). The per-chunk path took
+**79.5 min**, of which `system.query_log` attributes **62.6 min (79 %) to the DELETEs** (signals 45, frames
+16.7, events 0.9; a signals DELETE 3.9 s on average), 4.2 min to inserts and 13.5 min to the decoder's own CPU.
+
+Why ([lightweight DELETE](https://clickhouse.com/docs/sql-reference/statements/delete) is an
+`UPDATE _row_exists = 0` mutation): `chunk` is in no sort key, so every DELETE first counts its matches in
+every part of the partition, reading the whole `chunk` column (4 GiB uncompressed in `signals`, 3 MiB on disk:
+the work is decompression, not I/O), and then rewrites the row mask of each part that matched — a
+100M-row part took 5.3 s, an untouched 65M-row part 2.1 s just to be ruled out (`system.part_log`). The
+cost grows with the table, not with the chunk. Memory was not a limit: ClickHouse peaked at 720 MiB of
+1.5 GiB, a mutation at 4.6 MiB, a query at 50 MiB, no memory errors.
+
+Measured on a copy of that shape (ClickHouse 26.8 in a container with the host's server and profile
+config: 8 CPUs, 1.5 GiB; synthetic rows, 678 chunks):
+
+| Step | per chunk (before) | D17 + D18 |
+|---|---|---|
+| delete a new chunk (no rows yet) | 1.16 s | 0.036 s (three index lookups, no DELETE) |
+| delete for a full re-decode | 2.6 s × 678 = 29 min | 6.1 s, one DELETE per table for all 678 |
+| `run`, 20 new chunks over the full tables | 44.0 s | 3.9 s |
+| `run`, catalog change of those 20 | 34.7 s | 4.3 s |
+| a background pool of 4 instead of 2 | 2.62 s instead of 2.69 s | — |
+
+The lookup without `chunk_idx` is a full read of the column again (1.1 s); with it, 0.02 s. On the host,
+the full re-decode drops from 79.5 min to about 18 min: what is left is the decoder's CPU and its
+inserts, which the next step can overlap or spread over processes.
 
 ## 7. Diagnostic answers (UDS)
 

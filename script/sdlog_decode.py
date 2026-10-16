@@ -22,6 +22,10 @@ over the device's DBC and UDS files); a pending chunk is replaced, never appende
 delete its rows, insert frames, signals and events, then the marker. A run that dies
 anywhere in there leaves no marker, so the next run does the chunk again.
 
+A DELETE costs a pass over the whole table, whatever it matches, so a run deletes the
+previous rows of all its pending chunks in one statement per table, and a chunk with no
+rows yet issues none: an index on `chunk` answers that lookup (spec D17, D18, §6.1).
+
 Usage:
     script/sdlog_decode.py init   --config decode.toml   # create the tables
     script/sdlog_decode.py run    --config decode.toml   # every pending chunk
@@ -91,6 +95,7 @@ CHUNK_COLUMNS = (
     "device", "chunk", "file", "seq", "sha256", "bytes", "frames", "can_frames", "matched", "signals",
     "utc_min", "utc_max", "gaps", "catalog", "result", "detail", "decoded_at",
 )
+ROW_TABLES = ("frames", "signals", "events")  # the tables a chunk's rows live in; `chunks` is the marker
 
 
 class ConfigError(Exception):
@@ -292,6 +297,8 @@ class FakeSink:
         self.fail_on = fail_on  # table name whose next insert raises (crash injection)
         self.unavailable = unavailable
         self.initialized = False
+        self.deletes: list[tuple[str, tuple[str, ...]]] = []  # (table, chunk keys): one entry per DELETE statement
+        self.lookups = 0  # existence lookups, one per table and delete_chunks call
 
     def _check(self) -> None:
         if self.unavailable:
@@ -323,12 +330,33 @@ class FakeSink:
         ok = [r for r in latest.values() if r["result"] == "ok" and r["catalog"] == catalog]
         return sum(r["matched"] for r in ok), sum(r["can_frames"] for r in ok)
 
-    def delete_chunk(self, device: str, chunk: str) -> None:
+    def chunk_keys(self, device: str) -> dict[str, str]:
+        """{file: chunk key} of each file's latest marker (D17)."""
         self._check()
-        for table in ("frames", "signals", "events"):
-            self.tables[table] = [
-                row for row in self.tables[table] if not (row["device"] == device and row["chunk"] == chunk)
-            ]
+        latest: dict[str, dict] = {}
+        for row in self.tables["chunks"]:
+            prev = latest.get(row["file"])
+            if row["device"] == device and (prev is None or row["decoded_at"] >= prev["decoded_at"]):
+                latest[row["file"]] = row
+        return {file: row["chunk"] for file, row in latest.items()}
+
+    def delete_chunks(self, device: str, keys) -> dict[str, int]:
+        """Remove the rows under `keys` (D17): one lookup per table, one DELETE per table that
+        holds any of them. {table: keys that had rows}."""
+        self._check()
+        keys = set(keys)
+        found = {}
+        for table in ROW_TABLES:
+            self.lookups += 1
+            present = {r["chunk"] for r in self.tables[table] if r["device"] == device and r["chunk"] in keys}
+            if present:
+                self.deletes.append((table, tuple(sorted(present))))
+                self.tables[table] = [r for r in self.tables[table] if not (r["device"] == device and r["chunk"] in present)]
+            found[table] = len(present)
+        return found
+
+    def delete_chunk(self, device: str, chunk: str) -> None:
+        self.delete_chunks(device, (chunk,))
 
     def insert(self, table: str, columns: tuple[str, ...], rows: list[tuple]) -> None:
         self._check()
@@ -346,6 +374,11 @@ def _tsv_field(value) -> str:
     if isinstance(value, float):
         return repr(value)
     return str(value)
+
+
+def _array_literal(values: list[str]) -> str:
+    """An Array(String) query parameter in ClickHouse's text form: ['a','b']."""
+    return "[" + ",".join("'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'" for v in values) + "]"
 
 
 # Time columns travel as epoch ms in Python (FakeSink, tests) and as text over TSV: a bare
@@ -378,8 +411,8 @@ class ClickHouseSink:
         """A read query, for tools built on these tables (sdlog_publish.py)."""
         return self._query(sql, params=params)
 
-    def _query(self, sql: str, body: bytes | None = None, params: dict | None = None) -> str:
-        query = {"query": sql}
+    def _query(self, sql: str, body: bytes | None = None, params: dict | None = None, settings: dict | None = None) -> str:
+        query = {"query": sql, **(settings or {})}
         for key, value in (params or {}).items():
             query[f"param_{key}"] = value
         request = urllib.request.Request(f"{self.url}/?{urlencode(query)}", data=body if body is not None else b"")
@@ -395,8 +428,18 @@ class ClickHouseSink:
             raise SinkUnavailable(f"ClickHouse unreachable at {self.url}: {err}") from None
 
     def init(self) -> None:
+        # Tables that exist without the chunk index (an older database) get it built once for
+        # their parts, in the background; new parts carry it from the insert on (D18).
+        unindexed = self._query(
+            "SELECT name FROM system.tables WHERE database = {db:String} AND name IN {tables:Array(String)}"
+            " AND name NOT IN (SELECT table FROM system.data_skipping_indices"
+            " WHERE database = {db:String} AND name = 'chunk_idx') FORMAT TSV",
+            params={"db": self.db, "tables": _array_literal(list(ROW_TABLES))},
+        ).split()
         for sql in clickhouse_ddl(self.db):
             self._query(sql)
+        for table in unindexed:
+            self._query(f"ALTER TABLE {self.db}.{table} MATERIALIZE INDEX chunk_idx")
 
     def chunk_state(self, device: str) -> dict[str, tuple[str, str]]:
         text = self._query(
@@ -421,12 +464,51 @@ class ClickHouseSink:
         matched, can = text.split("\t") if text else ("0", "0")
         return int(matched), int(can)
 
+    # A lightweight DELETE returns only once its rows are masked: the old rows of a chunk are
+    # never visible beside its new ones (D5). Stated, not inherited, so a profile cannot undo it.
+    # https://clickhouse.com/docs/sql-reference/statements/delete
+    _DELETE_SYNC = {"lightweight_deletes_sync": "2"}
+
+    # Chunk keys per statement: bounds the URL (keys travel as a query parameter, ~20 bytes
+    # each, far below http_max_uri_size) while a re-decode of years of chunks is still a
+    # handful of DELETEs.
+    KEYS_PER_STATEMENT = 2000
+
+    def chunk_keys(self, device: str) -> dict[str, str]:
+        text = self._query(
+            f"SELECT file, argMax(chunk, decoded_at) FROM {self.db}.chunks WHERE device = {{device:String}}"
+            " GROUP BY file FORMAT TSV",
+            params={"device": device},
+        )
+        return dict(line.split("\t") for line in text.splitlines())
+
+    def delete_chunks(self, device: str, keys) -> dict[str, int]:
+        """A lightweight DELETE costs a pass over its predicate columns in every part it might
+        touch, and a rewrite of the row mask of every part it does touch, whatever it matches
+        (spec §6). So: look first (the `chunk_idx` skip index answers for a key without rows),
+        and delete every key of a table in one statement (D17)."""
+        keys = sorted(set(keys))
+        found = {}
+        for table in ROW_TABLES:
+            present: list[str] = []
+            for start in range(0, len(keys), self.KEYS_PER_STATEMENT):
+                batch = _array_literal(keys[start : start + self.KEYS_PER_STATEMENT])
+                present += self._query(
+                    f"SELECT DISTINCT chunk FROM {self.db}.{table}"
+                    " WHERE device = {device:String} AND chunk IN {keys:Array(String)} FORMAT TSV",
+                    params={"device": device, "keys": batch},
+                ).split()
+            for start in range(0, len(present), self.KEYS_PER_STATEMENT):
+                self._query(
+                    f"DELETE FROM {self.db}.{table} WHERE device = {{device:String}} AND chunk IN {{keys:Array(String)}}",
+                    params={"device": device, "keys": _array_literal(present[start : start + self.KEYS_PER_STATEMENT])},
+                    settings=self._DELETE_SYNC,
+                )
+            found[table] = len(present)
+        return found
+
     def delete_chunk(self, device: str, chunk: str) -> None:
-        for table in ("frames", "signals", "events"):
-            self._query(
-                f"DELETE FROM {self.db}.{table} WHERE device = {{device:String}} AND chunk = {{chunk:String}}",
-                params={"device": device, "chunk": chunk},
-            )
+        self.delete_chunks(device, (chunk,))
 
     def insert(self, table: str, columns: tuple[str, ...], rows: list[tuple]) -> None:
         if not rows:
@@ -482,6 +564,13 @@ def clickhouse_ddl(db: str) -> list[str]:
             detail String CODEC(ZSTD(3))
         ) ENGINE = MergeTree PARTITION BY vehicle ORDER BY (vehicle, kind, source, name, utc)
         SETTINGS allow_nullable_key = 1""",
+        # D18: `chunk` is in no sort key, so without this every lookup or DELETE by chunk reads the
+        # whole column. A chunk is a contiguous slice of time, so one granule holds few keys.
+        # https://clickhouse.com/docs/optimize/skipping-indexes
+        *(
+            f"ALTER TABLE {db}.{table} ADD INDEX IF NOT EXISTS chunk_idx chunk TYPE bloom_filter(0.01) GRANULARITY 1"
+            for table in ROW_TABLES
+        ),
         f"""CREATE TABLE IF NOT EXISTS {db}.chunks (
             device LowCardinality(String),
             chunk String,
@@ -573,10 +662,21 @@ def _now() -> str:
 
 
 def load_chunk(
-    path: Path, device: Device, catalog: str, decoder: Decoder | None, sink, batch_rows: int, uds: list | None = None
+    path: Path,
+    device: Device,
+    catalog: str,
+    decoder: Decoder | None,
+    sink,
+    batch_rows: int,
+    uds: list | None = None,
+    cleared: set[str] | None = None,
 ) -> ChunkResult:
     """Replace one chunk in the sink. Order is the contract (D5): delete → frames →
-    signals → events → marker. Raises SinkUnavailable/SinkError from the sink untouched."""
+    signals → events → marker. Raises SinkUnavailable/SinkError from the sink untouched.
+
+    `cleared` holds chunk keys the run has already deleted (D17); a key in it needs no delete
+    of its own. Once this chunk's rows are in, its key leaves the set, so a second file with
+    the same bytes deletes them before it loads."""
     raw = path.read_bytes()
     sha = hashlib.sha256(raw).hexdigest()
     report = sdlog.parse_file(path)
@@ -588,7 +688,8 @@ def load_chunk(
         "utc_max": None, "gaps": len(report.gaps), "catalog": catalog,
         "result": "ok", "detail": "",
     }
-    sink.delete_chunk(device.name, chunk)
+    if cleared is None or chunk not in cleared:
+        sink.delete_chunk(device.name, chunk)
     torn = _torn_sidecar(path, sha) if report.close_reason is None else None
     reason = _defect_reason(report, device, torn is not None)
     frames = signals = events = can_frames = matched = 0
@@ -671,7 +772,8 @@ def load_chunk(
             marker["detail"] = "; ".join(notes)
         else:
             # A defect writes nothing but its marker: drop whatever a batch already put in.
-            sink.delete_chunk(device.name, chunk)
+            if frames or signals:
+                sink.delete_chunk(device.name, chunk)
             frames = signals = events = can_frames = matched = 0
             utc_min = utc_max = None
     if reason is not None:
@@ -682,6 +784,8 @@ def load_chunk(
     marker["utc_min"], marker["utc_max"] = utc_min, utc_max
     marker["decoded_at"] = _now()
     sink.insert("chunks", CHUNK_COLUMNS, [tuple(marker[c] for c in CHUNK_COLUMNS)])
+    if cleared is not None:
+        cleared.discard(chunk)
     return ChunkResult(path.name, marker["result"], marker["detail"], frames, signals, events)
 
 
@@ -718,9 +822,17 @@ def cmd_run(config: Config, sink) -> int:
             uds = load_uds(device, decoder)
             state = sink.chunk_state(device.name)
             todo = pending_files(config, device, state, catalog)
+            # D17: the files being redone lose their previous rows in one DELETE per table, not
+            # one per chunk and table. Their keys come from their markers, so no file is read.
+            redo = {p.name for p in todo}
+            cleared = {chunk for file, chunk in sink.chunk_keys(device.name).items() if file in redo} if todo else set()
+            if cleared:
+                found = sink.delete_chunks(device.name, cleared)
+                print(f"{device.name}: deleted the rows of {len(cleared)} chunk(s) to redo ("
+                      + ", ".join(f"{t} {n}" for t, n in found.items()) + ")")
             loaded = 0
             for path in todo:
-                result = load_chunk(path, device, catalog, decoder, sink, config.batch_rows, uds)
+                result = load_chunk(path, device, catalog, decoder, sink, config.batch_rows, uds, cleared)
                 if result.result == "defect":
                     defects += 1
                     print(f"{device.name}: {path.name}: defect — {result.detail}")

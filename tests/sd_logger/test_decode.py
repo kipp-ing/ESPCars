@@ -478,6 +478,115 @@ def test_a_reused_seq_is_a_new_chunk_key(setup) -> None:
     assert len(keys) == 2 and all(k.startswith("7-") for k in keys)
 
 
+# ------------------------------------------------------------------ D17 few deletes
+
+
+def three_chunks(archive: Path) -> None:
+    for seq in (8, 9):
+        write_chunk(archive / "mr-orange", f"L000000{seq}.LOG", with_seq(FIXTURE, seq))
+
+
+def edit_dbc(dbc: Path) -> None:
+    dbc.write_text(dbc.read_text().replace("Speed : 0|16@1+ (0.01,0)", "Speed : 0|16@1+ (0.1,0)"))
+
+
+def test_new_chunks_need_no_delete(setup) -> None:
+    """D17: a chunk that never had rows is looked up (one lookup per table) and loads without
+    a DELETE; a run with nothing pending does not even look."""
+    archive, _, config = setup
+    three_chunks(archive)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    assert sink.deletes == [] and sink.lookups == 3 * 3
+    write_chunk(archive / "mr-orange", "L0000010.LOG", with_seq(FIXTURE, 10))
+    assert run(config, sink) == 0
+    assert sink.deletes == [] and sink.lookups == 4 * 3
+    assert run(config, sink) == 0  # nothing pending
+    assert sink.lookups == 4 * 3
+    assert len(sink.tables["frames"]) == 4 * 7
+
+
+def test_a_catalog_change_deletes_once_per_table(setup) -> None:
+    """D17 with D7: a DBC edit makes every chunk pending; the rerun deletes their rows with one
+    statement per table that holds any (all three keys in it), none per chunk, and ends without
+    duplicates."""
+    archive, dbc, config = setup
+    three_chunks(archive)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    counts = {t: len(rows) for t, rows in sink.tables.items() if t != "chunks"}
+    keys = tuple(sorted(c["chunk"] for c in sink.tables["chunks"]))
+    edit_dbc(dbc)
+    lookups = sink.lookups
+    assert run(config, sink) == 0
+    assert sink.deletes == [("frames", keys), ("signals", keys)]  # events: none to delete
+    assert sink.lookups == lookups + 3  # one batch lookup per table, none per chunk
+    assert {t: len(rows) for t, rows in sink.tables.items() if t != "chunks"} == counts
+    speeds = [s["value"] for s in sink.tables["signals"] if s["signal"] == "DEMO_STATUS.Speed"]
+    assert speeds == [pytest.approx(100.0)] * 3
+
+
+@pytest.mark.parametrize("redo", [False, True], ids=["new chunk", "re-decode"])
+def test_rows_a_crash_left_are_deleted_before_the_reload(setup, redo: bool) -> None:
+    """D17 with D5: a crash before the marker leaves rows under the chunk's key. A new chunk's
+    own lookup finds them; a re-decoded chunk's key is in the batch from its previous marker."""
+    archive, dbc, config = setup
+    sink = dec.FakeSink()
+    if redo:
+        three_chunks(archive)
+        assert run(config, sink) == 0
+        edit_dbc(dbc)
+    sink.fail_on = "chunks"
+    assert run(config, sink) == 75
+    assert run(config, sink) == 0
+    clean = dec.FakeSink()
+    assert run(config, clean) == 0
+    assert {t: len(sink.tables[t]) for t in dec.ROW_TABLES} == {t: len(clean.tables[t]) for t in dec.ROW_TABLES}
+
+
+def test_rows_of_files_not_redone_stay(setup) -> None:
+    """D17: only files being redone lose their rows. A file pruned from the archive keeps the
+    rows of its last decode through a catalog change, as it always did."""
+    archive, dbc, config = setup
+    three_chunks(archive)
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    pruned = next(c["chunk"] for c in sink.tables["chunks"] if c["file"] == "L0000009.LOG")
+    (archive / "mr-orange" / "L0000009.LOG").unlink()
+    edit_dbc(dbc)
+    assert run(config, sink) == 0
+    assert all(pruned not in keys for _, keys in sink.deletes)
+    assert sum(r["chunk"] == pruned for r in sink.tables["frames"]) == 7
+    assert len(sink.tables["frames"]) == 3 * 7
+
+
+def test_a_redone_file_loses_the_rows_of_its_previous_key(setup) -> None:
+    """D17: a file whose bytes changed has a new chunk key. Its redo deletes the rows under the
+    key its last marker names; a delete of only the new key would leave them as duplicates."""
+    archive, dbc, config = setup
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:-1], "#close,@2001,rotate"])
+    edit_dbc(dbc)
+    assert run(config, sink) == 0
+    assert len({r["chunk"] for r in sink.tables["frames"]}) == 1
+    assert len(sink.tables["frames"]) == 7
+
+
+def test_identical_bytes_under_two_names_do_not_duplicate(setup) -> None:
+    """D17: two files with the same bytes share a chunk key. The second load deletes what the
+    first put under it, in the first run and in a re-decode alike."""
+    archive, dbc, config = setup
+    source = archive / "mr-orange" / "L0000007.LOG"
+    (archive / "mr-orange" / "L0000009.LOG").write_bytes(source.read_bytes())
+    sink = dec.FakeSink()
+    assert run(config, sink) == 0
+    assert len(sink.tables["frames"]) == 7
+    edit_dbc(dbc)
+    assert run(config, sink) == 0
+    assert len(sink.tables["frames"]) == 7
+
+
 # ------------------------------------------------------------------ D10–D13
 
 
@@ -607,5 +716,52 @@ def test_clickhouse_round_trip(setup) -> None:
         assert run(config, sink) == 0
         speed = sink._query(f"SELECT groupArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'").strip()
         assert speed == "[100]"
+    finally:
+        sink._query(f"DROP DATABASE IF EXISTS {database}")
+
+
+@pytest.mark.skipif(not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set")
+def test_clickhouse_few_deletes(setup) -> None:
+    """D17/D18 against a real ClickHouse: new chunks issue no DELETE, a catalog change issues
+    one per table that holds rows (frames, signals) for all three chunks and ends without
+    duplicates, a crash leftover is found by its lookup, and the tables carry `chunk_idx`."""
+    archive, dbc, config = setup
+    three_chunks(archive)
+    url = os.environ["SDLOG_CLICKHOUSE_URL"]
+    database = f"sdlog_test_{uuid.uuid4().hex[:8]}"
+    sink = dec.ClickHouseSink(url, database)
+
+    def count(table: str) -> int:
+        return int(sink._query(f"SELECT count() FROM {database}.{table}"))
+
+    def deletes() -> int:
+        sink._query("SYSTEM FLUSH LOGS")
+        return int(sink._query(
+            "SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND query_kind = 'Delete'"
+            f" AND has(databases, '{database}')"
+        ))
+
+    try:
+        assert run(config, sink) == 0
+        assert deletes() == 0  # new chunks: looked up, nothing there, no DELETE
+        indexed = sink._query(
+            f"SELECT groupArray(table) FROM (SELECT table FROM system.data_skipping_indices"
+            f" WHERE database = '{database}' AND name = 'chunk_idx' ORDER BY table)"
+        ).strip()
+        assert indexed == "['events','frames','signals']"
+        before = (count("frames"), count("signals"))
+        assert before[0] == 3 * 7
+        edit_dbc(dbc)
+        assert run(config, sink) == 0
+        assert deletes() == 2  # frames and signals, once each, for all three chunks
+        assert (count("frames"), count("signals")) == before
+        speed = sink._query(f"SELECT groupUniqArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'").strip()
+        assert speed == "[100]"
+        # a crash leftover under a new chunk's key: rows, no marker
+        write_chunk(archive / "mr-orange", "L0000010.LOG", with_seq(FIXTURE, 10))
+        sink.insert("frames", dec.FRAME_COLUMNS, [("mr-orange", "10-" + hashlib.sha256((archive / "mr-orange" / "L0000010.LOG").read_bytes()).hexdigest()[:12], "C", "EV", None, 1, "-", 0, 0)])
+        assert run(config, sink) == 0
+        assert deletes() == 3
+        assert count("frames") == 4 * 7
     finally:
         sink._query(f"DROP DATABASE IF EXISTS {database}")
