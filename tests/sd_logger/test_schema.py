@@ -228,12 +228,18 @@ def test_v29_confine_bytes_accepts_data_sizes(set_core_config, value, expected: 
 
 
 @pytest.mark.parametrize(
-    "value", [0, "0B", "-1MB", "5TB", 32 * 1024 * 1024 * 1024 + 512]
+    "value", [0, "0B", "-1MB", "5TB", 0xFFFFFFFF * 512 + 512]
 )
 def test_v29_confine_bytes_rejects_zero_negative_and_absurd_sizes(set_core_config, value) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="confine_bytes"):
         validate(sd_logger(confine_bytes=value))
+
+
+@pytest.mark.parametrize("value", [64 * 1000**3 // 512 * 512, 0xFFFFFFFF * 512])
+def test_v29_confine_bytes_accepts_cards_above_32_gib(set_core_config, value: int) -> None:
+    setup_c6(set_core_config)
+    assert validate(sd_logger(confine_bytes=value))["confine_bytes"] == value
 
 
 def test_v29_confine_bytes_must_be_a_sector_multiple(set_core_config) -> None:

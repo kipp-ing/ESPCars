@@ -1202,6 +1202,18 @@ void SdLogger::confine_format(const std::string &confirmation) {
     this->confine_format_in_progress_.store(false, std::memory_order_release);
     return;
   }
+  // A mounted card's size is already known: refuse an oversized confine here, before the
+  // writer is stopped, so the refusal leaves logging untouched. An unmounted card is checked
+  // after card init below.
+  if (this->mounted_ && this->mounted_card_sectors_ != 0 && !confine_fits_card(sectors, this->mounted_card_sectors_)) {
+    ESP_LOGE(TAG,
+             "confine format refused: confine_bytes needs %" PRIu32 " sectors from LBA %" PRIu32
+             ", the card has %" PRIu32 " (largest confine_bytes for this card: %" PRIu64 "); logging continues",
+             sectors, SD_CONFINE_FIRST_LBA, this->mounted_card_sectors_,
+             static_cast<uint64_t>(this->mounted_card_sectors_ - SD_CONFINE_FIRST_LBA) * SD_CONFINE_SECTOR_BYTES);
+    this->confine_format_in_progress_.store(false, std::memory_order_release);
+    return;
+  }
 
   // The normal writer owns all file work. Ask it to seal and exit before the
   // action pulls the VFS/card stack down; no asynchronous delete can safely
@@ -1269,6 +1281,21 @@ void SdLogger::confine_format(const std::string &confirmation) {
     return;
   }
 
+  const uint64_t card_sectors = static_cast<uint64_t>(card.csd.capacity);
+  if (!confine_fits_card(sectors, card_sectors)) {
+    ESP_LOGE(TAG,
+             "confine format refused: confine_bytes needs %" PRIu32 " sectors from LBA %" PRIu32
+             ", the card has %" PRIu64 " (largest confine_bytes for this card: %" PRIu64 ")",
+             sectors, SD_CONFINE_FIRST_LBA, card_sectors,
+             card_sectors > SD_CONFINE_FIRST_LBA ? (card_sectors - SD_CONFINE_FIRST_LBA) * SD_CONFINE_SECTOR_BYTES : 0);
+    release_sdspi_direct_device_(&card_attempt);
+    spi_bus_free(host_slot);
+    this->mounted_ = false;
+    this->confine_format_stop_requested_.store(false, std::memory_order_release);
+    this->confine_format_in_progress_.store(false, std::memory_order_release);
+    return;
+  }
+
   BYTE pdrv = 0xFF;
   if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == 0xFF || pdrv >= FF_VOLUMES || pdrv > 9) {
     ESP_LOGE(TAG, "confine format failed: no usable FatFs physical drive");
@@ -1306,7 +1333,8 @@ void SdLogger::confine_format(const std::string &confirmation) {
     return;
   }
   LBA_t plist[4] = {sectors, 0, 0, 0};
-  ESP_LOGI(TAG, "confine format: card initialized; partitioning %" PRIu32 " sectors", sectors);
+  ESP_LOGI(TAG, "confine format: card initialized (%" PRIu64 " sectors); partitioning %" PRIu32 " sectors",
+           card_sectors, sectors);
   FRESULT result;
   {
     ScopedTaskWatchdogPause wdt_pause;
