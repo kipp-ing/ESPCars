@@ -189,10 +189,11 @@ def _validate_size(value):
 
 
 CONFINE_MIN_BYTES = 1 * 1024 * 1024
-# A typo guard, not a policy: the right cap for a given card is whatever its capacity
-# self-test proves, and that is a runtime fact this schema cannot know.
-CONFINE_MAX_BYTES = 32 * 1024 * 1024 * 1024
 CONFINE_SECTOR_BYTES = 512
+# A typo guard, not a policy: the right cap for a given card is whatever its capacity
+# self-test proves, and that is a runtime fact this schema cannot know. The bound is the
+# MBR's 32-bit partition sector count (~2 TiB); mirrors sd_confine_policy.h.
+CONFINE_MAX_BYTES = 0xFFFFFFFF * CONFINE_SECTOR_BYTES
 
 
 def _validate_confine_bytes(value):

@@ -15,8 +15,13 @@ static constexpr uint32_t SD_CONFINE_SECTOR_BYTES = 512;
 static constexpr uint64_t SD_CONFINE_MIN_BYTES = 1ull * 1024 * 1024;
 // A typo guard, not a policy. The safe size for a given card is whatever its capacity
 // self-test proves at runtime, which this compile-time bound cannot know; pinning it to
-// one card's measured region would silently refuse the next card.
-static constexpr uint64_t SD_CONFINE_MAX_BYTES = 32ull * 1024 * 1024 * 1024;
+// one card's measured region would silently refuse the next card. The bound is the MBR's
+// own: a partition's sector count is a 32-bit field, so ~2 TiB is the most f_fdisk can
+// describe. (It was 32 GiB, which refused every card above that for no reason.)
+static constexpr uint64_t SD_CONFINE_MAX_BYTES = static_cast<uint64_t>(UINT32_MAX) * SD_CONFINE_SECTOR_BYTES;
+// f_fdisk starts the single MBR partition at LBA 63 (measured: the confined volume mounts
+// at "LBA 63"), so a partition fits when it ends at or before the card's last sector.
+static constexpr uint32_t SD_CONFINE_FIRST_LBA = 63;
 
 /// Convert a requested confined volume size into FatFs' absolute-sector plist
 /// value. f_fdisk treats 1..100 as percentages, so the minimum deliberately
@@ -30,6 +35,13 @@ inline bool confine_sector_count(uint64_t bytes, uint32_t *sectors_out) {
     return false;
   *sectors_out = static_cast<uint32_t>(sectors);
   return true;
+}
+
+/// Whether a confined partition of `sectors` fits on a card of `card_sectors` (CSD
+/// capacity). Checked before f_fdisk so an oversized confine_bytes is refused with the card's
+/// real size in the log, instead of surfacing afterwards as an unexpected MBR.
+inline bool confine_fits_card(uint32_t sectors, uint64_t card_sectors) {
+  return card_sectors > SD_CONFINE_FIRST_LBA && static_cast<uint64_t>(sectors) <= card_sectors - SD_CONFINE_FIRST_LBA;
 }
 
 inline bool confine_volume_fits(uint64_t volume_bytes, uint64_t confine_bytes) {

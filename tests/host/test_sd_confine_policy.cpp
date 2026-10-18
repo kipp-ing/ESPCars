@@ -6,6 +6,7 @@
 
 using esphome::sd_logger::capacity_self_test_verdict;
 using esphome::sd_logger::confine_sector_count;
+using esphome::sd_logger::confine_fits_card;
 using esphome::sd_logger::confine_volume_fits;
 using esphome::sd_logger::CapacitySelfTestVerdict;
 
@@ -22,6 +23,25 @@ TEST(confine_bytes_becomes_an_absolute_fatfs_sector_count) {
   CHECK(sectors < 974844u);
   // The cap is a typo guard, so a plainly absurd request is still refused.
   CHECK(!confine_sector_count(5ull * 1024 * 1024 * 1024 * 1024, &sectors));
+}
+
+TEST(confine_cap_is_the_mbr_sector_field_not_32_gib) {
+  uint32_t sectors = 0;
+  CHECK(confine_sector_count(64ull * 1024 * 1024 * 1024, &sectors));
+  CHECK_EQ(sectors, 134217728u);
+  CHECK(confine_sector_count(static_cast<uint64_t>(UINT32_MAX) * 512, &sectors));
+  CHECK_EQ(sectors, UINT32_MAX);
+  CHECK(!confine_sector_count(static_cast<uint64_t>(UINT32_MAX) * 512 + 512, &sectors));
+}
+
+TEST(confine_partition_must_end_on_the_card) {
+  // The partition starts at LBA 63, so the largest fit is capacity - 63 sectors.
+  constexpr uint64_t CARD = 122138624;  // a typical 64 GB card's CSD capacity
+  CHECK(confine_fits_card(static_cast<uint32_t>(CARD - 63), CARD));
+  CHECK(!confine_fits_card(static_cast<uint32_t>(CARD - 62), CARD));
+  CHECK(confine_fits_card(1000, 1063));
+  CHECK(!confine_fits_card(1, 63));
+  CHECK(!confine_fits_card(1, 0));
 }
 
 TEST(confine_guard_only_allows_a_volume_at_or_below_the_cap) {
