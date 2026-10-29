@@ -56,8 +56,9 @@ class RelayServer:
     """The core behind a stand-in for the HA views. ``X-Test-Admin: 1`` plays
     the admin user; HA's own auth layer is tested in tests_ha/."""
 
-    def __init__(self, targets: dict, store_root: Path) -> None:
+    def __init__(self, targets: dict, store_root: Path, *, busy_wait: float = core.BUSY_WAIT) -> None:
         self.targets = targets
+        self.busy_wait = busy_wait
         self.store = core.FirmwareStore(store_root)
         self.url = ""
         self._loop = asyncio.new_event_loop()
@@ -77,7 +78,7 @@ class RelayServer:
 
     async def _start(self) -> None:
         self._session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
-        self.relay = core.Relay(self._session)
+        self.relay = core.Relay(self._session, busy_wait=self.busy_wait)
         app = web.Application()
         app.router.add_route("*", "/r/{logger_id}/sdlog/{tail:.+}", self._pass)
         app.router.add_get("/r/{logger_id}/fw/{name}", self._fw)
@@ -199,10 +200,10 @@ def stubs(tmp_path):
     made: list[Stub] = []
     servers: list[RelayServer] = []
 
-    def factory(handler) -> tuple[Stub, RelayServer]:
+    def factory(handler, **kwargs) -> tuple[Stub, RelayServer]:
         stub = Stub(handler)
         made.append(stub)
-        server = RelayServer({"stub": stub.target}, tmp_path / f"fw{len(made)}").start()
+        server = RelayServer({"stub": stub.target}, tmp_path / f"fw{len(made)}", **kwargs).start()
         servers.append(server)
         return stub, server
 
@@ -355,30 +356,58 @@ def test_relay_aborts_on_upstream_drop(relay: RelayServer, device: FakeDevice) -
 # ------------------------------------------------------------ R6: concurrency
 
 
-def test_relay_one_upstream_per_logger(stubs, device: FakeDevice, tmp_path) -> None:
+def _wait_until(predicate, seconds: float = 2.0) -> None:
+    for _ in range(int(seconds / 0.01)):
+        if predicate():
+            return
+        threading.Event().wait(0.01)
+    raise AssertionError("condition not reached")
+
+
+def test_relay_one_upstream_per_logger(stubs, device: FakeDevice) -> None:
+    """While one request holds the logger, a second one for it never reaches
+    upstream; after BUSY_WAIT it gets 503. Another logger is not held up."""
+
     def handler(h, stub):
         stub.release.wait(10)
         _answer(h, 200, b"{}")
 
-    stub, server = stubs(handler)
+    stub, server = stubs(handler, busy_wait=0.3)
     server.targets["car"] = target_of(device.url)
     first: list = []
     worker = threading.Thread(target=lambda: first.append(call(f"{server.url}/stub/sdlog/index")))
     worker.start()
-    for _ in range(200):
-        if stub.seen:
-            break
-        threading.Event().wait(0.01)
+    _wait_until(lambda: len(stub.seen) == 1)
 
     status, _, body = call(f"{server.url}/stub/sdlog/status")
     assert status == 503 and json.loads(body) == {"reason": "busy"}
-    # Another logger is not held up.
+    assert len(stub.seen) == 1, "the second request must not reach the logger"
     assert call(f"{server.url}/car/sdlog/index")[0] == 200
 
     stub.release.set()
     worker.join(10)
     assert first[0][0] == 200
-    assert call(f"{server.url}/stub/sdlog/index")[0] == 200
+
+
+def test_relay_queues_a_request_behind_a_short_one(stubs) -> None:
+    """The collector's next request often arrives before the previous handler
+    has finished. It waits its turn instead of failing (found on Linux CI)."""
+
+    def handler(h, stub):
+        if len(stub.seen) == 1:
+            stub.release.wait(10)
+        _answer(h, 200, b"{}")
+
+    stub, server = stubs(handler, busy_wait=5.0)
+    first: list = []
+    worker = threading.Thread(target=lambda: first.append(call(f"{server.url}/stub/sdlog/index")))
+    worker.start()
+    _wait_until(lambda: len(stub.seen) == 1)
+    threading.Timer(0.2, stub.release.set).start()
+
+    assert call(f"{server.url}/stub/sdlog/status")[0] == 200
+    worker.join(10)
+    assert first[0][0] == 200 and len(stub.seen) == 2
 
 
 # -------------------------------------------------------------------- R8: 401

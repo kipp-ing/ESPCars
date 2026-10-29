@@ -25,6 +25,10 @@ from aiohttp import web
 BLOCK = 64 * 1024
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 30.0
+# A request for a logger that is busy waits this long before 503 (R6). The
+# collector sends its next request the instant it has the last byte, often
+# before the previous handler has finished; refusing at once loses that race.
+BUSY_WAIT = 5.0
 
 LOGGER_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
@@ -81,9 +85,10 @@ def upstream_path(tail: str, method: str) -> str | web.Response:
 class Relay:
     """Pass-through to the loggers. Never stores a byte of a chunk."""
 
-    def __init__(self, session: aiohttp.ClientSession) -> None:
+    def __init__(self, session: aiohttp.ClientSession, *, busy_wait: float = BUSY_WAIT) -> None:
         self._session = session
-        self._busy: set[str] = set()
+        self._busy_wait = busy_wait
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def forward(
         self, request: web.Request, targets: Mapping[str, Target], logger_id: str, tail: str
@@ -94,15 +99,18 @@ class Relay:
         path = upstream_path(tail, request.method)
         if isinstance(path, web.Response):
             return path
-        # One upstream request per logger (R6). The event loop is single
-        # threaded, so a set is enough.
-        if logger_id in self._busy:
+        # One upstream request per logger (R6): the ESP's httpd serves few
+        # sockets. Queue briefly, refuse only if the logger stays busy.
+        lock = self._locks.setdefault(logger_id, asyncio.Lock())
+        try:
+            async with asyncio.timeout(self._busy_wait):
+                await lock.acquire()
+        except TimeoutError:
             return json_error(503, "busy")
-        self._busy.add(logger_id)
         try:
             return await self._forward(request, target, path)
         finally:
-            self._busy.discard(logger_id)
+            lock.release()
 
     async def _forward(self, request: web.Request, target: Target, path: str) -> web.StreamResponse:
         headers = {"Accept-Encoding": "identity"}
