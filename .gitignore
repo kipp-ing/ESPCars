@@ -8,3 +8,4 @@ secrets.yaml
 .DS_Store
 .claude/worktrees/
 private/
+.venv-ha/

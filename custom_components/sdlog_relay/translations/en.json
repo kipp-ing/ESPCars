@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "sd_logger relay",
+        "description": "One entry per logger. The logger must keep its address (DHCP reservation).",
+        "data": {
+          "logger_id": "Logger ID (URL path segment)",
+          "host": "Logger IPv4 address",
+          "port": "Logger port"
+        }
+      },
+      "reconfigure": {
+        "title": "Change logger address",
+        "data": {
+          "host": "Logger IPv4 address",
+          "port": "Logger port"
+        }
+      }
+    },
+    "error": {
+      "bad_logger_id": "Lowercase letters, digits, '-' and '_', at most 32 characters.",
+      "bad_host": "An IPv4 address, not a hostname.",
+      "bad_port": "A port between 1 and 65535."
+    },
+    "abort": {
+      "already_configured": "This logger ID is already configured.",
+      "reconfigure_successful": "Address updated."
+    }
+  }
+}

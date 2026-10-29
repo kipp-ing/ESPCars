@@ -14,7 +14,7 @@ The collector half (bearer token, auth lockout) is specified in [`sdlog-fleet-sp
 ```
 collector ──HTTP, HA bearer token──▶ HA core ──▶ sdlog_relay ──HTTP──▶ sd_logger :8080 (same LAN as HA)
                                                      ▲
-sd_logger update entity ──HTTP, no token, source IP = logger──┘  (fw/manifest.json, fw/firmware.ota.bin)
+sd_logger update entity ──HTTP, no token, source IP = logger──┘  (fw/manifest.json, fw/firmware-<md5>.ota.bin)
 admin (HA admin token) ──PUT fw──▶ sdlog_relay ──▶ /config/sdlog_relay/<logger_id>/
 ```
 
@@ -48,16 +48,16 @@ No other setting. The relay can reach exactly the configured `host:port` per ent
 | R4 | `<name>` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$` and contain no `..`. Anything else is answered `400` without contacting the logger. Unknown `logger_id` → `404`. No other path under `/api/sdlog_relay/` is forwarded. | `test_relay_rejects_bad_names`, `test_relay_unknown_logger` |
 | R5 | Logger unreachable (connect refused, timeout 5 s connect / 30 s between blocks) → `502` with `{"reason":"logger_unreachable"}`. Upstream drops mid-body → the response is aborted, never padded or completed. | `test_relay_502_when_offline`, `test_relay_aborts_on_upstream_drop` |
 | R6 | One upstream request per logger at a time. A second concurrent request → `503` with `{"reason":"busy"}`. The ESP's httpd serves few sockets, and the collector is sequential anyway. | `test_relay_one_upstream_per_logger` |
-| R7 | All pass-through views require HA authentication (`requires_auth = True`). Any HA user may use them, admin is not needed. | `test_relay_requires_auth` |
-| R8 | The relay never answers `401` for its own reasons. Only HA's auth layer does, and HA counts each `401` as a failed login against `request.remote` (`http/ban.py`). Upstream errors become `502`/`503`, never `401`. | `test_relay_never_emits_401` |
+| R7 | All pass-through views require HA authentication (`requires_auth = True`). Any HA user may use them, admin is not needed. | `test_relay_requires_auth`, `test_relay_any_user_may_pull` (tests_ha) |
+| R8 | The relay never answers `401` for its own reasons. Only HA's auth layer does, and HA counts each `401` as a failed login against `request.remote` (`http/ban.py`). Upstream errors become `502`/`503`, never `401`. | `test_relay_never_emits_401`, `test_only_ha_auth_counts_a_failed_login` (tests_ha) |
 
 ### Firmware
 
 | ID | Requirement | Test |
 |---|---|---|
-| R9 | `GET /api/sdlog_relay/<logger_id>/fw/manifest.json` and `…/fw/firmware.ota.bin` need **no** HA auth, but answer only when `request.remote` (after HA's `X-Forwarded-For` handling) equals the entry's `host`. Every other source gets `404`, which does not count as a failed login. Reason: an ESPHome firmware embeds the WiFi PSK and the API key. | `test_fw_only_for_logger_ip`, `test_fw_other_source_404`, `test_fw_xff_from_trusted_proxy_not_spoofable` |
+| R9 | `GET /api/sdlog_relay/<logger_id>/fw/manifest.json` and `…/fw/firmware-<md5>.ota.bin` (the name the manifest gives, relative to it) need **no** HA auth, but answer only when `request.remote` (after HA's `X-Forwarded-For` handling) equals the entry's `host`. Every other source gets `404`, which does not count as a failed login. Reason: an ESPHome firmware embeds the WiFi PSK and the API key. | `test_fw_only_for_logger_ip`, `test_fw_other_source_404`, `test_fw_xff_from_trusted_proxy_not_spoofable` |
 | R10 | `PUT /api/sdlog_relay/<logger_id>/fw` takes the `.ota.bin` as body plus query `version` and `chip_family` (ESP Web Tools names, e.g. `ESP32-C6`). **Admin only.** The relay computes the MD5 and writes an ESP Web Tools manifest with an `ota` block ([format](https://esphome.io/components/update/http_request/)). | `test_fw_upload_admin_only`, `test_fw_manifest_format` |
-| R11 | Files live in `/config/sdlog_relay/<logger_id>/`, never under `/config/www`. The binary is written to a temp file and renamed, then the manifest the same way, so a reader sees either the old pair or the new pair, never a mix. | `test_fw_atomic_replace` |
+| R11 | Files live in `/config/sdlog_relay/<logger_id>/`, never under `/config/www`. The binary is named by its MD5 and written first (temp file + rename), then the manifest the same way. The previous binary is kept, older ones are pruned. So any manifest a reader holds names a complete binary with matching MD5, even mid-upload. *(Built 2026-10-29: two fixed names cannot give that guarantee.)* | `test_fw_atomic_replace` |
 | R12 | No firmware uploaded yet → `404` for the logger too. | `test_fw_absent_404` |
 
 ### Shape of the code
@@ -65,8 +65,8 @@ No other setting. The relay can reach exactly the configured `host:port` per ent
 | ID | Requirement | Test |
 |---|---|---|
 | R13 | The forwarding logic lives in a module that imports neither `homeassistant` nor anything outside `aiohttp` and the stdlib (the `gateway_core.h` rule). The HA glue (views, config flow, auth checks) stays thin. | `test_core_has_no_ha_import` |
-| R14 | Core tests run against the existing `FakeDevice` from `tests/sd_logger/test_collect.py` behind an in-process relay, and the real `sdlog_collect.py` passes its pull cases through it unchanged. | `test_collect_through_relay` |
-| R15 | Layout for HACS: `custom_components/sdlog_relay/` with `manifest.json` (`domain`, `name`, `version`, `documentation`, `issue_tracker`, `codeowners`), `hacs.json` at the repo root, `brand/icon.png` ([HACS](https://www.hacs.xyz/docs/publish/integration/)). | `test_hacs_layout` |
+| R14 | Core tests (`tests/relay/`) run against the existing `FakeDevice` from `tests/sd_logger/test_collect.py` behind an in-process relay, and the real `sdlog_collect.py` passes its pull cases through it unchanged. HA glue tests live in `tests_ha/` (own venv, CI job `ha-integration`). | `test_collect_through_relay` |
+| R15 | Layout for HACS: `custom_components/sdlog_relay/` with `manifest.json` (`domain`, `name`, `version`, `documentation`, `issue_tracker`, `codeowners`), `hacs.json` at the repo root, `custom_components/sdlog_relay/brand/icon.png` ([HACS](https://www.hacs.xyz/docs/publish/integration/), [brand folder since HA 2026.3](https://contributors.home-assistant.io/blog/2026/02/24/brands-proxy-api)). | `test_hacs_layout` |
 
 ## 4. Scenarios
 

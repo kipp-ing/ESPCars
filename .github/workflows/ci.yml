@@ -124,10 +124,27 @@ jobs:
           find components -name '*.cpp' -o -name '*.h' -o -name '*.tcc' | \
             xargs clang-format --dry-run --Werror
 
+  ha-integration:
+    name: Home Assistant glue (sdlog_relay)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The wire logic is tested in `validate` without HA (tests/relay/). This job
+      # proves what only HA decides: auth, admin, X-Forwarded-For, ip_ban. Its own
+      # venv because the harness pins a whole Home Assistant (docs/sdlog-relay-spec.md Q1).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: tests_ha/requirements.txt
+      - run: pip install -r tests_ha/requirements.txt
+      - name: Run HA glue tests
+        run: python -m pytest -c tests_ha/pytest.ini tests_ha -q
+
   required-checks:
     name: Required checks
     if: always()
-    needs: [validate, host-tests, compile, clang-format]
+    needs: [validate, host-tests, compile, clang-format, ha-integration]
     runs-on: ubuntu-latest
     steps:
       # One stable context for branch protection to require, instead of
