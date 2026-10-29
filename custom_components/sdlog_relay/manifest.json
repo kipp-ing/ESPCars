@@ -1,0 +1,12 @@
+{
+  "domain": "sdlog_relay",
+  "name": "sd_logger relay",
+  "codeowners": ["@kipp-ing"],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://github.com/kipp-ing/ESPCars/blob/main/docs/sdlog-relay-spec.md",
+  "integration_type": "service",
+  "issue_tracker": "https://github.com/kipp-ing/ESPCars/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

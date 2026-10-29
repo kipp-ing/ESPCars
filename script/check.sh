@@ -25,6 +25,15 @@ echo "== clang-format =="
 find components -name '*.cpp' -o -name '*.h' -o -name '*.tcc' | \
   xargs .venv/bin/clang-format --dry-run --Werror
 
+# HA glue for custom_components/sdlog_relay needs its own venv (a pinned HA);
+# CI always runs it, locally only when .venv-ha exists.
+if [ -x .venv-ha/bin/python ]; then
+  echo "== sdlog_relay HA glue =="
+  .venv-ha/bin/python -m pytest -c tests_ha/pytest.ini tests_ha -q
+else
+  echo "== sdlog_relay HA glue: skipped (no .venv-ha; see tests_ha/requirements.txt) =="
+fi
+
 echo "== esphome config =="
 for y in tests/build/*/test*.yaml; do
   "$ESPHOME" config "$y" > /dev/null
