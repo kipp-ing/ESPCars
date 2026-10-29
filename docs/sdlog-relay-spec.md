@@ -1,6 +1,6 @@
 # sdlog_relay: reach an sd_logger behind someone else's Home Assistant
 
-2026-10-29. **Draft, for confirmation.** A Home Assistant custom integration that lets a collector
+2026-10-29. **Confirmed as the starting point (Q1, Q2 as proposed); reality will refine it.** A Home Assistant custom integration that lets a collector
 (`sdlog_fleet` / `sdlog_collect`) pull an sd_logger that sits in a LAN the collector cannot route to,
 when the only way in is that LAN's Home Assistant (for example through a tunnel that forwards HA and
 nothing else). It also hands the logger its next firmware, so the logger can update itself without
