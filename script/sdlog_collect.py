@@ -105,6 +105,7 @@ Usage:
     script/sdlog_collect.py pull <url> --into <dir> --device mr-orange
     script/sdlog_collect.py pull <url> --into <dir> --retries 1 --backoff 0
     script/sdlog_collect.py index http://mr-orange.local:8080
+    script/sdlog_collect.py pull <relay-url> --into <dir> --token-file <file>
 
 Archive layout: ``<into>/<device>/L0000433.LOG``, with an in-flight transfer at
 ``<into>/<device>/L0000433.LOG.part`` — a partial is never given the final name,
@@ -121,8 +122,10 @@ Exit status (docs/sdlog-fleet-spec.md §2 — an unattended caller acts on it):
     74  the local archive could not be written (EX_IOERR); the pass stopped
     75  only the network failed (EX_TEMPFAIL): the device is not there, or the
         pass was cut short by transport alone. Partials stay; run again later.
+    77  refused (EX_NOPERM): the URL answered 401 or 403. The pass stopped at
+        that answer; a Home Assistant relay counts each one as a failed login.
 
-The most severe applies: 74 > 3 > 1 > 75 > 0.
+The most severe applies: 77 > 74 > 3 > 1 > 75 > 0.
 """
 
 from __future__ import annotations
@@ -199,6 +202,11 @@ EX_DEFECT = 1
 EX_WRONG_TARGET = 3
 EX_IOERR = os.EX_IOERR  # 74
 EX_TEMPFAIL = os.EX_TEMPFAIL  # 75
+EX_NOPERM = os.EX_NOPERM  # 77
+
+# Answers that say "not you". Never retried: behind a Home Assistant relay each
+# one is a failed login, and five ban the tunnel (sdlog-fleet-spec C17).
+_AUTH_STATUS = frozenset({401, 403})
 
 
 def _retryable(status: int) -> bool:
@@ -238,6 +246,8 @@ class Outcome:
     transient: list[str] = field(default_factory=list)
     # The local archive refused a write; the pass stopped there.
     archive_error: str | None = None
+    # A 401/403 stopped the pass (C17).
+    refused: str | None = None
     # Written into the archive this run — a restarted partial counts what it
     # wrote before it was discarded, because that is what the run cost.
     bytes_fetched: int = 0
@@ -266,6 +276,19 @@ class _ChunkFailed(Exception):
     def __init__(self, reason: str, *, transient: bool = False) -> None:
         super().__init__(reason)
         self.transient = transient
+
+
+class _Refused(Exception):
+    """401/403. Deliberately not an ``OSError`` (``HTTPError`` is one), so no
+    transport handler on the way up can mistake it for a stumble and retry."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """With a token, a 3xx is an answer: urllib would copy ``Authorization``
+    to wherever the redirect points (C18)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class _ArchiveError(Exception):
@@ -458,8 +481,11 @@ class Collector:
         retries: int = DEFAULT_RETRIES,
         backoff: float = DEFAULT_BACKOFF,
         sleeper: Callable[[float], None] = time.sleep,
+        token: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self._token = token
+        self._opener = urllib.request.build_opener(_NoRedirect) if token else urllib.request.build_opener()
         self.dest = Path(dest)
         # An explicit name wins; otherwise the index says who it is; otherwise the
         # host out of the URL. The name is half the dedup key, so it has to be
@@ -498,10 +524,17 @@ class Collector:
             yield number
 
     def _open(self, path: str, *, method: str = "GET", headers: dict | None = None, data=None):
-        request = urllib.request.Request(
-            self.base_url + path, data=data, headers=headers or {}, method=method
-        )
-        return urllib.request.urlopen(request, timeout=self.timeout)
+        headers = dict(headers or {})
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            return self._opener.open(request, timeout=self.timeout)
+        except urllib.error.HTTPError as err:
+            if err.code not in _AUTH_STATUS:
+                raise
+            err.close()
+            raise _Refused(f"{method} {path}: HTTP {err.code} {err.reason}") from None
 
     def _name(self) -> str:
         return self.device or urlparse(self.base_url).hostname or "device"
@@ -989,13 +1022,23 @@ class Collector:
         self.unreachable = False
         self.offline = False
         try:
+            self._collect(outcome)
+        except _Refused as err:
+            # Not one more request this pass, whatever was in flight (C17).
+            outcome.device = outcome.device or self._name()
+            outcome.refused = str(err)
+            outcome.failed.append(("<refused>", str(err)))
+        return outcome
+
+    def _collect(self, outcome: Outcome) -> None:
+        try:
             chunks = self.index()
         except _Unreachable as err:
             self.unreachable = True
             self.offline = err.offline
             outcome.device = self._name()
             outcome.failed.append(("<index>", str(err)))
-            return outcome
+            return
         outcome.device = self._name()
         outcome.failed.extend(self.index_problems)
 
@@ -1036,7 +1079,6 @@ class Collector:
                 outcome.confirmed.append(chunk.name)
             else:
                 _record_failure(outcome, chunk.name, problem)
-        return outcome
 
 
 def _record_failure(outcome: Outcome, name: str, err: _ChunkFailed) -> None:
@@ -1047,6 +1089,8 @@ def _record_failure(outcome: Outcome, name: str, err: _ChunkFailed) -> None:
 
 def exit_status(pull: Collector, outcome: Outcome) -> int:
     """The pass as one code, most severe first (sdlog-fleet-spec §2)."""
+    if outcome.refused is not None:
+        return EX_NOPERM
     if outcome.archive_error is not None:
         return EX_IOERR
     if pull.unreachable:
@@ -1130,8 +1174,12 @@ def cmd_pull(args) -> int:
         timeout=args.timeout,
         retries=args.retries,
         backoff=args.backoff,
+        token=args.token,
     )
     outcome = pull.collect()
+    if outcome.refused is not None:
+        print(f"{args.url}: REFUSED — {outcome.refused}; not asking again this pass", file=sys.stderr)
+        return EX_NOPERM
     if pull.unreachable:
         # Not a chunk report: nothing was listed, so counting zeroes would read
         # like a clean run against a parked car with nothing to give.
@@ -1148,9 +1196,12 @@ def cmd_pull(args) -> int:
 def cmd_index(args) -> int:
     """What the device says it is holding. Read-only: nothing is confirmed, so
     this is the safe thing to point at a car mid-drive."""
-    pull = Collector(args.url, ".", timeout=args.timeout, retries=args.retries, backoff=0.5)
+    pull = Collector(args.url, ".", timeout=args.timeout, retries=args.retries, backoff=0.5, token=args.token)
     try:
         chunks = pull.index()
+    except _Refused as err:
+        print(f"{args.url}: REFUSED — {err}", file=sys.stderr)
+        return EX_NOPERM
     except _Unreachable as err:
         print(f"{args.url}: {err}", file=sys.stderr)
         return EX_TEMPFAIL if err.offline else EX_WRONG_TARGET
@@ -1164,6 +1215,26 @@ def cmd_index(args) -> int:
     for name, why in pull.index_problems:
         print(f"  SKIPPED {name}: {why}", file=sys.stderr)
     return 1 if pull.index_problems else 0
+
+
+TOKEN_FILE_HELP = "send 'Authorization: Bearer <first line>' (e.g. a Home Assistant sdlog_relay); mode 0600"
+
+
+def read_token(path: Path) -> str:
+    """The bearer token: the file's first line, stripped (C16). Refused like an
+    ssh key when group or others can read it."""
+    try:
+        mode = path.stat().st_mode
+        text = path.read_text(encoding="utf-8")
+    except OSError as err:
+        raise ValueError(f"cannot read {path}: {err.strerror}") from None
+    if mode & 0o077:
+        raise ValueError(f"{path} is readable by group or others (mode {mode & 0o777:o}); chmod 600 it")
+    lines = text.splitlines()
+    token = lines[0].strip() if lines else ""
+    if not token:
+        raise ValueError(f"{path} is empty")
+    return token
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1191,15 +1262,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     pull.add_argument("--backoff", type=float, default=DEFAULT_BACKOFF, help="seconds, doubling")
     pull.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    pull.add_argument("--token-file", metavar="PATH", help=TOKEN_FILE_HELP)
     pull.set_defaults(func=cmd_pull)
 
     index = sub.add_parser("index", help="list what the device is holding, confirm nothing")
     index.add_argument("url")
     index.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
     index.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    index.add_argument("--token-file", metavar="PATH", help=TOKEN_FILE_HELP)
     index.set_defaults(func=cmd_index)
 
     args = parser.parse_args(argv)
+    args.token = None
+    if args.token_file is not None:
+        try:
+            args.token = read_token(Path(args.token_file))
+        except ValueError as err:
+            # argparse's own exit 2: a usage error, and nothing has been sent.
+            parser.error(f"--token-file: {err}")
     return args.func(args)
 
 

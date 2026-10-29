@@ -18,3 +18,8 @@ push_url = "http://kuma.example:3001/api/push/REPLACE_ME"   # optional
 [[device]]
 name = "mr-blue"
 url = "http://192.0.2.11:8080"
+
+[[device]]                         # behind a Home Assistant running sdlog_relay (docs/sdlog-relay-spec.md)
+name = "mr-green"
+url = "http://192.0.2.20:8123/api/sdlog_relay/mr-green"
+token_file = "/etc/sdlog-fleet/tokens/mr-green"   # first line = HA token of a non-admin user; mode 0600

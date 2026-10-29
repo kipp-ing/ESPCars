@@ -41,7 +41,9 @@ them by accident.
 | `74` | **Archive I/O.** The local archive could not be written (full disk, permissions). The pass stops at the first such error, because later chunks would hit the same disk. | alarm |
 | `75` | **Only the network failed.** Either the device is not there (connection refused or timed out, or the index kept answering 5xx/408/429), or the pass was cut short by transport failures alone. Partials stay in place and the next run resumes. | silent |
 
-When several apply, the most severe wins: `74 > 3 > 1 > 75 > 0`.
+| `77` | **Refused.** The URL answered `401` or `403`: the bearer token is missing, wrong or revoked, or a Home Assistant in front of the device ([`sdlog_relay`](sdlog-relay-spec.md)) has banned this host. The pass stops at that answer and sends nothing more. `EX_NOPERM` in `sysexits.h`. | alarm, and the fleet stops asking (F18) |
+
+When several apply, the most severe wins: `77 > 74 > 3 > 1 > 75 > 0`.
 
 **Transient, not defects** (they lead to 75 when nothing worse happened): a body
 cut short, a socket error or timeout, retryable statuses after the attempts run
@@ -67,6 +69,16 @@ All of these converge on the next run without help.
 | C13 | **Not stable → start over, then defect.** A different size or sha256 drops the candidate and starts counting again. After 3 sightings without two equal ones in a row, the chunk is a defect (exit 1) with the reason. A header that does not name the chunk is a defect at once, as before. | `test_an_unstable_torn_chunk_becomes_a_defect`, `test_a_torn_chunk_with_a_foreign_header_is_a_defect` |
 | C14 | A chunk fetched short of the index's `bytes` stays a transient short transfer (C5); only a full fetch can be a torn candidate. | `test_a_short_fetch_is_never_a_torn_candidate` |
 | C15 | Candidate files are never loaded by the decoder (it reads `*.LOG` only) and are removed once the chunk is archived or declared a defect. | `test_candidate_files_are_cleaned_up` |
+
+| C16 | `--token-file PATH`: every request carries `Authorization: Bearer <token>`, the token being the file's first line, stripped. A file that is missing, unreadable, empty, or readable by group or others is a usage error (exit 2, before anything is sent). The token never appears in the output. | `test_a_token_file_sends_a_bearer`, `test_a_bad_token_file_is_a_usage_error` (parametrized) |
+| C17 | A `401` or `403` to any request (index, identity window, fetch, confirm) stops the pass at once with exit 77. It is not retried, and no request follows it in that pass. | `test_a_refusal_stops_the_pass_at_once` (parametrized over the request) |
+| C18 | With a token, redirects are not followed. A `3xx` is an answer (on the index: exit 3), so the token never travels to another URL. | `test_a_redirect_never_carries_the_token` |
+| C19 | Without `--token-file` no `Authorization` header is sent. | `test_no_token_no_header` |
+
+**Why a refusal stops everything (2026-10-29).** A Home Assistant in front of the device counts every `401` as a
+failed login against the address it sees, which behind a tunnel is the tunnel itself. A pass that retried, or a
+fleet that asked again every 5 minutes, would get the tunnel banned after five passes, and with it everything else
+that reaches that Home Assistant through it. `403` is in the set because it is what a banned address gets back.
 
 **Why the collector, too (2026-10-11).** F2c (`sd_logger-spec.md`) seals a torn file at the next boot, but
 only the 3 newest and only when every step works (`torn_unsealed` otherwise). A torn file behind them (an
@@ -102,6 +114,11 @@ backoff = 0.5                      # optional, passed to the collector (seconds,
 name = "mr-orange"                 # must equal the name the device reports (--expect)
 url = "http://192.0.2.10:8080"
 push_url = "http://kuma.example:3001/api/push/TOKEN"   # optional
+
+[[device]]                         # behind a Home Assistant running sdlog_relay
+name = "mr-green"
+url = "http://192.0.2.20:8123/api/sdlog_relay/mr-green"
+token_file = "/etc/sdlog-fleet/tokens/mr-green"   # optional, absolute path, mode 0600
 ```
 
 ### 3.2 Requirements
@@ -110,7 +127,7 @@ push_url = "http://kuma.example:3001/api/push/TOKEN"   # optional
 |---|---|---|
 | F1 | **Config.** It loads the archive, state, thresholds and a list of devices. It rejects an unknown key, a duplicate name, a name that cannot be a path component, a non-http(s) URL, a non-positive threshold, and an empty device list, with exit 2 and a message that names the problem. A typo such as `pushurl` must not disable an alarm without anyone noticing. | `test_config_loads_the_example`, `test_config_rejects` (parametrized), `test_a_bad_config_exits_two` |
 | F2 | **One collector pass per device**: `sdlog_collect.py pull <url> --into <archive> --expect <name>` (plus `--retries`/`--backoff` when configured) as a subprocess, using the interpreter the fleet runs under and the collector next to it. | `test_each_device_gets_one_pull_with_expect`, `test_end_to_end_two_devices_are_archived_and_confirmed` |
-| F3 | **Exit-status mapping.** 0 → `ok`; 75 → `offline`; anything else (incl. 1, 2, 3, 74, a signal, a timeout, a collector that cannot be started) → `error`. | `test_exit_status_mapping` (parametrized), `test_a_hung_pass_is_killed_and_is_an_error`, `test_a_missing_collector_is_an_error_not_offline` |
+| F3 | **Exit-status mapping.** 0 → `ok`; 75 → `offline`; anything else (incl. 1, 2, 3, 74, 77 (and F18), a signal, a timeout, a collector that cannot be started) → `error`. | `test_exit_status_mapping` (parametrized), `test_a_hung_pass_is_killed_and_is_an_error`, `test_a_missing_collector_is_an_error_not_offline` |
 | F4 | **Away is silent.** An `offline` pass changes neither `last_success` nor the verdict. It does not fail the fleet's exit status, and it does not turn the push red while the last success is fresh. | `test_an_offline_device_is_quiet`, `test_end_to_end_an_absent_device_is_quiet` |
 | F5 | **E3 end-to-end.** WiFi lost mid-transfer → that run is `offline` and the partial is kept. The next run completes the chunk, confirms it once and stores it once. | `test_end_to_end_a_cut_transfer_resumes_on_the_next_run` |
 | F6 | **Append-only.** The fleet never deletes, rewrites or truncates a file in the archive. An archived file is byte-identical and keeps its mtime after any run, including one that hit a same-name mismatch. | `test_end_to_end_the_archive_is_append_only` |
@@ -124,6 +141,9 @@ push_url = "http://kuma.example:3001/api/push/TOKEN"   # optional
 | F14 | **`status`** prints one line per device (result, age of the last success, alarm) and exits 1 if any device is in alarm. | `test_status_reports_alarm_and_exits_one` |
 | F15 | **`--every N`** repeats `run` every N seconds until interrupted. | `test_every_repeats_the_pass` |
 | F17 | **Torn is a warning.** A `TORN` line from the collector (C12) leaves the pass `ok`. The heartbeat counts it (`torn_accepted`, cumulative) and keeps the newest one as `last_torn {at, name, reason}`; the summary and the push `msg` name it. It never raises the alarm. | `test_a_torn_chunk_is_a_warning_not_an_alarm` |
+| F18 | **Refused → locked.** Collector exit 77 makes the pass an `error` (alarm), and the heartbeat records `auth_locked {at, credential}`. `credential` names the token file and its state, `<path>@<mtime_ns>`, or `none` without a `token_file`. | `test_a_refusal_locks_the_device` |
+| F19 | **Locked passes ask nothing.** While `auth_locked.credential` equals the current credential, a pass starts no collector: result `locked`, verdict stays `error`, the push says `down`, and the run exits 1. Replacing or touching the token file, or adding or removing `token_file`, changes the credential, and the next pass runs normally. A success clears the lock, another 77 sets it again. | `test_a_locked_device_is_not_asked_until_the_token_changes` |
+| F20 | `token_file` (optional, per device) must be an absolute path and is passed to the collector as `--token-file`. | `test_config_rejects` (parametrized), `test_a_token_file_is_passed_to_the_collector` |
 | F16 | The example config and units in `deploy/sdlog-fleet/` are fictional, and the private-data guard scans them (`.toml`, `.service`, `.timer`). | `test_config_loads_the_example`, `script/check_no_private_data.py` |
 
 ### 3.3 Why the push goes out on every pass, not only on success

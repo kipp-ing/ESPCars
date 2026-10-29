@@ -532,7 +532,7 @@ somehow asked for the `.UPL` spelling resolves to the same entry and gets 200.
 | response | client behaviour | pinned by |
 |---|---|---|
 | 5xx / 408 / 429 | retried up to `retries` times; the confirm is idempotent so duplicates are free | `test_a_confirm_that_stumbles_is_retried_and_a_refusal_is_not` — `confirm_status=500` → exactly 3 POSTs |
-| any other 4xx | **one attempt only**, chunk reported failed, retried next run | same test — `confirm_status=403` → exactly 1 more POST, `"403" in reason` |
+| any other 4xx | **one attempt only**, chunk reported failed, retried next run | same test — `confirm_status=422` → exactly 1 more POST, `"422" in reason`. 401/403 stop the whole pass instead (fleet spec C17, 2026-10-29) |
 | transport error | retried | `_confirm` L746–748 |
 
 A failed confirm is never treated as sent. `test_a_failed_confirm_leaves_the_chunk_for_the_next_run`
