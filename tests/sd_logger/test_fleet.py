@@ -180,6 +180,8 @@ def test_config_loads_the_example() -> None:
         ({}, '[[device]]\nname = "a"\n', "url"),
         ({"archive": None}, device_toml("a"), "archive"),
         ({}, device_toml("a", push="not a url"), "push_url"),
+        ({}, device_toml("a") + 'token_file = "relative/token"\n', "token_file"),
+        ({}, device_toml("a") + "token_file = 5\n", "token_file"),
     ],
 )
 def test_config_rejects(tmp_path: Path, top: dict, devices_toml: str, needle: str) -> None:
@@ -229,6 +231,7 @@ def test_each_device_gets_one_pull_with_expect(tmp_path: Path) -> None:
         (2, "error"),
         (3, "error"),
         (74, "error"),
+        (77, "error"),
         (-9, "error"),
         (127, "error"),
     ],
@@ -239,6 +242,128 @@ def test_exit_status_mapping(tmp_path: Path, code: int, result: str) -> None:
     results = fleet.run_once()
     assert results["mr-orange"].result == result
     assert results["mr-orange"].exit == code
+
+
+# ------------------------------------------------------ F18-F20 refusal, lock
+
+
+def token_fleet(tmp_path: Path, token: Path | None, runner: Runner, pusher: Pusher | None = None, clock=None):
+    """One device behind a relay, with or without a token_file."""
+    toml = device_toml("mr-green", url="http://192.0.2.20:8123/api/sdlog_relay/mr-green",
+                       push="http://kuma.example:3001/api/push/mr-green")
+    if token is not None:
+        toml = toml.rstrip("\n") + f'\ntoken_file = "{token}"\n\n'
+    config = sdlog_fleet.load_config(write_config(tmp_path, toml))
+    return sdlog_fleet.Fleet(config, runner=runner, now=clock or Clock(), pusher=pusher or Pusher(),
+                             disk_free=lambda _path: 10**12)
+
+
+def write_token(tmp_path: Path, text: str = "s3cret\n") -> Path:
+    path = tmp_path / "token"
+    path.write_text(text)
+    path.chmod(0o600)
+    return path
+
+
+def bump_mtime(path: Path) -> None:
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+
+def test_a_token_file_is_passed_to_the_collector(tmp_path: Path) -> None:
+    """F20."""
+    runner = Runner()
+    token = write_token(tmp_path)
+    token_fleet(tmp_path, token, runner).run_once()
+    argv = runner.calls[0]
+    assert argv[argv.index("--token-file") + 1] == str(token)
+
+    plain = Runner()
+    (tmp_path / "plain").mkdir()
+    make_fleet(tmp_path / "plain", runner=plain).run_once()
+    assert "--token-file" not in plain.calls[0]
+
+
+def test_a_refusal_locks_the_device(tmp_path: Path) -> None:
+    """F18. Exit 77 is an alarm and leaves a lock keyed on the token file."""
+    token = write_token(tmp_path)
+    pusher = Pusher()
+    results = token_fleet(tmp_path, token, Runner(default=77), pusher).run_once()
+
+    assert results["mr-green"].result == "error"
+    beat = heartbeat(tmp_path, "mr-green")
+    assert beat["verdict"] == "error"
+    assert beat["auth_locked"] == {"at": T0.isoformat(), "credential": f"{token}@{token.stat().st_mtime_ns}"}
+    assert pusher.last()["status"] == "down"
+
+
+def test_a_locked_device_is_not_asked_until_the_token_changes(tmp_path: Path) -> None:
+    """F19. Locked passes start no collector and stay loud; a new token file
+    state unlocks, a success clears the lock."""
+    token = write_token(tmp_path)
+    runner = Runner(default=77)
+    pusher = Pusher()
+    clock = Clock()
+    fleet = token_fleet(tmp_path, token, runner, pusher, clock)
+    fleet.run_once()
+
+    for _ in range(3):
+        clock.advance(minutes=5)
+        results = fleet.run_once()
+        assert results["mr-green"].result == "locked"
+        assert sdlog_fleet.exit_code(results) == 1
+        assert pusher.last()["status"] == "down"
+    assert len(runner.calls) == 1, "a locked device must not be asked"
+    assert heartbeat(tmp_path, "mr-green")["verdict"] == "error"
+
+    token.write_text("n3w\n")
+    bump_mtime(token)
+    runner.default = 0
+    results = fleet.run_once()
+
+    assert results["mr-green"].result == "ok"
+    assert len(runner.calls) == 2
+    beat = heartbeat(tmp_path, "mr-green")
+    assert beat["verdict"] == "ok" and "auth_locked" not in beat
+
+
+def test_a_refusal_without_a_token_file_locks_until_one_is_configured(tmp_path: Path) -> None:
+    """F19. No token_file is a credential too ("none"): a relay URL without one
+    must not cost a failed login every pass."""
+    runner = Runner(default=77)
+    token_fleet(tmp_path, None, runner).run_once()
+    token_fleet(tmp_path, None, runner).run_once()
+    assert len(runner.calls) == 1
+
+    runner.default = 0
+    results = token_fleet(tmp_path, write_token(tmp_path), runner).run_once()
+    assert results["mr-green"].result == "ok" and len(runner.calls) == 2
+
+
+def test_end_to_end_a_wrong_token_costs_one_refusal(devices, tmp_path: Path) -> None:
+    """F18/F19 with the real collector: a wrong token is refused once, then the
+    device is left alone until the right token is written."""
+    fake = devices("mr-green")
+    fake.token = "right"
+    name = fake.add(431)
+    token = write_token(tmp_path, "wrong\n")
+    toml = device_toml("mr-green", url=fake.url).rstrip("\n") + f'\ntoken_file = "{token}"\n\n'
+    fleet = sdlog_fleet.Fleet(sdlog_fleet.load_config(write_config(tmp_path, toml)), pusher=Pusher())
+
+    first = fleet.run_once()
+    second = fleet.run_once()
+
+    assert (first["mr-green"].result, first["mr-green"].exit) == ("error", 77)
+    assert second["mr-green"].result == "locked"
+    assert len(fake.requests) == 1, "exactly one refused request"
+
+    token.write_text("right\n")
+    bump_mtime(token)
+    third = fleet.run_once()
+
+    assert third["mr-green"].result == "ok"
+    assert archived(tmp_path, "mr-green") == [name]
+    assert fake.confirmed == [name]
 
 
 def test_a_hung_pass_is_killed_and_is_an_error(tmp_path: Path) -> None:

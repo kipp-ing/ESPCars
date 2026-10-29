@@ -12,12 +12,16 @@ and says something only when something is actually wrong:
                             that is full. It stays loud until a pass succeeds.
     a collection that       is loud after ``stale_after_days`` (spec E4), even
     stops happening         if every pass in between was only "offline".
+    a refusal (401/403)     is loud, and the device is not asked again until
+                            its token file changes (F18/F19): behind a Home
+                            Assistant relay every refusal is a failed login.
 
 WHAT IT DOES PER DEVICE, EACH PASS
 
     flock <state>/<name>.lock      held → "busy", skip quietly
     disk pre-flight                under min_free_mb → error, no pull
-    sdlog_collect.py pull <url> --into <archive> --expect <name>
+    auth lock                      refused before, same token file → "locked", no pull
+    sdlog_collect.py pull <url> --into <archive> --expect <name> [--token-file <file>]
     <state>/<name>.json            heartbeat, replaced atomically
     GET push_url?status=up|down&msg=…   optional, e.g. an Uptime Kuma push monitor
 
@@ -37,7 +41,7 @@ Usage:
     script/sdlog_fleet.py status --config fleet.toml              # exit 1 if any device is in alarm
 
 Exit status of ``run``: 0 no device had an error in this pass (offline is not
-an error), 1 at least one did, 2 a usage or config error.
+an error), 1 at least one did or is locked, 2 a usage or config error.
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ except ModuleNotFoundError:  # pragma: no cover - the host is too old, say so pl
     sys.exit("sdlog_fleet.py needs Python >= 3.11 (tomllib)")
 
 EX_TEMPFAIL = 75  # sdlog_collect.py: only the network failed
+EX_NOPERM = 77  # sdlog_collect.py: the URL answered 401/403 (C17)
 EX_CONFIG = 2
 
 COLLECTOR = Path(__file__).absolute().parent / "sdlog_collect.py"
@@ -86,7 +91,7 @@ _TOP_KEYS = {
     "backoff",
     "device",
 }
-_DEVICE_KEYS = {"name", "url", "push_url"}
+_DEVICE_KEYS = {"name", "url", "push_url", "token_file"}
 
 
 class ConfigError(Exception):
@@ -98,6 +103,7 @@ class Device:
     name: str
     url: str
     push_url: str | None = None
+    token_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +120,7 @@ class Config:
 
 @dataclass
 class PassResult:
-    """One device, one pass. ``result`` is ok, offline, error or busy."""
+    """One device, one pass. ``result`` is ok, offline, error, locked or busy."""
 
     name: str
     result: str
@@ -122,6 +128,7 @@ class PassResult:
     reason: str | None = None
     summary: str | None = None
     torn: list[tuple[str, str]] = field(default_factory=list)  # (name, reason), collector C12
+    refused: bool = False  # collector exit 77 (F18)
 
 
 @dataclass
@@ -199,7 +206,10 @@ def load_config(path: Path | str) -> Config:
         push = entry.get("push_url")
         if push is not None:
             push = _http_url(push, "push_url", where)
-        devices.append(Device(name=name, url=url, push_url=push))
+        token = entry.get("token_file")
+        if token is not None and (not isinstance(token, str) or not os.path.isabs(token)):
+            raise ConfigError(f"{where}: token_file must be an absolute path, not {token!r}")
+        devices.append(Device(name=name, url=url, push_url=push, token_file=token))
 
     retries = raw.get("retries")
     if retries is not None and (isinstance(retries, bool) or not isinstance(retries, int) or retries < 1):
@@ -266,6 +276,17 @@ def _human_age(days: float) -> str:
     if seconds < 86400:
         return f"{seconds / 3600:.1f} h"
     return f"{days:.1f} d"
+
+
+def credential_of(device: Device) -> str:
+    """What the auth lock is keyed on (F18): the token file and its state. A
+    replaced or touched file, or a token_file added or removed, is a new key."""
+    if device.token_file is None:
+        return "none"
+    try:
+        return f"{device.token_file}@{os.stat(device.token_file).st_mtime_ns}"
+    except OSError:
+        return f"{device.token_file}@missing"
 
 
 def run_subprocess(argv: list[str], timeout: float) -> tuple[int, str]:
@@ -368,11 +389,22 @@ class Fleet:
             # The lock is released when the file closes — and by the kernel if
             # this process dies, so a crash never leaves a device locked out.
             at = self.now()
+            # Keyed before the pass: a token replaced while it runs unlocks the next one.
+            credential = credential_of(device)
+            locked = ((self._load(device.name) or {}).get("auth_locked") or {})
             if blocked is not None:
                 result = PassResult(device.name, "error", reason=blocked)
+            elif locked.get("credential") == credential:
+                # Refused before with these credentials: asking again would only
+                # be another failed login against the relay (F19).
+                result = PassResult(
+                    device.name,
+                    "locked",
+                    reason=f"refused at {locked.get('at')}; not asking until the token file changes",
+                )
             else:
                 result = self._collect(device)
-            state = self._record(device, result, at)
+            state = self._record(device, result, at, credential)
             self._push(device, state, result, at)
             return result
 
@@ -391,6 +423,8 @@ class Fleet:
             argv += ["--retries", str(self.config.retries)]
         if self.config.backoff is not None:
             argv += ["--backoff", f"{self.config.backoff:g}"]
+        if device.token_file is not None:
+            argv += ["--token-file", device.token_file]
         return argv
 
     def _collect(self, device: Device) -> PassResult:
@@ -410,6 +444,14 @@ class Fleet:
             return PassResult(device.name, "ok", exit=0, summary=_last_line(output), torn=_torn_lines(output))
         if code == EX_TEMPFAIL:
             return PassResult(device.name, "offline", exit=code, reason=_last_line(output))
+        if code == EX_NOPERM:
+            return PassResult(
+                device.name,
+                "error",
+                exit=code,
+                reason=f"refused, locked until the token file changes: {_last_line(output)}",
+                refused=True,
+            )
         return PassResult(
             device.name, "error", exit=code, reason=f"exit {code}: {_compact(output) or 'no output'}"
         )
@@ -426,7 +468,7 @@ class Fleet:
             return None
         return state if isinstance(state, dict) else None
 
-    def _record(self, device: Device, result: PassResult, at: datetime) -> dict:
+    def _record(self, device: Device, result: PassResult, at: datetime, credential: str) -> dict:
         state = self._load(device.name) or {
             "device": device.name,
             "created": at.isoformat(),
@@ -443,6 +485,9 @@ class Fleet:
             state["last_success"] = at.isoformat()
             state["verdict"] = "ok"
             state["summary"] = result.summary
+            state.pop("auth_locked", None)
+        if result.refused:
+            state["auth_locked"] = {"at": at.isoformat(), "credential": credential}
         if result.torn:
             state["torn_accepted"] = int(state.get("torn_accepted") or 0) + len(result.torn)
             name, reason = result.torn[-1]
@@ -492,6 +537,8 @@ class Fleet:
             parts.append(f"ok: {result.summary or 'collected'}")
         elif result.result == "error":
             parts.append(f"error: {result.reason}")
+        elif result.result == "locked":
+            parts.append(f"locked: {result.reason}")
         else:
             parts.append(f"offline; last collection {_human_age(status.age_days or 0)} ago")
             last_error = (status.state or {}).get("last_error") or {}
@@ -515,7 +562,7 @@ class Fleet:
 def exit_code(results: dict[str, PassResult]) -> int:
     """0 unless a device had an error in this pass. Staleness alone is not a
     failed run; ``status`` (and the push) report that."""
-    return 1 if any(r.result == "error" for r in results.values()) else 0
+    return 1 if any(r.result in ("error", "locked") for r in results.values()) else 0
 
 
 def print_results(results: dict[str, PassResult]) -> None:
@@ -557,6 +604,8 @@ def print_status(fleet: Fleet) -> int:
         )
         if state.get("verdict") == "error":
             line += f"; error: {(state.get('last_error') or {}).get('reason')}"
+        if state.get("auth_locked"):
+            line += f"; auth locked since {state['auth_locked'].get('at')}"
         print(line)
     return 1 if alarm else 0
 

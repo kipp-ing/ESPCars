@@ -170,6 +170,7 @@ class Request:
     method: str
     path: str
     range: str | None = None
+    auth: str | None = None  # the Authorization header, as sent
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -193,10 +194,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _gatekeeper(self) -> bool:
+        """What a Home Assistant relay in front of the device may answer before
+        the device ever sees the request (sdlog-fleet-spec C16-C18)."""
+        dev = self._dev
+        if dev.redirect_to is not None and self.path == "/sdlog/index":
+            self.send_response(302)
+            self.send_header("Location", dev.redirect_to + "/sdlog/index")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        if dev.token is not None and self.headers.get("Authorization") != f"Bearer {dev.token}":
+            self._json(401, {"message": "Unauthorized"})
+            return True
+        if dev.refuse_after is not None and len(dev.requests) > dev.refuse_after:
+            self._json(dev.refuse_status, {"message": "refused"})
+            return True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
         dev = self._dev
         rng = self.headers.get("Range")
-        dev.record(Request("GET", self.path, rng))
+        dev.record(Request("GET", self.path, rng, self.headers.get("Authorization")))
+        if self._gatekeeper():
+            return
         if self.path == "/sdlog/index":
             self._serve_index()
         elif self.path == "/sdlog/status":
@@ -281,7 +302,9 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length:
             self.rfile.read(length)
-        dev.record(Request("POST", self.path, None))
+        dev.record(Request("POST", self.path, None, self.headers.get("Authorization")))
+        if self._gatekeeper():
+            return
         if not self.path.startswith("/sdlog/done/"):
             self._json(404, {"error": "no such route"})
             return
@@ -342,6 +365,12 @@ class FakeDevice:
                                 httpd that ignores it must not corrupt anything.
     ``report_bytes = False``    the index omits the length, so nothing but the
                                 bytes themselves can prove a chunk's identity.
+    ``token``                   a relay in front: anything without
+                                ``Authorization: Bearer <token>`` gets 401.
+    ``refuse_after = n``        requests after the n-th get ``refuse_status``
+                                (401/403): a token revoked, or the host banned,
+                                in the middle of a pass.
+    ``redirect_to``             the index answers 302 to another URL.
     """
 
     def __init__(self, name: str = "mr-orange") -> None:
@@ -360,6 +389,10 @@ class FakeDevice:
         self.index_raw: bytes | None = None
         self.ignore_range = False
         self.report_bytes = True
+        self.token: str | None = None
+        self.refuse_after: int | None = None
+        self.refuse_status = 401
+        self.redirect_to: str | None = None
         self.requests: list[Request] = []
         self.url = ""
         self._lock = threading.Lock()
@@ -1381,11 +1414,12 @@ def test_a_confirm_that_stumbles_is_retried_and_a_refusal_is_not(
     assert len(device.confirms(busy)) == 3
     assert [n for n, _ in outcome.failed] == [busy]
 
-    device.confirm_status[busy] = 403
+    # 422, not 401/403: those stop the whole pass (C17), tested on their own.
+    device.confirm_status[busy] = 422
     again = collector(device, dest, retries=3).collect()
 
     assert len(device.confirms(busy)) == 4  # one attempt, not three
-    assert "403" in again.failed[0][1]
+    assert "422" in again.failed[0][1]
 
 
 @pytest.mark.parametrize(
@@ -1851,11 +1885,108 @@ def test_a_confirm_lost_to_the_network_exits_tempfail(device: FakeDevice, dest: 
 
 
 def test_a_refused_confirm_exits_defect(device: FakeDevice, dest: Path) -> None:
-    """C7. A device that answers and refuses is telling us something."""
+    """C7. A device that answers and refuses is telling us something. (Any 4xx
+    but 401/403, which are C17's.)"""
     name = device.add(431)
-    device.confirm_status[name] = 403
+    device.confirm_status[name] = 422
 
     assert sdlog_collect.main(pull_argv(device, dest)) == 1
+
+
+def write_token(tmp_path: Path, text: str = "s3cret\n", mode: int = 0o600) -> Path:
+    path = tmp_path / "token"
+    path.write_text(text)
+    path.chmod(mode)
+    return path
+
+
+def test_a_token_file_sends_a_bearer(device: FakeDevice, dest: Path, tmp_path: Path, capsys) -> None:
+    """C16. Every request carries the token; the token is never printed."""
+    device.token = "s3cret"
+    name = device.add(431)
+
+    assert sdlog_collect.main(pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))) == 0
+
+    assert device.confirmed == [name]
+    assert {r.auth for r in device.requests} == {"Bearer s3cret"}
+    out = capsys.readouterr()
+    assert "s3cret" not in out.out + out.err
+
+
+@pytest.mark.parametrize(
+    ("case", "text", "mode"),
+    [
+        ("missing", None, 0o600),
+        ("empty", "\n  \n", 0o600),
+        ("group-readable", "s3cret\n", 0o640),
+        ("world-readable", "s3cret\n", 0o604),
+    ],
+)
+def test_a_bad_token_file_is_a_usage_error(
+    device: FakeDevice, dest: Path, tmp_path: Path, capsys, case, text, mode
+) -> None:
+    """C16. Exit 2 before anything is sent, and the message names the file, not the token."""
+    device.add(431)
+    path = tmp_path / "token" if text is None else write_token(tmp_path, text, mode)
+
+    with pytest.raises(SystemExit) as stopped:
+        sdlog_collect.main(pull_argv(device, dest, "--token-file", str(path)))
+
+    assert stopped.value.code == 2
+    assert device.requests == []
+    err = capsys.readouterr().err
+    assert str(path) in err and "s3cret" not in err
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize(("after", "where"), [(0, "index"), (1, "fetch"), (2, "confirm")])
+def test_a_refusal_stops_the_pass_at_once(
+    device: FakeDevice, dest: Path, tmp_path: Path, capsys, status, after, where
+) -> None:
+    """C17. Exactly one refused request, nothing after it, exit 77. Behind a
+    relay each refusal is a failed login; five ban the tunnel."""
+    device.add(431)
+    device.add(432)
+    device.refuse_after = after
+    device.refuse_status = status
+
+    argv = pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))
+    assert sdlog_collect.main(argv) == os.EX_NOPERM
+
+    assert len(device.requests) == after + 1, f"refused at the {where}, then kept asking"
+    assert device.confirmed == []
+    out = capsys.readouterr()
+    assert "REFUSED" in out.err and str(status) in out.err and "s3cret" not in out.out + out.err
+
+
+def test_a_refusal_on_the_identity_window_stops_too(device: FakeDevice, dest: Path) -> None:
+    """C17, for the resume path: the head window is a request like any other."""
+    name = device.add(431)
+    device.cut(name, 400)
+    assert sdlog_collect.main(pull_argv(device, dest, "--retries", "1")) == os.EX_TEMPFAIL
+    device.requests.clear()
+    device.refuse_after = 1
+
+    assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_NOPERM
+    assert [r.range for r in device.requests] == [None, f"bytes=0-{HEAD - 1}"]
+    assert (dest / "mr-orange" / f"{name}.part").is_file(), "the partial waits for the next pass"
+
+
+def test_a_redirect_never_carries_the_token(devices, dest: Path, tmp_path: Path) -> None:
+    """C18. With a token, a 3xx is an answer: exit 3, and the other URL sees nothing."""
+    device = devices()
+    other = devices("mr-blue")
+    device.redirect_to = other.url
+
+    assert sdlog_collect.main(pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))) == 3
+    assert other.requests == []
+
+
+def test_no_token_no_header(device: FakeDevice, dest: Path) -> None:
+    """C19. A LAN device sees exactly what it saw before."""
+    device.add(431)
+    assert sdlog_collect.main(pull_argv(device, dest)) == 0
+    assert {r.auth for r in device.requests} == {None}
 
 
 def test_an_unwritable_archive_exits_ioerr_and_confirms_nothing(
