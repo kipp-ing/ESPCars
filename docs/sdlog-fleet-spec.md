@@ -119,21 +119,32 @@ push_url = "http://kuma.example:3001/api/push/TOKEN"   # optional
 name = "mr-green"
 url = "http://192.0.2.20:8123/api/sdlog_relay/mr-green"
 token_file = "/etc/sdlog-fleet/tokens/mr-green"   # optional, absolute path, mode 0600
+
+[[device]]                         # a car that is sometimes here, sometimes behind a relay (F21)
+name = "mr-pink"
+[[device.via]]
+url = "http://192.0.2.12:8080"
+[[device.via]]
+url = "http://192.0.2.20:8123/api/sdlog_relay/mr-pink"
+token_file = "/etc/sdlog-fleet/tokens/site-b"
 ```
+
+A device has either `url` (and optionally `token_file`) or one or more `[[device.via]]` tables, never both. A plain
+`url` is one way.
 
 ### 3.2 Requirements
 
 | ID | Requirement | Test |
 |---|---|---|
 | F1 | **Config.** It loads the archive, state, thresholds and a list of devices. It rejects an unknown key, a duplicate name, a name that cannot be a path component, a non-http(s) URL, a non-positive threshold, and an empty device list, with exit 2 and a message that names the problem. A typo such as `pushurl` must not disable an alarm without anyone noticing. | `test_config_loads_the_example`, `test_config_rejects` (parametrized), `test_a_bad_config_exits_two` |
-| F2 | **One collector pass per device**: `sdlog_collect.py pull <url> --into <archive> --expect <name>` (plus `--retries`/`--backoff` when configured) as a subprocess, using the interpreter the fleet runs under and the collector next to it. | `test_each_device_gets_one_pull_with_expect`, `test_end_to_end_two_devices_are_archived_and_confirmed` |
+| F2 | **One collector pass per device and way** (F21): `sdlog_collect.py pull <url> --into <archive> --expect <name>` (plus `--retries`/`--backoff` when configured, `--token-file` per way) as a subprocess, using the interpreter the fleet runs under and the collector next to it. | `test_each_device_gets_one_pull_with_expect`, `test_end_to_end_two_devices_are_archived_and_confirmed` |
 | F3 | **Exit-status mapping.** 0 → `ok`; 75 → `offline`; anything else (incl. 1, 2, 3, 74, 77 (and F18), a signal, a timeout, a collector that cannot be started) → `error`. | `test_exit_status_mapping` (parametrized), `test_a_hung_pass_is_killed_and_is_an_error`, `test_a_missing_collector_is_an_error_not_offline` |
 | F4 | **Away is silent.** An `offline` pass changes neither `last_success` nor the verdict. It does not fail the fleet's exit status, and it does not turn the push red while the last success is fresh. | `test_an_offline_device_is_quiet`, `test_end_to_end_an_absent_device_is_quiet` |
 | F5 | **E3 end-to-end.** WiFi lost mid-transfer → that run is `offline` and the partial is kept. The next run completes the chunk, confirms it once and stores it once. | `test_end_to_end_a_cut_transfer_resumes_on_the_next_run` |
 | F6 | **Append-only.** The fleet never deletes, rewrites or truncates a file in the archive. An archived file is byte-identical and keeps its mtime after any run, including one that hit a same-name mismatch. | `test_end_to_end_the_archive_is_append_only` |
 | F7 | **Disk pre-flight.** Free space under `min_free_mb` → every device's pass is an `error` ("archive low on space") and no collector is started. | `test_a_nearly_full_disk_is_an_error_and_pulls_nothing` |
 | F8 | **Heartbeat file** `<state>/<name>.json`, written atomically after every non-busy pass. It holds `last_run`, `last_result`, `last_success`, `verdict`, `last_error {at, exit, reason}` and `created`. | `test_the_heartbeat_file_records_each_pass`, `test_the_heartbeat_file_is_replaced_atomically` |
-| F9 | **Alarm rule (E4).** A device is in alarm iff `verdict == "error"` or the age of `last_success` exceeds `stale_after_days`. A device never collected is aged from `created`, so a fresh deploy does not alarm at once. An error stays in alarm through later `offline` passes, and only a successful pass clears it. | `test_staleness_raises_the_alarm`, `test_a_never_collected_device_ages_from_creation`, `test_an_error_survives_offline_passes_until_a_success` |
+| F9 | **Alarm rule (E4).** A device is in alarm iff `verdict == "error"`, or the age of `last_success` exceeds `stale_after_days`, or any way is auth-locked (F18). A device never collected is aged from `created`, so a fresh deploy does not alarm at once. An error stays in alarm through later `offline` passes, and only a successful pass clears it. | `test_staleness_raises_the_alarm`, `test_a_never_collected_device_ages_from_creation`, `test_an_error_survives_offline_passes_until_a_success` |
 | F10 | **Push** (optional per device): a GET to `push_url` with `status=up\|down` and `msg=<summary>` after every `ok`, `offline` and `error` pass, `down` iff in alarm. Parameters already in `push_url` (Kuma's copy-paste URL carries `?status=up&msg=OK&ping=`) are replaced, not duplicated, and `msg` is capped at 200 characters. A push that fails is logged and changes nothing else. Kuma's push route takes exactly these parameters ([api-router.js](https://github.com/louislam/uptime-kuma/blob/master/server/routers/api-router.js): `status` defaults to `up`, anything else is down; `msg`; 404 on an unknown token). | `test_push_reports_up_and_down`, `test_push_failure_does_not_fail_the_pass`, `test_push_message_is_bounded_and_encoded` |
 | F11 | **Lock per device**: `flock` on `<state>/<name>.lock`, non-blocking. If it is held, the pass is `busy`: no collector, no state write, no push. The kernel drops the lock if the holder dies. | `test_a_held_lock_skips_the_device_quietly`, `test_the_lock_is_released_after_a_pass` |
 | F12 | **Devices are independent.** They run concurrently, so one slow or hung device does not starve the others. | `test_a_slow_device_does_not_delay_another` |
@@ -141,9 +152,10 @@ token_file = "/etc/sdlog-fleet/tokens/mr-green"   # optional, absolute path, mod
 | F14 | **`status`** prints one line per device (result, age of the last success, alarm) and exits 1 if any device is in alarm. | `test_status_reports_alarm_and_exits_one` |
 | F15 | **`--every N`** repeats `run` every N seconds until interrupted. | `test_every_repeats_the_pass` |
 | F17 | **Torn is a warning.** A `TORN` line from the collector (C12) leaves the pass `ok`. The heartbeat counts it (`torn_accepted`, cumulative) and keeps the newest one as `last_torn {at, name, reason}`; the summary and the push `msg` name it. It never raises the alarm. | `test_a_torn_chunk_is_a_warning_not_an_alarm` |
-| F18 | **Refused → locked.** Collector exit 77 makes the pass an `error` (alarm), and the heartbeat records `auth_locked {at, credential}`. `credential` names the token file and its state, `<path>@<mtime_ns>`, or `none` without a `token_file`. | `test_a_refusal_locks_the_device` |
-| F19 | **Locked passes ask nothing.** While `auth_locked.credential` equals the current credential, a pass starts no collector: result `locked`, verdict stays `error`, the push says `down`, and the run exits 1. Replacing or touching the token file, or adding or removing `token_file`, changes the credential, and the next pass runs normally. A success clears the lock, another 77 sets it again. | `test_a_locked_device_is_not_asked_until_the_token_changes` |
-| F20 | `token_file` (optional, per device) must be an absolute path and is passed to the collector as `--token-file`. | `test_config_rejects` (parametrized), `test_a_token_file_is_passed_to_the_collector` |
+| F18 | **Refused → locked, per way.** Collector exit 77 makes the pass an `error` (alarm), and the heartbeat records `auth_locked {<url>: {at, credential}}` for that way. `credential` names the way's token file and its state, `<path>@<mtime_ns>`, or `none` without a `token_file`. | `test_a_refusal_locks_the_device` |
+| F19 | **A locked way is never asked.** While a way's lock matches its current credential, no collector runs for it. If no other way gave a result, the pass is `locked` (verdict unchanged, push `down`, run exits 1). A lock whose credential no longer matches (token file replaced or touched, `token_file` added or removed) is dropped at the start of the pass, and the way is asked again from then on. A success on a way clears that way's lock, another 77 sets it again. | `test_a_locked_device_is_not_asked_until_the_token_changes`, `test_a_locked_way_does_not_stop_another_way` |
+| F20 | `token_file` (optional, per device or per way) must be an absolute path and is passed to the collector as `--token-file`. | `test_config_rejects` (parametrized), `test_a_token_file_is_passed_to_the_collector` |
+| F21 | **Several ways to one device.** The ways are tried in config order. A way that is `offline` (75) or locked (F19) passes to the next; any other result ends the pass and is the pass's result. All ways offline is `offline` (silent, F4). The heartbeat's `url` is the way that gave the result. Config: at least one way, each `url` http(s) and unique within the device, only `url`/`token_file` in a way, and not both `url` and `via` on one device. `timeout_s` applies per collector run. | `test_ways_are_tried_in_order_until_one_answers` (parametrized), `test_config_rejects` (parametrized), `test_end_to_end_the_second_way_collects_when_the_first_is_away` |
 | F16 | The example config and units in `deploy/sdlog-fleet/` are fictional, and the private-data guard scans them (`.toml`, `.service`, `.timer`). | `test_config_loads_the_example`, `script/check_no_private_data.py` |
 
 ### 3.3 Why the push goes out on every pass, not only on success

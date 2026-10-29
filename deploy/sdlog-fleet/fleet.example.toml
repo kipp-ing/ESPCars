@@ -23,3 +23,11 @@ url = "http://192.0.2.11:8080"
 name = "mr-green"
 url = "http://192.0.2.20:8123/api/sdlog_relay/mr-green"
 token_file = "/etc/sdlog-fleet/tokens/mr-green"   # first line = HA token of a non-admin user; mode 0600
+
+[[device]]                         # a car that is sometimes here, sometimes behind a relay: ways in order (F21)
+name = "mr-pink"
+[[device.via]]
+url = "http://192.0.2.12:8080"
+[[device.via]]
+url = "http://192.0.2.20:8123/api/sdlog_relay/mr-pink"
+token_file = "/etc/sdlog-fleet/tokens/site-b"
