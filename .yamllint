@@ -1,0 +1,20 @@
+# Adapted from esphome/esphome dev @ 03eebae7b6e4cc81058f36a00a7f8c0c98eba341.
+---
+extends: default
+
+ignore-from-file: .gitignore
+
+rules:
+  document-start: disable
+  empty-lines:
+    level: error
+    max: 1
+    max-start: 0
+    max-end: 1
+  indentation:
+    level: error
+    spaces: 2
+    indent-sequences: true
+    check-multi-line-strings: false
+  line-length: disable
+  truthy: disable

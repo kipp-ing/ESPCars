@@ -33,7 +33,7 @@ make -C tests/host                                   # host C++ tests (~10 s)
 
 `make -C tests/host FILTER=<substring>` runs a subset; `SAN=` drops the
 sanitizers. If `.venv` is missing:
-`python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt`.
+`python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt -r requirements_lint.txt`.
 
 ## Definition of done — every change
 
