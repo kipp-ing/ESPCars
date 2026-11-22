@@ -53,7 +53,7 @@
 
 namespace esphome::can_gateway {
 
-static const char *const TAG = "can_gateway";
+ESPHOME_LOG_TAG(TAG, "can_gateway");
 
 // on_tx_done recovers the owning TxSlot from the driver's frame pointer.
 static_assert(offsetof(TxSlot, frame) == 0, "twai_frame_t must be the first TxSlot member");
@@ -571,10 +571,10 @@ void GatewayPort::log_id_timings_step_() {
     if (entry.count > 1) {
       uint32_t avg_us = static_cast<uint32_t>(entry.sum_period_us / (entry.count - 1));
       ESP_LOGI(TAG, "  Port %u ID 0x%" PRIX32 "%s: avg %" PRIu32 " us, n %" PRIu32, this->index_, entry.can_id,
-               entry.extended ? " X" : "", avg_us, entry.count);
+               entry.extended ? LOG_STR_LITERAL(" X") : "", avg_us, entry.count);
     } else {
-      ESP_LOGI(TAG, "  Port %u ID 0x%" PRIX32 "%s: n %" PRIu32, this->index_, entry.can_id, entry.extended ? " X" : "",
-               entry.count);
+      ESP_LOGI(TAG, "  Port %u ID 0x%" PRIX32 "%s: n %" PRIu32, this->index_, entry.can_id,
+               entry.extended ? LOG_STR_LITERAL(" X") : "", entry.count);
     }
   }
   if (this->id_log_cursor_ < this->id_log_total_)
@@ -966,12 +966,15 @@ void CanGateway::dump_config() {
                   "    Hardware filter offload: %s",
                   port->index_, port->index_, port->tx_pin_, port->rx_pin_, port->bit_rate_, port->tx_queue_depth_,
                   YESNO(port->hw_filter_engaged_));
-    if (port->listen_only_)
+    if (port->listen_only_) {
       ESP_LOGCONFIG(TAG, "    Listen only: YES");
-    if (port->self_test_)
+    }
+    if (port->self_test_) {
       ESP_LOGCONFIG(TAG, "    Self test (bench aid): YES");
-    if (port->open_drain_tx_)
+    }
+    if (port->open_drain_tx_) {
       ESP_LOGCONFIG(TAG, "    Open-drain TX (bench aid): YES");
+    }
 #if defined(USE_CAN_GATEWAY_SNAPSHOT) && defined(USE_TEXT_SENSOR)
     if (port->snapshot_ring_ != nullptr) {
       ESP_LOGCONFIG(TAG, "    Snapshot ring: %" PRIu32 " pushed, %" PRIu32 " overwritten unseen",
@@ -985,7 +988,8 @@ void CanGateway::dump_config() {
                   "    Rules: %u, default: %s\n"
                   "    Slots in use: %u/%u",
                   route->from_->index_, route->to_->index_, route->table_.rule_count,
-                  route->table_.default_drop ? "drop" : "accept", route->pool_.in_use(), route->pool_.capacity());
+                  route->table_.default_drop ? LOG_STR_LITERAL("drop") : LOG_STR_LITERAL("accept"),
+                  route->pool_.in_use(), route->pool_.capacity());
   }
 #ifdef USE_CAN_GATEWAY_CYCLIC
   for (auto *cyclic : this->cyclic_sends_) {
@@ -994,8 +998,9 @@ void CanGateway::dump_config() {
   }
 #endif
 #ifdef USE_CAN_GATEWAY_STATS
-  if (this->stats_log_interval_ms_ > 0)
+  if (this->stats_log_interval_ms_ > 0) {
     ESP_LOGCONFIG(TAG, "  Statistics log interval: %" PRIu32 " ms", this->stats_log_interval_ms_);
+  }
 #ifdef USE_CAN_GATEWAY_ID_STATS
   ESP_LOGCONFIG(TAG, "  Per-ID timings: %s", YESNO(this->id_timings_));
 #endif
@@ -1063,7 +1068,8 @@ void CanGatewaySensorHub::update() {
 }
 
 void CanGatewaySensorHub::dump_config() {
-  ESP_LOGCONFIG(TAG, "CAN gateway %s sensors:", this->route_ != nullptr ? "route" : "port");
+  ESP_LOGCONFIG(
+      TAG, "CAN gateway %s sensors:", this->route_ != nullptr ? LOG_STR_LITERAL("route") : LOG_STR_LITERAL("port"));
   for (auto *sensor : this->sensors_) {
     if (sensor != nullptr)
       LOG_SENSOR("  ", "Counter", sensor);
