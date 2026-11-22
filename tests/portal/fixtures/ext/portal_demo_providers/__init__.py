@@ -4,9 +4,9 @@ This is exactly how a real consuming project adds data providers: another extern
 calls the registry functions at import time. Nothing here refers to a real vehicle.
 """
 
-import esphome.config_validation as cv
 from esphome.components import sensor
 from esphome.components.portal import register_absent_provider, register_series_provider
+import esphome.config_validation as cv
 
 CODEOWNERS = []
 CONFIG_SCHEMA = cv.Schema({})

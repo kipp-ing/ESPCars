@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Compile, inspect and flash `.dcat` diagnostic catalogs (design doc §7).
 
 Hand-transcribing DIDs, bit offsets and scale factors out of a diagnostic
@@ -63,14 +64,14 @@ that needs no factory export.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import importlib.util
 import json
+from pathlib import Path
 import re
 import struct
 import subprocess
 import sys
-from collections import Counter
-from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -104,9 +105,7 @@ INVALID_TEXT_PATTERNS = (
     "sna",
     "no signal",
 )
-_INVALID_RES = [
-    re.compile(r"\b" + re.escape(p) + r"\b") for p in INVALID_TEXT_PATTERNS
-]
+_INVALID_RES = [re.compile(r"\b" + re.escape(p) + r"\b") for p in INVALID_TEXT_PATTERNS]
 
 
 def is_invalid_text(text: str) -> bool:
@@ -118,7 +117,7 @@ def canonical_group_name(qualifiers: list[str]) -> str:
     """Longest common `_`-separated prefix, else the first qualifier (§4)."""
     parts = [q.split("_") for q in qualifiers]
     common: list[str] = []
-    for column in zip(*parts):
+    for column in zip(*parts, strict=False):
         if all(tok == column[0] for tok in column[1:]):
             common.append(column[0])
         else:
@@ -172,8 +171,11 @@ def _build_scales(
                 # already makes a raw outside every row not-available, which is
                 # what the sentinel said.
                 dropped.append(
-                    {"field": field_name, "text": text,
-                     "reason": f"sentinel bound {unrepresentable[0]} exceeds i32"}
+                    {
+                        "field": field_name,
+                        "text": text,
+                        "reason": f"sentinel bound {unrepresentable[0]} exceeds i32",
+                    }
                 )
                 warnings.append(
                     f"{field_name}: sentinel row {text!r} at raw "
@@ -198,8 +200,12 @@ def _build_scales(
                 invalid = bool(ov["invalid"])
         rows.append(
             catalog.Scale(
-                low=low, high=high, factor=factor, offset=offset,
-                text=text, invalid=invalid,
+                low=low,
+                high=high,
+                factor=factor,
+                offset=offset,
+                text=text,
+                invalid=invalid,
             )
         )
     return tuple(rows)
@@ -213,13 +219,16 @@ def _build_field(
     warnings: list[str],
     skipped: list[dict],
     dropped: list[dict],
-) -> "catalog.Field | None":
+) -> catalog.Field | None:
     name = prep["qualifier"] or svc["qualifier"]
     size = prep["size_in_bits"]
     if not size:
         skipped.append(
-            {"service": svc["qualifier"], "field": name,
-             "reason": f"no width ({prep['field_type']}, {prep.get('size_error')})"}
+            {
+                "service": svc["qualifier"],
+                "field": name,
+                "reason": f"no width ({prep['field_type']}, {prep.get('size_error')})",
+            }
         )
         warnings.append(f"{svc['qualifier']}/{name}: no width, skipped")
         return None
@@ -234,9 +243,12 @@ def _build_field(
     )
     if (is_ascii or is_hexdump) and size > catalog.MAX_BLOCK_BITS:
         skipped.append(
-            {"service": svc["qualifier"], "field": name,
-             "reason": f"{size}-bit dump exceeds the {catalog.MAX_BLOCK_BITS}-bit "
-                       f"(u8 bit_size) ceiling"}
+            {
+                "service": svc["qualifier"],
+                "field": name,
+                "reason": f"{size}-bit dump exceeds the {catalog.MAX_BLOCK_BITS}-bit "
+                f"(u8 bit_size) ceiling",
+            }
         )
         warnings.append(
             f"{svc['qualifier']}/{name}: {size}-bit dump cannot be represented, skipped"
@@ -253,9 +265,7 @@ def _build_field(
     unit = ""
     if pres and not (is_ascii or is_hexdump):
         unit = pres.get("displayed_unit") or ""
-        scales = _build_scales(
-            pres, name, signed, size, overrides, warnings, dropped
-        )
+        scales = _build_scales(pres, name, signed, size, overrides, warnings, dropped)
     return catalog.Field(
         name=name,
         bit_pos=prep["bit_position"],
@@ -304,9 +314,7 @@ def _reads_as_indices(services: list[str]) -> bool:
     """
     idx = [_trailing_index(s) for s in services]
     n = len(services)
-    best = max(
-        sum(1 for k, v in enumerate(idx) if v == k + base) for base in (0, 1)
-    )
+    best = max(sum(1 for k, v in enumerate(idx) if v == k + base) for base in (0, 1))
     return best * 2 > n
 
 
@@ -460,7 +468,7 @@ def _assign_unique_names(group_name, fields, services, arrays, warnings):
                 "rule": "service",
                 "would_have_been": fields[i].name,
                 "why": f"{fields[i].name!r} names "
-                       f"{counts[fields[i].name]} fields in this group",
+                f"{counts[fields[i].name]} fields in this group",
             }
             taken.add(cand)
 
@@ -481,7 +489,7 @@ def _assign_unique_names(group_name, fields, services, arrays, warnings):
             "rule": "position",
             "would_have_been": f.name,
             "why": f"{f.name!r} appears {counts[f.name]} times in this group and "
-                   f"service {services[i]!r} does not separate them",
+            f"service {services[i]!r} does not separate them",
         }
         taken.add(cand)
         warnings.append(
@@ -537,11 +545,13 @@ def _match_selector(sel: dict, groups: dict) -> str:
         raise CompileError(f"profile: no group with request bytes {sel['request']!r}")
     if "did" in sel:
         did = sel["did"] if isinstance(sel["did"], int) else int(str(sel["did"]), 0)
-        for key, svcs in groups.items():
-            if key.startswith("22") and len(key) == 6 and int(key[2:], 16) == did:
+        for key in groups:
+            if key.startswith("22") and len(key) == 6 and int(key[2:], 16) == did:  # noqa: FURB166 -- Strip the UDS service byte 22, not a hex notation prefix.
                 return key
         known = ", ".join(
-            f"0x{int(k[2:], 16):04X}" for k in sorted(groups) if k.startswith("22") and len(k) == 6
+            f"0x{int(k[2:], 16):04X}"  # noqa: FURB166 -- The DID excludes the UDS service byte 22.
+            for k in sorted(groups)
+            if k.startswith("22") and len(k) == 6
         )
         raise CompileError(
             f"profile: DID 0x{did:04X} is not in this variant — known read DIDs: {known}"
@@ -578,9 +588,7 @@ def compile_catalog(
     skipped: list[dict] = []
     dropped: list[dict] = []
 
-    ecu_json = next(
-        (e for e in db["ecus"] if e["qualifier"] == ecu_name), None
-    )
+    ecu_json = next((e for e in db["ecus"] if e["qualifier"] == ecu_name), None)
     if ecu_json is None:
         raise CompileError(
             f"no ECU {ecu_name!r} — file has: "
@@ -686,16 +694,20 @@ def compile_catalog(
                         "service": svc_q,
                         "name_rule": note.get("rule"),
                         **(
-                            {"would_have_been": note["would_have_been"],
-                             "why_renamed": note["why"]}
+                            {
+                                "would_have_been": note["would_have_been"],
+                                "why_renamed": note["why"],
+                            }
                             if "would_have_been" in note
                             else {}
                         ),
                         **(
-                            {"element_count": note["array"]["count"],
-                             "element_stride_bits": note["array"]["stride"],
-                             "element_0": note["array"]["first_service"],
-                             "element_last": note["array"]["last_service"]}
+                            {
+                                "element_count": note["array"]["count"],
+                                "element_stride_bits": note["array"]["stride"],
+                                "element_0": note["array"]["first_service"],
+                                "element_last": note["array"]["last_service"],
+                            }
                             if "array" in note
                             else {}
                         ),
@@ -719,7 +731,9 @@ def compile_catalog(
                             for s in f.scales
                         ],
                     }
-                    for f, svc_q, note in zip(fields, field_services, name_notes)
+                    for f, svc_q, note in zip(
+                        fields, field_services, name_notes, strict=False
+                    )
                 ],
             }
         )
@@ -773,11 +787,7 @@ def compile_catalog(
             # rising 'position' count means the database stopped being able to
             # name its own fields.
             "names_by_rule": dict(
-                Counter(
-                    f["name_rule"]
-                    for g in manifest_groups
-                    for f in g["fields"]
-                )
+                Counter(f["name_rule"] for g in manifest_groups for f in g["fields"])
             ),
         },
         "skipped_fields": skipped,
@@ -906,9 +916,13 @@ def cmd_dump(args) -> int:
             if not args.fields:
                 continue
             for f in g.fields:
-                kind = "ascii" if f.ascii else "hex" if f.hexdump else (
-                    "i" if f.signed else "u"
-                ) + str(f.bit_size)
+                kind = (
+                    "ascii"
+                    if f.ascii
+                    else "hex"
+                    if f.hexdump
+                    else ("i" if f.signed else "u") + str(f.bit_size)
+                )
                 unit = f" [{f.unit}]" if f.unit else ""
                 arr = (
                     f" x{f.repeat_count}@{f.repeat_stride}b"
@@ -953,8 +967,8 @@ def cmd_flash(args) -> int:
         print(f"refusing to flash an invalid catalog: {exc}", file=sys.stderr)
         return 1
 
-    table_path = Path(args.table) if args.table else _find_partition_table(
-        Path(args.build_dir)
+    table_path = (
+        Path(args.table) if args.table else _find_partition_table(Path(args.build_dir))
     )
     parts = parse_partition_table(table_path.read_bytes())
     part = next((p for p in parts if p["label"] == args.partition), None)
@@ -986,7 +1000,7 @@ def cmd_flash(args) -> int:
     print(" ".join(cmd))
     if args.dry_run:
         return 0
-    return subprocess.run(cmd).returncode
+    return subprocess.run(cmd, check=False).returncode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1016,7 +1030,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("file")
     p.add_argument("--table", help="partition-table.bin from the build")
     p.add_argument("--build-dir", default=".esphome/build", help="search here for it")
-    p.add_argument("--partition", default="diag", help="partition label (default: diag)")
+    p.add_argument(
+        "--partition", default="diag", help="partition label (default: diag)"
+    )
     p.add_argument("--port")
     p.add_argument("--baud", type=int)
     p.add_argument("--esptool", default="esptool", help="esptool executable")

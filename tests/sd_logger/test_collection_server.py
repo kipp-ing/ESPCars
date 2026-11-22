@@ -39,7 +39,9 @@ def _server_source() -> str:
 
 def _collector_source() -> str:
     # script/ sits two levels above tests/sd_logger/.
-    return (Path(__file__).resolve().parents[2] / "script" / "sdlog_collect.py").read_text()
+    return (
+        Path(__file__).resolve().parents[2] / "script" / "sdlog_collect.py"
+    ).read_text()
 
 
 # ------------------------------------------------------------------- the routes
@@ -95,7 +97,9 @@ def test_the_status_route_is_served_even_though_no_client_calls_it() -> None:
     )
 
 
-def test_fsync_failure_enters_the_single_failure_path_and_counts_buffered_records() -> None:
+def test_fsync_failure_enters_the_single_failure_path_and_counts_buffered_records() -> (
+    None
+):
     """An fsync error must not leave a writable-looking logger with an erased RAM tail."""
     source = _logger_source()
     for signature in ("bool SdLogger::close_file_", "void SdLogger::sync_file_"):
@@ -124,7 +128,9 @@ def test_static_tap_drain_stack_passes_freertos_a_word_depth_not_a_byte_count() 
     words constant.
     """
     source = _logger_source()
-    assert "TAP_DRAIN_STACK_WORDS = TAP_DRAIN_STACK_BYTES / sizeof(StackType_t)" in source
+    assert (
+        "TAP_DRAIN_STACK_WORDS = TAP_DRAIN_STACK_BYTES / sizeof(StackType_t)" in source
+    )
     assert "static StackType_t tap_drain_stack[TAP_DRAIN_STACK_WORDS]" in source
     call = _function_body(source, "void SdLogger::setup")
     assert '"sdlog_tap", TAP_DRAIN_STACK_WORDS, this' in call

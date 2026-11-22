@@ -15,9 +15,9 @@ import hashlib
 import importlib.util
 import math
 import os
+from pathlib import Path
 import sys
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -27,7 +27,6 @@ _ROOT = Path(__file__).parent.parent.parent
 _SCRIPT = _ROOT / "script"
 MINI_DBC = Path(__file__).parent / "fixtures" / "mini.dbc"
 MINI_DCAT = _ROOT / "tests" / "uds" / "fixtures" / "mini.dcat"
-
 
 
 def _load(name: str):
@@ -63,8 +62,15 @@ P056200\tSupply voltage too low
 def tp(payload: bytes, can_id: int = RX, pad: int = 0xAA) -> list[tuple[int, bytes]]:
     """ISO 15765-2 frames for one message (classic CAN, padded to 8 bytes)."""
     if len(payload) <= 7:
-        return [(can_id, bytes([len(payload)]) + payload + bytes([pad]) * (7 - len(payload)))]
-    frames = [(can_id, bytes([0x10 | len(payload) >> 8, len(payload) & 0xFF]) + payload[:6])]
+        return [
+            (
+                can_id,
+                bytes([len(payload)]) + payload + bytes([pad]) * (7 - len(payload)),
+            )
+        ]
+    frames = [
+        (can_id, bytes([0x10 | len(payload) >> 8, len(payload) & 0xFF]) + payload[:6])
+    ]
     rest, sn = payload[6:], 1
     while rest:
         frames.append((can_id, bytes([0x20 | sn]) + rest[:7].ljust(7, bytes([pad]))))
@@ -84,7 +90,9 @@ def chunk_lines(frames: list[tuple]) -> list[str]:
     for i, (can_id, data, *rest) in enumerate(frames):
         tag = rest[0] if rest else "1"
         flags = rest[1] if len(rest) > 1 else ""
-        lines.append(f"C{tag}{flags},{'@1000' if i == 0 else '3E8'},{can_id:X},{data.hex().upper()}")
+        lines.append(
+            f"C{tag}{flags},{'@1000' if i == 0 else '3E8'},{can_id:X},{data.hex().upper()}"
+        )
     lines.append("#close,@FFFFFF,rotate")
     return lines
 
@@ -199,7 +207,9 @@ def write_catalog(path: Path, ecus) -> Path:
 
 
 def ecu(name: str, groups, request_id: int = TX, response_id: int = RX):
-    return lib.Ecu(name=name, request_id=request_id, response_id=response_id, groups=tuple(groups))
+    return lib.Ecu(
+        name=name, request_id=request_id, response_id=response_id, groups=tuple(groups)
+    )
 
 
 # ------------------------------------------------------------------ U1 config
@@ -251,11 +261,19 @@ def test_uds_config_rejects(tmp_path: Path, setup, capsys, case: str, why: str) 
         body = _uds(files, ecu='"NOPE"')
     elif case == "several ecus":
         group = lib.Group("G", b"\x22\x00\x01", fields=(lib.Field("F", 24, 8),))
-        two = write_catalog(files / "two.dcat", [ecu("A", [group]), ecu("B", [group], 0x7E0, 0x7E8)])
+        two = write_catalog(
+            files / "two.dcat", [ecu("A", [group]), ecu("B", [group], 0x7E0, 0x7E8)]
+        )
         body = _uds(files, dcat=f'"{two}"')
     elif case == "missing names":
         body = _uds(files, names='"/no/such.toml"')
-    elif case in ("unknown field", "ambiguous field", "bad name", "duplicate name", "one signal twice"):
+    elif case in (
+        "unknown field",
+        "ambiguous field",
+        "bad name",
+        "duplicate name",
+        "one signal twice",
+    ):
         dcat = files / "mini.dcat"
         text = {
             "unknown field": '[fields]\nPRES_Mini_Nope = "x"\n',
@@ -265,16 +283,48 @@ def test_uds_config_rejects(tmp_path: Path, setup, capsys, case: str, why: str) 
             "one signal twice": '[fields]\n"G/F" = "cells"\n',
         }[case]
         if case == "ambiguous field":
-            dcat = write_catalog(files / "amb.dcat", [ecu("A", [
-                lib.Group("G1", b"\x22\x00\x01", fields=(lib.Field("F", 24, 8),)),
-                lib.Group("G2", b"\x22\x00\x02", fields=(lib.Field("F", 24, 8),)),
-            ])])
+            dcat = write_catalog(
+                files / "amb.dcat",
+                [
+                    ecu(
+                        "A",
+                        [
+                            lib.Group(
+                                "G1", b"\x22\x00\x01", fields=(lib.Field("F", 24, 8),)
+                            ),
+                            lib.Group(
+                                "G2", b"\x22\x00\x02", fields=(lib.Field("F", 24, 8),)
+                            ),
+                        ],
+                    )
+                ],
+            )
         if case == "one signal twice":
             # "cells" (an array of 2) becomes A.cells.1/.2; the unnamed field "1" of group "cells" is A.cells.1 too
-            dcat = write_catalog(files / "twice.dcat", [ecu("A", [
-                lib.Group("G", b"\x22\x00\x01", fields=(lib.Field("F", 24, 8, repeat_count=2, repeat_stride=8),)),
-                lib.Group("cells", b"\x22\x00\x02", fields=(lib.Field("1", 24, 8),)),
-            ])])
+            dcat = write_catalog(
+                files / "twice.dcat",
+                [
+                    ecu(
+                        "A",
+                        [
+                            lib.Group(
+                                "G",
+                                b"\x22\x00\x01",
+                                fields=(
+                                    lib.Field(
+                                        "F", 24, 8, repeat_count=2, repeat_stride=8
+                                    ),
+                                ),
+                            ),
+                            lib.Group(
+                                "cells",
+                                b"\x22\x00\x02",
+                                fields=(lib.Field("1", 24, 8),),
+                            ),
+                        ],
+                    )
+                ],
+            )
         names.write_text(text)
         body = _uds(files, dcat=f'"{dcat}"', names=f'"{names}"')
     elif case == "same id twice":
@@ -322,7 +372,9 @@ def test_single_and_multi_frame_answers_decode(setup) -> None:
 def test_other_ids_and_labels_are_ignored(setup) -> None:
     """U2: the same answer on another label, another id or as an extended frame is not the ECU's."""
     contactor = tp(REFERENCE[2])[0][1]
-    sink = decode(setup, (RX, contactor, "2"), (0x7EE, contactor), (RX, contactor, "1", "x"))
+    sink = decode(
+        setup, (RX, contactor, "2"), (0x7EE, contactor), (RX, contactor, "1", "x")
+    )
     assert sink.tables["signals"] == [] and sink.tables["events"] == []
     (marker,) = sink.tables["chunks"]
     assert marker["matched"] == 0
@@ -341,13 +393,19 @@ def test_an_unknown_answer_writes_nothing(setup) -> None:
     """U3: tester present (7E 00) and a DID the catalog does not hold."""
     sink = decode(setup, *frames_of(bytes.fromhex("7E00"), bytes.fromhex("62ABCD01")))
     assert sink.tables["signals"] == [] and sink.tables["events"] == []
-    assert sink.tables["chunks"][0]["detail"] == "uds: 2 answers, 2 unknown answers, 0 events"
+    assert (
+        sink.tables["chunks"][0]["detail"]
+        == "uds: 2 answers, 2 unknown answers, 0 events"
+    )
 
 
 def test_a_short_answer_decodes_what_it_covers(setup) -> None:
     """U5: an ECU with two cells wired answers 7 bytes; cells 3 and 4 are skipped and counted."""
     sink = decode(setup, *frames_of(bytes.fromhex("6202080D000D40")))
-    assert_values(signals(sink), {"MINI.cell_voltage.1": (3.25, ""), "MINI.cell_voltage.2": (3.3125, "")})
+    assert_values(
+        signals(sink),
+        {"MINI.cell_voltage.1": (3.25, ""), "MINI.cell_voltage.2": (3.3125, "")},
+    )
     assert sink.tables["chunks"][0]["detail"] == (
         "uds: 1 answers, 1 partial answers, 2 values past the answer's end, 0 events"
     )
@@ -369,7 +427,10 @@ def test_array_elements_are_zero_padded_to_the_count(setup) -> None:
     """U6: 12 elements sort as .01 … .12."""
     archive, files, config = setup
     cells = lib.Field("C", 24, 8, repeat_count=12, repeat_stride=8)
-    dcat = write_catalog(files / "twelve.dcat", [ecu("A", [lib.Group("G", b"\x22\x00\x01", fields=(cells,))])])
+    dcat = write_catalog(
+        files / "twelve.dcat",
+        [ecu("A", [lib.Group("G", b"\x22\x00\x01", fields=(cells,))])],
+    )
     config.write_text(config_text(archive, files, _uds(files, dcat=f'"{dcat}"')))
     write_chunk(archive, frames_of(bytes([0x62, 0x00, 0x01, *range(12)])))
     sink = dec.FakeSink()
@@ -397,10 +458,22 @@ def test_state_events(setup) -> None:
         ("state", "MINI.contactor", "", "from SNA"),
     ]
     assert got[0][2] == 0.0 and math.isnan(got[2][2]) and math.isnan(got[3][2])
-    assert [e["utc"] for e in sink.tables["events"] if e["kind"] == "state"] == [1000, 1002, 1003, 1004]
+    assert [e["utc"] for e in sink.tables["events"] if e["kind"] == "state"] == [
+        1000,
+        1002,
+        1003,
+        1004,
+    ]
     # SNA and no row leave the group's one numeric field unavailable: U11 reports each answer too
-    assert events(sink, "unavailable") == [("unavailable", "DT_Mini_Contactor_State", 1.0, "", "")] * 2
-    assert [s["text"] for s in sink.tables["signals"]] == ["open", "open", "closed"]  # SNA and no row: no signal
+    assert (
+        events(sink, "unavailable")
+        == [("unavailable", "DT_Mini_Contactor_State", 1.0, "", "")] * 2
+    )
+    assert [s["text"] for s in sink.tables["signals"]] == [
+        "open",
+        "open",
+        "closed",
+    ]  # SNA and no row: no signal
 
 
 def test_a_measurement_with_a_text_row_is_not_a_state(setup) -> None:
@@ -408,17 +481,31 @@ def test_a_measurement_with_a_text_row_is_not_a_state(setup) -> None:
     its readings are signals (the text row's too), never state events."""
     archive, files, config = setup
     temp = lib.Field(
-        "T", 24, 8,
-        scales=(lib.Scale(0, 99, 1.0, -40.0), lib.Scale(100, 254, 1.0, 0.0, "value not defined"),
-                lib.Scale(255, 255, 0.0, 0.0, "SNA", True)),
+        "T",
+        24,
+        8,
+        scales=(
+            lib.Scale(0, 99, 1.0, -40.0),
+            lib.Scale(100, 254, 1.0, 0.0, "value not defined"),
+            lib.Scale(255, 255, 0.0, 0.0, "SNA", True),
+        ),
     )
-    dcat = write_catalog(files / "temp.dcat", [ecu("A", [lib.Group("G", b"\x22\x00\x01", fields=(temp,))])])
+    dcat = write_catalog(
+        files / "temp.dcat",
+        [ecu("A", [lib.Group("G", b"\x22\x00\x01", fields=(temp,))])],
+    )
     config.write_text(config_text(archive, files, _uds(files, dcat=f'"{dcat}"')))
-    write_chunk(archive, frames_of(*(bytes([0x62, 0x00, 0x01, raw]) for raw in (60, 61, 120))))
+    write_chunk(
+        archive, frames_of(*(bytes([0x62, 0x00, 0x01, raw]) for raw in (60, 61, 120)))
+    )
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     assert events(sink) == []
-    assert [(s["value"], s["text"]) for s in sink.tables["signals"]] == [(20.0, ""), (21.0, ""), (120.0, "value not defined")]
+    assert [(s["value"], s["text"]) for s in sink.tables["signals"]] == [
+        (20.0, ""),
+        (21.0, ""),
+        (120.0, "value not defined"),
+    ]
 
 
 def dtc_answer(*records: str) -> bytes:
@@ -449,10 +536,15 @@ def test_dtc_events(setup) -> None:
 def test_dtc_answers_to_different_logged_requests_are_followed_apart(setup) -> None:
     """U8: with the requests logged, a mask-08 read and a mask-FF read are two histories."""
     confirmed = [*tp(bytes.fromhex("190208"), TX), *frames_of(dtc_answer("0562002F"))]
-    everything = [*tp(bytes.fromhex("1902FF"), TX), *frames_of(dtc_answer("0562002F", "921F2008"))]
+    everything = [
+        *tp(bytes.fromhex("1902FF"), TX),
+        *frames_of(dtc_answer("0562002F", "921F2008")),
+    ]
     sink = decode(setup, *confirmed, *everything, *confirmed)
     assert [(n, d) for _, n, _, _, d in events(sink, "dtc")] == [
-        ("P056200", "initial"), ("P056200", "initial"), ("B121F20", "initial"),
+        ("P056200", "initial"),
+        ("P056200", "initial"),
+        ("B121F20", "initial"),
     ]
 
 
@@ -480,10 +572,13 @@ def test_isotp_events_inside_but_not_at_the_edges(setup) -> None:
     temps = tp(REFERENCE[1])  # FF, CF1
     frames = [
         cells[1],  # cut at the start
-        temps[0], (RX, bytes([0x22]) + temps[1][1][1:]),  # SN 2 where 1 belongs -> sequence
+        temps[0],
+        (RX, bytes([0x22]) + temps[1][1][1:]),  # SN 2 where 1 belongs -> sequence
         *tp(REFERENCE[2]),
-        cells[1], cells[1],  # CFs without a FF -> one orphan event
-        cells[0], *tp(REFERENCE[2]),  # FF then a SF -> incomplete; the SF still decodes
+        cells[1],
+        cells[1],  # CFs without a FF -> one orphan event
+        cells[0],
+        *tp(REFERENCE[2]),  # FF then a SF -> incomplete; the SF still decodes
         cells[0],  # open at the end
     ]
     sink = decode(setup, *frames)
@@ -499,7 +594,10 @@ def test_isotp_events_inside_but_not_at_the_edges(setup) -> None:
 
 def test_an_all_unavailable_answer_is_an_event(setup) -> None:
     """U11: both cell voltages SNA -> one event for the group; one available value -> none."""
-    sink = decode(setup, *frames_of(bytes.fromhex("620101FFFFFFFF"), bytes.fromhex("6201010BB8FFFF")))
+    sink = decode(
+        setup,
+        *frames_of(bytes.fromhex("620101FFFFFFFF"), bytes.fromhex("6201010BB8FFFF")),
+    )
     assert events(sink) == [("unavailable", "DT_Mini_Voltage", 2.0, "", "")]
 
 
@@ -508,7 +606,12 @@ def test_an_all_unavailable_answer_is_an_event(setup) -> None:
 
 def test_diag_frames_count_as_matched(setup) -> None:
     """U12: requests and answers of the ECU are covered by the catalog; another id is not."""
-    sink = decode(setup, *tp(bytes.fromhex("220208"), TX), *frames_of(REFERENCE[5]), (0x7EE, bytes(8)))
+    sink = decode(
+        setup,
+        *tp(bytes.fromhex("220208"), TX),
+        *frames_of(REFERENCE[5]),
+        (0x7EE, bytes(8)),
+    )
     (marker,) = sink.tables["chunks"]
     assert (marker["can_frames"], marker["matched"]) == (4, 3)
 
@@ -518,15 +621,26 @@ def test_a_names_edit_redecodes_without_duplicates(setup) -> None:
     _, files, config = setup
     sink = dec.FakeSink()
     assert run(config, sink) == 0
-    frames_before, events_before = len(sink.tables["frames"]), len(sink.tables["events"])
-    (files / "mini.names.toml").write_text(NAMES.replace('"contactor"', '"main_contactor"'))
+    frames_before, events_before = (
+        len(sink.tables["frames"]),
+        len(sink.tables["events"]),
+    )
+    (files / "mini.names.toml").write_text(
+        NAMES.replace('"contactor"', '"main_contactor"')
+    )
     assert run(config, sink) == 0
-    assert [table for table, _ in sink.deletes] == ["frames", "signals", "events"]  # D17: one sweep, events included
+    assert [table for table, _ in sink.deletes] == [
+        "frames",
+        "signals",
+        "events",
+    ]  # D17: one sweep, events included
     got = signals(sink)
     assert "MINI.main_contactor" in got and "MINI.contactor" not in got
     assert len(sink.tables["signals"]) == len(EXPECTED)
     assert len(sink.tables["frames"]) == frames_before
-    assert [e["name"] for e in sink.tables["events"]] == ["MINI.main_contactor"] * events_before
+    assert [e["name"] for e in sink.tables["events"]] == [
+        "MINI.main_contactor"
+    ] * events_before
 
 
 @pytest.mark.parametrize("which", ["dcat", "dtc"])
@@ -535,7 +649,9 @@ def test_dcat_and_dtc_edits_are_a_new_catalog(setup, which: str) -> None:
     device = dec.load_config(config).devices[0]
     before = dec.catalog_hash(device)
     path = files / ("mini.dcat" if which == "dcat" else "mini-dtc.txt")
-    path.write_bytes(path.read_bytes() + (b"\0" if which == "dcat" else b"P000100\tx\n"))
+    path.write_bytes(
+        path.read_bytes() + (b"\0" if which == "dcat" else b"P000100\tx\n")
+    )
     assert dec.catalog_hash(device) != before
 
 
@@ -592,10 +708,14 @@ def test_uds_decode_imports_stdlib_only() -> None:
             else:
                 continue
             for root in roots:
-                assert root in stdlib or root == "__future__", f"{path.name} imports {root}"
+                assert root in stdlib or root == "__future__", (
+                    f"{path.name} imports {root}"
+                )
 
 
-@pytest.mark.skipif(not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set")
+@pytest.mark.skipif(
+    not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set"
+)
 def test_clickhouse_round_trip_with_uds(setup) -> None:
     """U15 against a real ClickHouse: an older database (no events, no text) is upgraded by `run`,
     NaN and text survive TSV, events load and a rerun is idempotent."""
@@ -604,10 +724,18 @@ def test_clickhouse_round_trip_with_uds(setup) -> None:
     database = f"sdlog_test_{uuid.uuid4().hex[:8]}"
     sink = dec.ClickHouseSink(url, database)
     try:
-        old = [sql for sql in dec.clickhouse_ddl(database) if "events" not in sql and "ALTER" not in sql]
+        old = [
+            sql
+            for sql in dec.clickhouse_ddl(database)
+            if "events" not in sql and "ALTER" not in sql
+        ]
         for sql in old:
-            sink._query(sql.replace(",\n            text LowCardinality(String) DEFAULT ''", ""))
-        assert "text" not in sink._query(f"SELECT name FROM system.columns WHERE database='{database}' AND table='signals'")
+            sink._query(
+                sql.replace(",\n            text LowCardinality(String) DEFAULT ''", "")
+            )
+        assert "text" not in sink._query(
+            f"SELECT name FROM system.columns WHERE database='{database}' AND table='signals'"
+        )
         assert run(config, sink) == 0
         # D18: the older tables got `chunk_idx` too
         indexed = sink._query(
@@ -618,9 +746,16 @@ def test_clickhouse_round_trip_with_uds(setup) -> None:
         rows = sink._query(
             f"SELECT signal, toString(value), text FROM {database}.signals ORDER BY signal FORMAT TSV"
         ).splitlines()
-        got = {name: (float(value), text) for name, value, text in (line.split("\t") for line in rows)}
+        got = {
+            name: (float(value), text)
+            for name, value, text in (line.split("\t") for line in rows)
+        }
         assert_values(got, EXPECTED)
-        ev = sink._query(f"SELECT kind, name, text, detail, toString(utc) FROM {database}.events FORMAT TSV").strip()
-        assert ev == "state\tMINI.contactor\tclosed\tinitial\t1970-01-01 00:00:01.003"  # frame 3
+        ev = sink._query(
+            f"SELECT kind, name, text, detail, toString(utc) FROM {database}.events FORMAT TSV"
+        ).strip()
+        assert (
+            ev == "state\tMINI.contactor\tclosed\tinitial\t1970-01-01 00:00:01.003"
+        )  # frame 3
     finally:
         sink._query(f"DROP DATABASE IF EXISTS {database}")

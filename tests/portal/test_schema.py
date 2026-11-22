@@ -91,7 +91,15 @@ def test_mac_is_uppercased() -> None:
     assert validate(portal(mac="02:00:00:00:00:0a"))["mac"] == "02:00:00:00:00:0A"
 
 
-@pytest.mark.parametrize("mac", ["02-00-00-00-00-01", "02:00:00:00:00", "02:00:00:00:00:01:02", "zz:00:00:00:00:01"])
+@pytest.mark.parametrize(
+    "mac",
+    [
+        "02-00-00-00-00-01",
+        "02:00:00:00:00",
+        "02:00:00:00:00:01:02",
+        "zz:00:00:00:00:01",
+    ],
+)
 def test_bad_mac_is_rejected(mac: str) -> None:
     """PS-M1-02 reject."""
     with pytest.raises(cv.Invalid):
@@ -165,7 +173,11 @@ def test_removed_or_unknown_asset_keys_are_rejected(old_key: str) -> None:
 
 def test_nested_children_are_accepted() -> None:
     """PS-M1-02 accept."""
-    tree = _tree(tree_node(segment="a", children=[tree_node(segment="b", values=[value_entry()])]))
+    tree = _tree(
+        tree_node(
+            segment="a", children=[tree_node(segment="b", values=[value_entry()])]
+        )
+    )
     assert validate(portal(tree=tree))["tree"][0]["children"][0]["segment"] == "b"
 
 
@@ -179,12 +191,18 @@ def test_bad_segment_syntax_is_rejected(segment: str) -> None:
 @pytest.mark.parametrize("segment", ["a", "a1", "a_b", "z9_"])
 def test_good_segment_syntax_is_accepted(segment: str) -> None:
     """PS-M1-02 accept."""
-    assert validate(portal(tree=_tree(tree_node(segment=segment))))["tree"][0]["segment"] == segment
+    assert (
+        validate(portal(tree=_tree(tree_node(segment=segment))))["tree"][0]["segment"]
+        == segment
+    )
 
 
 def test_duplicate_sibling_segment_is_rejected() -> None:
     """PS-M1-02 reject: unique among siblings."""
-    kids = [tree_node(segment="pack", values=[value_entry()]), tree_node(segment="pack", values=[value_entry()])]
+    kids = [
+        tree_node(segment="pack", values=[value_entry()]),
+        tree_node(segment="pack", values=[value_entry()]),
+    ]
     with pytest.raises(cv.Invalid, match="duplicate"):
         validate(portal(tree=_tree(tree_node(segment="ecu", children=kids))))
 
@@ -234,7 +252,11 @@ def test_node_level_asset_key_is_rejected() -> None:
 
 def test_role_with_roles_available_containing_role_is_accepted() -> None:
     """PS-M1-02 accept."""
-    tree = _tree(tree_node(role="role_a", roles_available=["role_a", "role_b"], values=[value_entry()]))
+    tree = _tree(
+        tree_node(
+            role="role_a", roles_available=["role_a", "role_b"], values=[value_entry()]
+        )
+    )
     node = validate(portal(tree=tree))["tree"][0]
     assert node["role"] == "role_a" and node["roles_available"] == ["role_a", "role_b"]
 
@@ -248,7 +270,9 @@ def test_role_without_roles_available_is_rejected() -> None:
 def test_role_not_in_roles_available_is_rejected() -> None:
     """PS-M1-02 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(role="role_a", roles_available=["role_b"]))))
+        validate(
+            portal(tree=_tree(tree_node(role="role_a", roles_available=["role_b"])))
+        )
 
 
 def test_empty_roles_available_is_rejected() -> None:
@@ -260,7 +284,9 @@ def test_empty_roles_available_is_rejected() -> None:
 def test_role_must_be_an_identifier() -> None:
     """PS-M1-02 reject: role/roles_available are identifiers."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(role="Role A", roles_available=["Role A"]))))
+        validate(
+            portal(tree=_tree(tree_node(role="Role A", roles_available=["Role A"])))
+        )
 
 
 # --- absent / absent_when (4.1) -----------------------------------------------------
@@ -268,7 +294,12 @@ def test_role_must_be_an_identifier() -> None:
 
 def test_absent_alone_is_accepted() -> None:
     """PS-M1-02 accept."""
-    assert validate(portal(tree=_tree(tree_node(absent="not_compiled"))))["tree"][0]["absent"] == "not_compiled"
+    assert (
+        validate(portal(tree=_tree(tree_node(absent="not_compiled"))))["tree"][0][
+            "absent"
+        ]
+        == "not_compiled"
+    )
 
 
 @pytest.mark.parametrize(
@@ -279,7 +310,10 @@ def test_absent_alone_is_accepted() -> None:
         {"role": "role_a", "roles_available": ["role_a"]},
         {"series": series_entry()},
         {"actions": [action_entry("button")]},
-        {"unknown_when": {"value": "vcc_measured", "equals": "x", "why": "w"}, "values": [value_entry()]},
+        {
+            "unknown_when": {"value": "vcc_measured", "equals": "x", "why": "w"},
+            "values": [value_entry()],
+        },
     ],
     ids=["values", "children", "role", "series", "actions", "unknown_when"],
 )
@@ -293,43 +327,80 @@ def test_absent_alone_is_exclusive_with_content(extra: dict) -> None:
 def test_absent_when_without_absent_is_rejected() -> None:
     """PS-M1-02 reject: absent_when requires absent."""
     with pytest.raises(cv.Invalid, match="absent_when"):
-        validate(portal(tree=_tree(tree_node(absent_when={"provider": "x", "source": "y"}))))
+        validate(
+            portal(tree=_tree(tree_node(absent_when={"provider": "x", "source": "y"})))
+        )
 
 
 # --- unknown_when / trust_from (4.1) ------------------------------------------------
 
-_WAKE = value_entry(key="wake_state", label="Wake state", unit=None, decimals=None, sensor=None, text_sensor="state_text")
+_WAKE = value_entry(
+    key="wake_state",
+    label="Wake state",
+    unit=None,
+    decimals=None,
+    sensor=None,
+    text_sensor="state_text",
+)
 _UW = {"value": "wake_state", "equals": "DOWN", "why": "no_instrument"}
 
 
 def test_unknown_when_referencing_an_own_value_is_accepted() -> None:
     """PS-M1-02 accept."""
-    node = validate(portal(tree=_tree(tree_node(values=[_WAKE], unknown_when=_UW))))["tree"][0]
+    node = validate(portal(tree=_tree(tree_node(values=[_WAKE], unknown_when=_UW))))[
+        "tree"
+    ][0]
     assert node["unknown_when"]["equals"] == "DOWN"
 
 
 def test_unknown_when_value_not_among_own_values_is_rejected() -> None:
     """PS-M1-02 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(values=[value_entry(key="other")], unknown_when=_UW))))
+        validate(
+            portal(
+                tree=_tree(
+                    tree_node(values=[value_entry(key="other")], unknown_when=_UW)
+                )
+            )
+        )
 
 
 def test_unknown_when_on_a_node_with_children_is_rejected() -> None:
     """PS-M1-02 reject: not combinable with children."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(values=[_WAKE], unknown_when=_UW, children=[tree_node(segment="c")]))))
+        validate(
+            portal(
+                tree=_tree(
+                    tree_node(
+                        values=[_WAKE],
+                        unknown_when=_UW,
+                        children=[tree_node(segment="c")],
+                    )
+                )
+            )
+        )
 
 
 def test_trust_from_referencing_an_own_value_is_accepted() -> None:
     """PS-M1-02 accept."""
-    node = validate(portal(tree=_tree(tree_node(values=[_WAKE], trust_from="wake_state"))))["tree"][0]
+    node = validate(
+        portal(tree=_tree(tree_node(values=[_WAKE], trust_from="wake_state")))
+    )["tree"][0]
     assert node["trust_from"] == "wake_state"
 
 
 def test_trust_from_not_among_own_values_is_rejected() -> None:
     """PS-M1-02 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(values=[value_entry(key="other")], trust_from="wake_state"))))
+        validate(
+            portal(
+                tree=_tree(
+                    tree_node(
+                        values=[value_entry(key="other")], trust_from="wake_state"
+                    )
+                )
+            )
+        )
 
 
 # --- evidence-gated why codes (4.1) -------------------------------------------------
@@ -391,14 +462,18 @@ def test_value_with_text_and_binary_only_is_rejected() -> None:
 def test_value_with_no_source_is_rejected() -> None:
     """PS-M1-02 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(values=[{"key": "orphan", "label": "Orphan"}]))))
+        validate(
+            portal(tree=_tree(tree_node(values=[{"key": "orphan", "label": "Orphan"}])))
+        )
 
 
 @pytest.mark.parametrize("kind", ["sensor", "text_sensor", "binary_sensor"])
 def test_each_single_source_is_accepted(kind: str) -> None:
     """PS-M1-02 accept."""
     entry = value_entry(**{"sensor": None, kind: "some_id"})
-    value = validate(portal(tree=_tree(tree_node(values=[entry]))))["tree"][0]["values"][0]
+    value = validate(portal(tree=_tree(tree_node(values=[entry]))))["tree"][0][
+        "values"
+    ][0]
     assert kind in value
 
 
@@ -459,25 +534,36 @@ def test_budget_neither_positive_int_nor_null_is_rejected(bad) -> None:
 
 def test_no_values_and_no_explicit_budget_derives_null() -> None:
     """PS-M1-02 / 4.4: no own values -> null."""
-    assert _budget(validate(portal(tree=_tree(tree_node(absent="not_compiled"))))) is None
+    assert (
+        _budget(validate(portal(tree=_tree(tree_node(absent="not_compiled"))))) is None
+    )
 
 
 def test_budget_is_three_times_the_largest_cadence() -> None:
     """PS-M1-02 / 4.4: 3 * max(cadence_ms)."""
-    vals = [value_entry(key="a", cadence_ms=1000), value_entry(key="b", sensor="b_sensor", cadence_ms=5000)]
+    vals = [
+        value_entry(key="a", cadence_ms=1000),
+        value_entry(key="b", sensor="b_sensor", cadence_ms=5000),
+    ]
     assert _budget(validate(portal(tree=_tree(tree_node(values=vals))))) == 15000
 
 
 def test_one_value_without_cadence_makes_the_derived_budget_null() -> None:
     """PS-M1-02 / 4.4."""
-    vals = [value_entry(key="a", cadence_ms=1000), value_entry(key="b", sensor="b_sensor")]
+    vals = [
+        value_entry(key="a", cadence_ms=1000),
+        value_entry(key="b", sensor="b_sensor"),
+    ]
     assert _budget(validate(portal(tree=_tree(tree_node(values=vals))))) is None
 
 
 def test_explicit_budget_wins_over_cadence() -> None:
     """PS-M1-02 / 4.4."""
     vals = [value_entry(key="a", cadence_ms=1000)]
-    assert _budget(validate(portal(tree=_tree(tree_node(budget_ms=750, values=vals))))) == 750
+    assert (
+        _budget(validate(portal(tree=_tree(tree_node(budget_ms=750, values=vals)))))
+        == 750
+    )
 
 
 def test_explicit_null_budget_wins_over_cadence() -> None:
@@ -492,7 +578,12 @@ def test_derivation_is_per_node_at_every_depth_and_written_back() -> None:
         tree_node(
             children=[
                 tree_node(segment="deep", values=[value_entry(cadence_ms=2000)]),
-                tree_node(segment="deeper", children=[tree_node(segment="leaf", values=[value_entry(cadence_ms=1000)])]),
+                tree_node(
+                    segment="deeper",
+                    children=[
+                        tree_node(segment="leaf", values=[value_entry(cadence_ms=1000)])
+                    ],
+                ),
             ]
         )
     )
@@ -534,7 +625,10 @@ def test_node_with_binary_sensor_derives_null_budget() -> None:
 def test_node_with_binary_sensor_and_explicit_null_budget_is_legal() -> None:
     """PS-M1-02 accept."""
     entry = value_entry(sensor=None, binary_sensor="up")
-    assert _budget(validate(portal(tree=_tree(tree_node(budget_ms=NULL, values=[entry]))))) is None
+    assert (
+        _budget(validate(portal(tree=_tree(tree_node(budget_ms=NULL, values=[entry])))))
+        is None
+    )
 
 
 # --- series (4.5) -------------------------------------------------------------------
@@ -542,24 +636,36 @@ def test_node_with_binary_sensor_and_explicit_null_budget_is_legal() -> None:
 
 def test_series_only_node_is_accepted() -> None:
     """PS-M1-02 accept."""
-    s = validate(portal(tree=_tree(tree_node(series=series_entry()))))["tree"][0]["series"]
+    s = validate(portal(tree=_tree(tree_node(series=series_entry()))))["tree"][0][
+        "series"
+    ]
     assert (s["key"], s["index_frame"], s["count"]) == ("cells", "submodule_cell", 5)
 
 
 def test_series_and_values_together_are_accepted() -> None:
     """PS-M1-02 accept."""
-    node = validate(portal(tree=_tree(tree_node(values=[value_entry(key="crc_ok")], series=series_entry()))))["tree"][0]
+    node = validate(
+        portal(
+            tree=_tree(
+                tree_node(values=[value_entry(key="crc_ok")], series=series_entry())
+            )
+        )
+    )["tree"][0]
     assert node["series"]["key"] == "cells" and node["values"][0]["key"] == "crc_ok"
 
 
 def test_series_does_not_contribute_to_the_budget() -> None:
     """PS-M1-02 / 4.4: a series-only node derives null."""
-    assert _budget(validate(portal(tree=_tree(tree_node(series=series_entry()))))) is None
+    assert (
+        _budget(validate(portal(tree=_tree(tree_node(series=series_entry()))))) is None
+    )
 
 
 def test_series_index_frame_explicit_null_is_accepted() -> None:
     """PS-M1-02 accept: index_frame is required but may be an explicit null."""
-    s = validate(portal(tree=_tree(tree_node(series=series_entry(index_frame=NULL)))))["tree"][0]["series"]
+    s = validate(portal(tree=_tree(tree_node(series=series_entry(index_frame=NULL)))))[
+        "tree"
+    ][0]["series"]
     assert s["index_frame"] is None
 
 
@@ -607,7 +713,16 @@ def test_series_index_base_is_required() -> None:
 def test_series_key_colliding_with_own_value_key_is_rejected() -> None:
     """PS-M1-02 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(values=[value_entry(key="cells")], series=series_entry(key="cells")))))
+        validate(
+            portal(
+                tree=_tree(
+                    tree_node(
+                        values=[value_entry(key="cells")],
+                        series=series_entry(key="cells"),
+                    )
+                )
+            )
+        )
 
 
 def test_series_key_equal_to_a_value_key_on_another_node_is_accepted() -> None:
@@ -619,7 +734,9 @@ def test_series_key_equal_to_a_value_key_on_another_node_is_accepted() -> None:
     validate(portal(tree=tree))
 
 
-@pytest.mark.parametrize("extra", [{"values": "x"}, {"class": "r"}, {"index": 3}, {"pack_index_base": 9}])
+@pytest.mark.parametrize(
+    "extra", [{"values": "x"}, {"class": "r"}, {"index": 3}, {"pack_index_base": 9}]
+)
 def test_series_wire_only_keys_are_rejected(extra: dict) -> None:
     """PS-M1-02 reject: wire-only keys are not config keys."""
     with pytest.raises(cv.Invalid):
@@ -648,7 +765,15 @@ def test_series_source_without_provider_is_rejected() -> None:
 def test_series_unknown_provider_is_rejected_naming_it() -> None:
     """PS-M1-04: the registry is empty by default; an unknown provider is an error."""
     with pytest.raises(cv.Invalid) as e:
-        validate(portal(tree=_tree(tree_node(series=series_entry(source="s", provider="not_a_provider")))))
+        validate(
+            portal(
+                tree=_tree(
+                    tree_node(
+                        series=series_entry(source="s", provider="not_a_provider")
+                    )
+                )
+            )
+        )
     assert "not_a_provider" in str(e.value)
 
 
@@ -656,7 +781,9 @@ def test_submodule_position_must_be_positive() -> None:
     """PS-M1-06 reject (node level)."""
     for bad in (0, -1):
         with pytest.raises(cv.Invalid):
-            validate(portal(submodule_size=12, tree=_tree(tree_node(submodule_position=bad))))
+            validate(
+                portal(submodule_size=12, tree=_tree(tree_node(submodule_position=bad)))
+            )
 
 
 def test_submodule_size_must_be_positive() -> None:
@@ -715,16 +842,30 @@ def test_all_four_controls_on_one_node() -> None:
 def test_number_decimals_range() -> None:
     """PS-M3-01: number decimals 0..6."""
     for d in (0, 1, 6):
-        validate(portal(tree=_tree(tree_node(actions=[action_entry("number", decimals=d)])), auth=AUTH))
+        validate(
+            portal(
+                tree=_tree(tree_node(actions=[action_entry("number", decimals=d)])),
+                auth=AUTH,
+            )
+        )
     for d in (-1, 7):
         with pytest.raises(cv.Invalid):
-            validate(portal(tree=_tree(tree_node(actions=[action_entry("number", decimals=d)])), auth=AUTH))
+            validate(
+                portal(
+                    tree=_tree(tree_node(actions=[action_entry("number", decimals=d)])),
+                    auth=AUTH,
+                )
+            )
 
 
 def test_zero_entity_keys_is_rejected() -> None:
     """PS-M3-01 reject: an action needs exactly one of ..."""
     with pytest.raises(cv.Invalid, match="exactly one"):
-        validate(portal(tree=_tree(tree_node(actions=[{"key": "x", "label": "X"}])), auth=AUTH))
+        validate(
+            portal(
+                tree=_tree(tree_node(actions=[{"key": "x", "label": "X"}])), auth=AUTH
+            )
+        )
 
 
 def test_two_entity_keys_is_rejected() -> None:
@@ -738,7 +879,12 @@ def test_two_entity_keys_is_rejected() -> None:
 def test_decimals_on_a_non_number_action_is_rejected(control: str) -> None:
     """PS-M3-01 reject."""
     with pytest.raises(cv.Invalid, match="decimals"):
-        validate(portal(tree=_tree(tree_node(actions=[action_entry(control, decimals=1)])), auth=AUTH))
+        validate(
+            portal(
+                tree=_tree(tree_node(actions=[action_entry(control, decimals=1)])),
+                auth=AUTH,
+            )
+        )
 
 
 def test_duplicate_action_key_on_one_node_is_rejected() -> None:
@@ -761,7 +907,12 @@ def test_same_action_key_on_different_nodes_is_accepted() -> None:
 def test_bad_action_key_pattern_is_rejected(key: str) -> None:
     """PS-M3-01 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(actions=[action_entry("switch", key=key)])), auth=AUTH))
+        validate(
+            portal(
+                tree=_tree(tree_node(actions=[action_entry("switch", key=key)])),
+                auth=AUTH,
+            )
+        )
 
 
 def test_empty_actions_list_is_rejected() -> None:
@@ -773,6 +924,16 @@ def test_empty_actions_list_is_rejected() -> None:
 def test_action_label_is_required_and_non_empty() -> None:
     """PS-M3-01 reject."""
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(actions=[action_entry("switch", label=None)])), auth=AUTH))
+        validate(
+            portal(
+                tree=_tree(tree_node(actions=[action_entry("switch", label=None)])),
+                auth=AUTH,
+            )
+        )
     with pytest.raises(cv.Invalid):
-        validate(portal(tree=_tree(tree_node(actions=[action_entry("switch", label="")])), auth=AUTH))
+        validate(
+            portal(
+                tree=_tree(tree_node(actions=[action_entry("switch", label="")])),
+                auth=AUTH,
+            )
+        )

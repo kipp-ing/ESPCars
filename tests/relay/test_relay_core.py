@@ -14,9 +14,9 @@ import ast
 import asyncio
 import hashlib
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
 import sys
@@ -29,7 +29,6 @@ import urllib.request
 import aiohttp
 from aiohttp import web
 import pytest
-
 from sd_logger.test_collect import HEAD, SEAM, FakeDevice, sdlog_collect
 
 _REPO = Path(__file__).parent.parent.parent
@@ -56,7 +55,9 @@ class RelayServer:
     """The core behind a stand-in for the HA views. ``X-Test-Admin: 1`` plays
     the admin user; HA's own auth layer is tested in tests_ha/."""
 
-    def __init__(self, targets: dict, store_root: Path, *, busy_wait: float = core.BUSY_WAIT) -> None:
+    def __init__(
+        self, targets: dict, store_root: Path, *, busy_wait: float = core.BUSY_WAIT
+    ) -> None:
         self.targets = targets
         self.busy_wait = busy_wait
         self.store = core.FirmwareStore(store_root)
@@ -90,11 +91,15 @@ class RelayServer:
 
     async def _pass(self, request: web.Request) -> web.StreamResponse:
         m = request.match_info
-        return await self.relay.forward(request, self.targets, m["logger_id"], m["tail"])
+        return await self.relay.forward(
+            request, self.targets, m["logger_id"], m["tail"]
+        )
 
     async def _fw(self, request: web.Request) -> web.StreamResponse:
         m = request.match_info
-        return await core.serve_firmware(request, self.store, self.targets, m["logger_id"], m["name"])
+        return await core.serve_firmware(
+            request, self.store, self.targets, m["logger_id"], m["name"]
+        )
 
     async def _upload(self, request: web.Request) -> web.Response:
         return await core.upload_firmware(
@@ -133,9 +138,17 @@ def relay(device, tmp_path):
     server.stop()
 
 
-def call(url: str, *, method: str = "GET", headers: dict | None = None, data: bytes | None = None):
+def call(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    data: bytes | None = None,
+):
     """(status, headers, body) without urllib raising on 4xx/5xx."""
-    request = urllib.request.Request(url, method=method, headers=headers or {}, data=data)
+    request = urllib.request.Request(
+        url, method=method, headers=headers or {}, data=data
+    )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, response.headers, response.read()
@@ -168,15 +181,19 @@ class Stub:
             def log_message(self, *args) -> None:
                 pass
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 stub.seen.append(dict(self.headers))
                 stub.handler(self, stub)
 
-            do_POST = do_GET  # noqa: N815
+            do_POST = do_GET
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
-        threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+        threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        ).start()
         self.target = core.Target("127.0.0.1", self._server.server_address[1])
 
     def stop(self) -> None:
@@ -185,7 +202,9 @@ class Stub:
         self._server.server_close()
 
 
-def _answer(h: BaseHTTPRequestHandler, status: int, body: bytes, extra: dict | None = None) -> None:
+def _answer(
+    h: BaseHTTPRequestHandler, status: int, body: bytes, extra: dict | None = None
+) -> None:
     h.send_response(status)
     h.send_header("Content-Type", "application/json")
     h.send_header("Content-Length", str(len(body)))
@@ -203,7 +222,9 @@ def stubs(tmp_path):
     def factory(handler, **kwargs) -> tuple[Stub, RelayServer]:
         stub = Stub(handler)
         made.append(stub)
-        server = RelayServer({"stub": stub.target}, tmp_path / f"fw{len(made)}", **kwargs).start()
+        server = RelayServer(
+            {"stub": stub.target}, tmp_path / f"fw{len(made)}", **kwargs
+        ).start()
         servers.append(server)
         return stub, server
 
@@ -223,7 +244,10 @@ def test_relay_passes_status_and_body(relay: RelayServer, device: FakeDevice) ->
     base = f"{relay.url}/car/sdlog"
 
     status, _, body = call(f"{base}/index")
-    assert status == 200 and json.loads(body) == {"device": "mr-orange", "chunks": device.index_entries()}
+    assert status == 200 and json.loads(body) == {
+        "device": "mr-orange",
+        "chunks": device.index_entries(),
+    }
 
     status, _, body = call(f"{base}/status")
     assert status == 200 and json.loads(body) == device.status_payload()
@@ -232,9 +256,15 @@ def test_relay_passes_status_and_body(relay: RelayServer, device: FakeDevice) ->
     assert (status, body, headers["Content-Length"]) == (200, data, str(len(data)))
 
     status, headers, body = call(f"{base}/f/{name}", headers={"Range": "bytes=10-19"})
-    assert (status, body, headers["Content-Range"]) == (206, data[10:20], f"bytes 10-19/{len(data)}")
+    assert (status, body, headers["Content-Range"]) == (
+        206,
+        data[10:20],
+        f"bytes 10-19/{len(data)}",
+    )
 
-    status, headers, _ = call(f"{base}/f/{name}", headers={"Range": f"bytes={len(data)}-"})
+    status, headers, _ = call(
+        f"{base}/f/{name}", headers={"Range": f"bytes={len(data)}-"}
+    )
     assert (status, headers["Content-Range"]) == (416, f"bytes */{len(data)}")
 
     device.open_file = device.add(432)
@@ -249,17 +279,29 @@ def test_relay_passes_status_and_body(relay: RelayServer, device: FakeDevice) ->
 
 def test_relay_strips_headers(stubs) -> None:
     def handler(h, stub):
-        _answer(h, 200, b"{}", {"Set-Cookie": "s=1", "X-Logger-Secret": "x", "Accept-Ranges": "bytes"})
+        _answer(
+            h,
+            200,
+            b"{}",
+            {"Set-Cookie": "s=1", "X-Logger-Secret": "x", "Accept-Ranges": "bytes"},
+        )
 
     stub, server = stubs(handler)
     status, headers, _ = call(
         f"{server.url}/stub/sdlog/index",
-        headers={"Authorization": "Bearer t", "Cookie": "c=1", "Range": "bytes=0-1", "X-Custom": "1"},
+        headers={
+            "Authorization": "Bearer t",
+            "Cookie": "c=1",
+            "Range": "bytes=0-1",
+            "X-Custom": "1",
+        },
     )
 
     assert status == 200
     seen = {k.lower(): v for k, v in stub.seen[0].items()}
-    assert "authorization" not in seen and "cookie" not in seen and "x-custom" not in seen
+    assert (
+        "authorization" not in seen and "cookie" not in seen and "x-custom" not in seen
+    )
     assert seen["range"] == "bytes=0-1"
     assert seen["accept-encoding"] == "identity"
     assert headers.get("Set-Cookie") is None and headers.get("X-Logger-Secret") is None
@@ -286,7 +328,9 @@ def test_relay_streams_32mib_with_bounded_memory(stubs) -> None:
     try:
         received = 0
         digest = hashlib.sha256()
-        with urllib.request.urlopen(f"{server.url}/stub/sdlog/f/L0000001.LOG", timeout=30) as response:
+        with urllib.request.urlopen(
+            f"{server.url}/stub/sdlog/f/L0000001.LOG", timeout=30
+        ) as response:
             while chunk := response.read(64 * 1024):
                 received += len(chunk)
                 digest.update(chunk)
@@ -295,7 +339,9 @@ def test_relay_streams_32mib_with_bounded_memory(stubs) -> None:
         tracemalloc.stop()
 
     assert received == total
-    assert digest.hexdigest() == hashlib.sha256(block * (total // len(block))).hexdigest()
+    assert (
+        digest.hexdigest() == hashlib.sha256(block * (total // len(block))).hexdigest()
+    )
     assert peak < 4 * 1024 * 1024, f"peak {peak} B: the relay buffered the chunk"
 
 
@@ -320,8 +366,14 @@ def test_relay_streams_32mib_with_bounded_memory(stubs) -> None:
         ("index", "POST", 405),
     ],
 )
-def test_relay_rejects_bad_names(relay: RelayServer, device: FakeDevice, tail, method, status) -> None:
-    got = call(f"{relay.url}/car/sdlog/{tail}", method=method, data=b"" if method == "POST" else None)
+def test_relay_rejects_bad_names(
+    relay: RelayServer, device: FakeDevice, tail, method, status
+) -> None:
+    got = call(
+        f"{relay.url}/car/sdlog/{tail}",
+        method=method,
+        data=b"" if method == "POST" else None,
+    )
     assert got[0] == status
     assert device.requests == [], "the logger must never be contacted"
 
@@ -336,7 +388,9 @@ def test_relay_unknown_logger(relay: RelayServer, device: FakeDevice) -> None:
 
 
 def test_relay_502_when_offline(tmp_path) -> None:
-    server = RelayServer({"gone": core.Target("127.0.0.1", free_port())}, tmp_path).start()
+    server = RelayServer(
+        {"gone": core.Target("127.0.0.1", free_port())}, tmp_path
+    ).start()
     try:
         status, _, body = call(f"{server.url}/gone/sdlog/index")
     finally:
@@ -347,9 +401,13 @@ def test_relay_502_when_offline(tmp_path) -> None:
 def test_relay_aborts_on_upstream_drop(relay: RelayServer, device: FakeDevice) -> None:
     name = device.add(431)
     device.cut(name, 400, once=False)
-    with pytest.raises(http.client.IncompleteRead) as caught:
-        with urllib.request.urlopen(f"{relay.url}/car/sdlog/f/{name}", timeout=10) as response:
-            response.read()
+    with (
+        pytest.raises(http.client.IncompleteRead) as caught,
+        urllib.request.urlopen(
+            f"{relay.url}/car/sdlog/f/{name}", timeout=10
+        ) as response,
+    ):
+        response.read()
     assert len(caught.value.partial) == 400
 
 
@@ -375,7 +433,9 @@ def test_relay_one_upstream_per_logger(stubs, device: FakeDevice) -> None:
     stub, server = stubs(handler, busy_wait=0.3)
     server.targets["car"] = target_of(device.url)
     first: list = []
-    worker = threading.Thread(target=lambda: first.append(call(f"{server.url}/stub/sdlog/index")))
+    worker = threading.Thread(
+        target=lambda: first.append(call(f"{server.url}/stub/sdlog/index"))
+    )
     worker.start()
     _wait_until(lambda: len(stub.seen) == 1)
 
@@ -400,7 +460,9 @@ def test_relay_queues_a_request_behind_a_short_one(stubs) -> None:
 
     stub, server = stubs(handler, busy_wait=5.0)
     first: list = []
-    worker = threading.Thread(target=lambda: first.append(call(f"{server.url}/stub/sdlog/index")))
+    worker = threading.Thread(
+        target=lambda: first.append(call(f"{server.url}/stub/sdlog/index"))
+    )
     worker.start()
     _wait_until(lambda: len(stub.seen) == 1)
     threading.Timer(0.2, stub.release.set).start()
@@ -414,7 +476,9 @@ def test_relay_queues_a_request_behind_a_short_one(stubs) -> None:
 
 
 def test_relay_never_emits_401(stubs) -> None:
-    _, server = stubs(lambda h, stub: _answer(h, 401, b"{}", {"WWW-Authenticate": "Basic"}))
+    _, server = stubs(
+        lambda h, stub: _answer(h, 401, b"{}", {"WWW-Authenticate": "Basic"})
+    )
     status, headers, body = call(f"{server.url}/stub/sdlog/index")
     assert status == 502 and json.loads(body) == {"reason": "logger_answered_401"}
     assert headers.get("WWW-Authenticate") is None
@@ -423,9 +487,18 @@ def test_relay_never_emits_401(stubs) -> None:
 # ----------------------------------------------------------- R9-R12: firmware
 
 
-def upload(server: RelayServer, data: bytes, *, version="1.0.0", chip="ESP32-C6", admin=True, logger="car"):
+def upload(
+    server: RelayServer,
+    data: bytes,
+    *,
+    version="1.0.0",
+    chip="ESP32-C6",
+    admin=True,
+    logger="car",
+):
     return call(
-        f"{server.url}/{logger}/fw?" + urllib.parse.urlencode({"version": version, "chip_family": chip}),
+        f"{server.url}/{logger}/fw?"
+        + urllib.parse.urlencode({"version": version, "chip_family": chip}),
         method="PUT",
         data=data,
         headers={"X-Test-Admin": "1"} if admin else {},
@@ -435,14 +508,16 @@ def upload(server: RelayServer, data: bytes, *, version="1.0.0", chip="ESP32-C6"
 @pytest.fixture
 def fw_relay(tmp_path):
     # The tests talk from 127.0.0.1, so that is "the logger".
-    server = RelayServer({"car": core.Target("127.0.0.1"), "other": core.Target("192.0.2.10")}, tmp_path).start()
+    server = RelayServer(
+        {"car": core.Target("127.0.0.1"), "other": core.Target("192.0.2.10")}, tmp_path
+    ).start()
     yield server
     server.stop()
 
 
 def test_fw_manifest_format(fw_relay: RelayServer) -> None:
     data = b"\xe9" + b"firmware" * 1000
-    md5 = hashlib.md5(data).hexdigest()  # noqa: S324
+    md5 = hashlib.md5(data).hexdigest()
 
     status, _, body = upload(fw_relay, data)
 
@@ -451,7 +526,12 @@ def test_fw_manifest_format(fw_relay: RelayServer) -> None:
     assert manifest == {
         "name": "car",
         "version": "1.0.0",
-        "builds": [{"chipFamily": "ESP32-C6", "ota": {"md5": md5, "path": f"firmware-{md5}.ota.bin"}}],
+        "builds": [
+            {
+                "chipFamily": "ESP32-C6",
+                "ota": {"md5": md5, "path": f"firmware-{md5}.ota.bin"},
+            }
+        ],
     }
     status, headers, served = call(f"{fw_relay.url}/car/fw/manifest.json")
     assert status == 200 and json.loads(served) == manifest
@@ -469,7 +549,7 @@ def test_fw_only_for_logger_ip(fw_relay: RelayServer) -> None:
 
 def test_fw_other_source_404(fw_relay: RelayServer) -> None:
     upload(fw_relay, b"other-image", logger="other")
-    md5 = hashlib.md5(b"other-image").hexdigest()  # noqa: S324
+    md5 = hashlib.md5(b"other-image").hexdigest()
     for name in ("manifest.json", f"firmware-{md5}.ota.bin"):
         status, _, body = call(f"{fw_relay.url}/other/fw/{name}")
         assert status == 404 and json.loads(body) == {"reason": "not_found"}
@@ -500,7 +580,7 @@ def test_fw_upload_rejects(fw_relay: RelayServer, kwargs, status, reason) -> Non
 
 def test_fw_atomic_replace(fw_relay: RelayServer, tmp_path: Path) -> None:
     images = [b"one" * 100, b"two" * 100, b"three" * 100]
-    md5s = [hashlib.md5(i).hexdigest() for i in images]  # noqa: S324
+    md5s = [hashlib.md5(i).hexdigest() for i in images]
 
     upload(fw_relay, images[0], version="1")
     old_manifest = json.loads(call(f"{fw_relay.url}/car/fw/manifest.json")[2])
@@ -513,15 +593,21 @@ def test_fw_atomic_replace(fw_relay: RelayServer, tmp_path: Path) -> None:
 
     upload(fw_relay, images[2], version="3")
     files = sorted(p.name for p in (tmp_path / "car").iterdir())
-    assert files == sorted(["manifest.json", f"firmware-{md5s[1]}.ota.bin", f"firmware-{md5s[2]}.ota.bin"])
+    assert files == sorted(
+        ["manifest.json", f"firmware-{md5s[1]}.ota.bin", f"firmware-{md5s[2]}.ota.bin"]
+    )
 
 
 def test_fw_absent_404(fw_relay: RelayServer) -> None:
     assert call(f"{fw_relay.url}/car/fw/manifest.json")[0] == 404
 
 
-@pytest.mark.parametrize("name", ["../manifest.json", "firmware.ota.bin", "firmware-XYZ.ota.bin", ".tmp-abc"])
-def test_fw_serves_nothing_but_manifest_and_binaries(fw_relay: RelayServer, name) -> None:
+@pytest.mark.parametrize(
+    "name", ["../manifest.json", "firmware.ota.bin", "firmware-XYZ.ota.bin", ".tmp-abc"]
+)
+def test_fw_serves_nothing_but_manifest_and_binaries(
+    fw_relay: RelayServer, name
+) -> None:
     upload(fw_relay, b"image")
     assert call(f"{fw_relay.url}/car/fw/{name}")[0] == 404
 
@@ -554,7 +640,9 @@ def test_core_has_no_ha_import() -> None:
     assert roots - set(sys.stdlib_module_names) == {"aiohttp"}
 
 
-def test_collect_through_relay(relay: RelayServer, device: FakeDevice, tmp_path: Path) -> None:
+def test_collect_through_relay(
+    relay: RelayServer, device: FakeDevice, tmp_path: Path
+) -> None:
     """The real collector, unchanged, through the relay: a clean chunk, a cut one
     that resumes with Range, and the open file's 409."""
     clean = device.add(431)
@@ -564,7 +652,9 @@ def test_collect_through_relay(relay: RelayServer, device: FakeDevice, tmp_path:
     device.list_open = True
     dest = tmp_path / "archive"
 
-    outcome = sdlog_collect.Collector(f"{relay.url}/car", dest, retries=3, backoff=0).collect()
+    outcome = sdlog_collect.Collector(
+        f"{relay.url}/car", dest, retries=3, backoff=0
+    ).collect()
 
     assert outcome.device == "mr-orange"
     assert outcome.confirmed == [clean, cut]
@@ -572,12 +662,23 @@ def test_collect_through_relay(relay: RelayServer, device: FakeDevice, tmp_path:
     for name in (clean, cut):
         assert (dest / "mr-orange" / name).read_bytes() == device.chunks[name]
     assert device.confirmed == [clean, cut]
-    assert [r.range for r in device.gets(cut)] == [None, f"bytes=0-{HEAD - 1}", f"bytes={400 - SEAM}-"]
+    assert [r.range for r in device.gets(cut)] == [
+        None,
+        f"bytes=0-{HEAD - 1}",
+        f"bytes={400 - SEAM}-",
+    ]
 
 
 def test_hacs_layout() -> None:
     manifest = json.loads((_PKG / "manifest.json").read_text())
-    for key in ("domain", "name", "version", "documentation", "issue_tracker", "codeowners"):
+    for key in (
+        "domain",
+        "name",
+        "version",
+        "documentation",
+        "issue_tracker",
+        "codeowners",
+    ):
         assert manifest.get(key), key
     assert manifest["domain"] == "sdlog_relay"
     assert json.loads((_REPO / "hacs.json").read_text())["name"]

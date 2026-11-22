@@ -72,14 +72,14 @@ linbus:
   uart_port: UART_NUM_1
   mode: master
   schedule:
-    - lin_id: 48 # token out: master's own response carries lap N
+    - lin_id: 48  # token out: master's own response carries lap N
       interval: 50ms
-    - lin_id: 49 # Blue's LIN echo of the token
+    - lin_id: 49  # Blue's LIN echo of the token
       interval: 50ms
       length: 4
   responses:
     - lin_id: 48
-      data: [0x00, 0x01, 0xCA, 0xFE] # big-endian lap 1
+      data: [0x00, 0x01, 0xCA, 0xFE]  # big-endian lap 1
       checksum: enhanced
   on_error:
     - then:

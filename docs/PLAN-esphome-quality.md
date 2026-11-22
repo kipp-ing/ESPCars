@@ -258,7 +258,27 @@ One PR each for `components/`, `script/`, `tests/` and `custom_components/`.
 Each PR first runs `ruff --fix` and `ruff format`, then fixes the remaining
 findings by hand. Add `DOMAIN` to every component.
 
-**Done:** ruff and pyupgrade are blocking in CI.
+**P2 done:** P2a cleaned `components/` and `custom_components/`; P2b cleaned
+`script/`, `tests/` and `tests_ha/`, plus YAML comments and whitespace/EOF.
+The last P2 PR makes all six clean hooks blocking in `script/check.sh` and the
+`upstream-lint` CI job, which is now in `Required checks.needs`. It reuses
+`lint_report.py --only`; no new runner or flag is needed. ci-custom and
+clang-tidy remain report-only until P3/P5 clear their findings.
+
+| Tool | P1a baseline | After P2, repository-wide |
+|---|---:|---:|
+| ruff | 242 diagnostics | 0 |
+| ruff-format | 72 files | 0 |
+| pyupgrade | 4 files | 0 |
+| yamllint | 7 warnings | 0 |
+| end-of-file-fixer | 1 file | 0 |
+| trailing-whitespace | 1 file | 0 |
+
+P2b alone cleared 201 Ruff diagnostics and 60 formatter files (including
+`tests_ha/`), plus all pyupgrade/YAML/whitespace findings above. Review also
+removed 16 unused `noqa` directives: scoped `RUF100` findings **16 → 0**.
+P1b's added Python tooling and tests are included in the final zero counts;
+P3a's clang-format cleanup is tracked separately below.
 
 ### P3 — C++ format and custom lint · mechanical, with exceptions
 

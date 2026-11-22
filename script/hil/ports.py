@@ -100,7 +100,7 @@ def enumerate_boards():
 
 
 def main():
-    args = [a for a in sys.argv[1:]]
+    args = [*sys.argv[1:]]
     as_json = "--json" in args
     args = [a for a in args if a != "--json"]
 
@@ -131,7 +131,9 @@ def main():
         name = b["name"] or "UNKNOWN"
         ident = b["mac"] or b["vid_pid"]
         role = ROLES.get(b["name"], "not in HIL.md - identify before flashing")
-        print(f"{name:<{name_w}}  {b['port']:<{port_w}}  {ident:<17}  @{b['location']:<10}  {role}")
+        print(
+            f"{name:<{name_w}}  {b['port']:<{port_w}}  {ident:<17}  @{b['location']:<10}  {role}"
+        )
     return 0
 
 

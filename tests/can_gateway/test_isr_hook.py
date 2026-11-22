@@ -12,7 +12,6 @@ from pathlib import Path
 
 from .test_log_tap import _brace_block
 
-
 HOOK_DEFINE = "USE_CAN_GATEWAY_ISR_HOOK"
 
 

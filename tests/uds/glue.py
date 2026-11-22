@@ -23,7 +23,12 @@ MINI = "fixtures/mini.dcat"
 BMS = "../../private/catalogs/bms-live.dcat"
 
 MINI_PATH = Path(__file__).resolve().parent / "fixtures" / "mini.dcat"
-BMS_PATH = Path(__file__).resolve().parent.parent.parent / "private" / "catalogs" / "bms-live.dcat"
+BMS_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "private"
+    / "catalogs"
+    / "bms-live.dcat"
+)
 
 HUB_ID = "bms"
 ISOTP_ID = "tp"
@@ -117,7 +122,10 @@ def full_config(
     text_sensors: list[dict[str, Any]] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    config: dict[str, Any] = {"uds": hubs, "isotp": isotp if isotp is not None else [isotp_entry()]}
+    config: dict[str, Any] = {
+        "uds": hubs,
+        "isotp": isotp if isotp is not None else [isotp_entry()],
+    }
     if sensors is not None:
         config["sensor"] = sensors
     if text_sensors is not None:
@@ -138,7 +146,9 @@ def run_hub_final_validate(hub_config: dict[str, Any], **kwargs):
         fv.full_config.reset(token)
 
 
-def run_entity_final_validate(entity_config: dict[str, Any], hub_config: dict[str, Any], *, text: bool = False):
+def run_entity_final_validate(
+    entity_config: dict[str, Any], hub_config: dict[str, Any], *, text: bool = False
+):
     """Invoke a platform's FINAL_VALIDATE_SCHEMA — where `field:` is actually resolved."""
     if text:
         from esphome.components.uds.text_sensor import _final_validate

@@ -48,7 +48,7 @@ sd_logger:
     power_cycle: true     # needs card_power_pin (V19)
     in_band_reset: true   # stop token + CMD0 before the remount, from attempt 2 on
     busy_timeout: 2s      # how long one attempt waits for the card to release the bus
-    max_busy_timeout: 10s # the budget doubles up to here on each further attempt (V28)
+    max_busy_timeout: 10s  # the budget doubles up to here on each further attempt (V28)
   vcc_monitor:
     adc_pin: 0            # ADC1 channel (GPIO0) on the 12 V rail divider
     threshold: 10.5V      # trip above the 3V3 regulator dropout
@@ -60,12 +60,12 @@ sd_logger:
   collection:
     enabled: true           # the card half: chunk index, retention, the `#gap` line
     serve: true             # the network half: the Phase B server, and what V22/V25
-                            # are about. `serve: false` is the shape the bench runs
-                            # (tests/hil/stress-orange-sdrotate.yaml) — it keeps
-                            # retention without asking for WiFi. Spelled out here so
-                            # CI compiles the key; the false branch is pinned in
-                            # tests/sd_logger/test_schema.py, where it decides
-                            # validation rather than code.
+    # are about. `serve: false` is the shape the bench runs
+    # (tests/hil/stress-orange-sdrotate.yaml) — it keeps
+    # retention without asking for WiFi. Spelled out here so
+    # CI compiles the key; the false branch is pinned in
+    # tests/sd_logger/test_schema.py, where it decides
+    # validation rather than code.
     port: 8080
     retention_percent: 80   # arm "drop oldest un-collected" at 80 % card fill
     # V26: how many chunks the in-RAM index tracks, 12 B an entry. A chunk the

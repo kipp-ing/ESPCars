@@ -40,11 +40,15 @@ for y in tests/build/*/test*.yaml; do
   echo "VALID $y"
 done
 
-# Upstream lint stays advisory until the cleanup phases clear the baseline.
+# P2's clean Python/YAML/whitespace hooks block locally and in CI.
+echo "== Python, YAML and whitespace lint =="
+"$PY" script/lint_report.py --only ruff ruff-format pyupgrade yamllint end-of-file-fixer trailing-whitespace --summary
+
+# The remaining hooks stay advisory until their cleanup phases clear the baseline.
 # clang-tidy skips on a fresh clone; compiled local builds are analyzed.
 # CI uses this runner with requirements_lint.txt. Fixers use temporary copies.
 echo "== upstream lint (report-only; pins: requirements_lint.txt) =="
-"$PY" script/lint_report.py --report-only --summary
+"$PY" script/lint_report.py --only hook-config no-commit-to-branch ci-custom clang-tidy --report-only --summary
 echo "For details, run: .venv/bin/python script/lint_report.py"
 
 echo "All checks passed."

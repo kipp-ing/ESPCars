@@ -38,7 +38,16 @@ def _validated_rule(set_core_config, modify, **extra):
 def test_v32_motorola_signal_with_value_accepted(set_core_config) -> None:
     rule = _validated_rule(
         set_core_config,
-        {"signals": [{"bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 0x1234}]},
+        {
+            "signals": [
+                {
+                    "bit_offset": 4,
+                    "bit_length": 13,
+                    "byte_order": "big",
+                    "value": 0x1234,
+                }
+            ]
+        },
     )
     assert rule["modify"]["signals"][0]["byte_order"] == "big"
 
@@ -53,7 +62,8 @@ def test_v32_signal_defaults_to_intel(set_core_config) -> None:
 def test_v32_value_wider_than_field_rejected(set_core_config) -> None:
     with pytest.raises(cv.Invalid, match="does not fit"):
         _validated_rule(
-            set_core_config, {"signals": [{"bit_offset": 0, "bit_length": 4, "value": 16}]}
+            set_core_config,
+            {"signals": [{"bit_offset": 0, "bit_length": 4, "value": 16}]},
         )
 
 
@@ -61,14 +71,19 @@ def test_v32_motorola_past_byte_7_rejected(set_core_config) -> None:
     with pytest.raises(cv.Invalid, match="past byte 7"):
         _validated_rule(
             set_core_config,
-            {"signals": [{"bit_offset": 57, "bit_length": 4, "byte_order": "big", "value": 0}]},
+            {
+                "signals": [
+                    {"bit_offset": 57, "bit_length": 4, "byte_order": "big", "value": 0}
+                ]
+            },
         )
 
 
 def test_v32_intel_past_bit_63_rejected(set_core_config) -> None:
     with pytest.raises(cv.Invalid, match="64-bit frame"):
         _validated_rule(
-            set_core_config, {"signals": [{"bit_offset": 60, "bit_length": 8, "value": 0}]}
+            set_core_config,
+            {"signals": [{"bit_offset": 60, "bit_length": 8, "value": 0}]},
         )
 
 
@@ -81,7 +96,9 @@ def test_v34_signal_overlapping_data_rejected(set_core_config) -> None:
             set_core_config,
             {
                 "data": [{"index": 1, "value": 0, "mask": 0x01}],
-                "signals": [{"bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 0}],
+                "signals": [
+                    {"bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 0}
+                ],
             },
         )
 
@@ -104,7 +121,9 @@ def test_v34_adjacent_signals_accepted(set_core_config) -> None:
         set_core_config,
         {
             "data": [{"index": 0, "value": 0, "mask": 0xE0}],
-            "signals": [{"bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 0}],
+            "signals": [
+                {"bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 0}
+            ],
         },
     )
 
@@ -114,7 +133,9 @@ def test_v34_adjacent_signals_accepted(set_core_config) -> None:
 
 def test_v36_valueless_signal_needs_rule_id(set_core_config) -> None:
     with pytest.raises(cv.Invalid, match="needs the rule's id"):
-        _validated_rule(set_core_config, {"signals": [{"bit_offset": 0, "bit_length": 8}]})
+        _validated_rule(
+            set_core_config, {"signals": [{"bit_offset": 0, "bit_length": 8}]}
+        )
 
 
 def test_v36_valueless_signal_with_id_accepted(set_core_config) -> None:
@@ -129,7 +150,10 @@ def test_v36_valueless_signal_with_id_accepted(set_core_config) -> None:
 def test_v33_e2e_defaults(set_core_config) -> None:
     rule = _validated_rule(
         set_core_config,
-        {"signals": [{"bit_offset": 0, "bit_length": 8, "value": 1}], "e2e": {"crc_byte": 7}},
+        {
+            "signals": [{"bit_offset": 0, "bit_length": 8, "value": 1}],
+            "e2e": {"crc_byte": 7},
+        },
     )
     e2e = rule["modify"]["e2e"]
     assert (e2e["first_byte"], e2e["last_byte"], e2e["polynomial"]) == (0, 6, 0x1D)
@@ -150,7 +174,10 @@ def test_v33_crc_byte_0_needs_range(set_core_config) -> None:
     with pytest.raises(cv.Invalid, match="explicit"):
         _validated_rule(
             set_core_config,
-            {"signals": [{"bit_offset": 8, "bit_length": 8, "value": 1}], "e2e": {"crc_byte": 0}},
+            {
+                "signals": [{"bit_offset": 8, "bit_length": 8, "value": 1}],
+                "e2e": {"crc_byte": 0},
+            },
         )
 
 
@@ -186,7 +213,16 @@ def test_codegen_masks_motorola(set_core_config) -> None:
 
     rule = _validated_rule(
         set_core_config,
-        {"signals": [{"bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 0x1234}]},
+        {
+            "signals": [
+                {
+                    "bit_offset": 4,
+                    "bit_length": 13,
+                    "byte_order": "big",
+                    "value": 0x1234,
+                }
+            ]
+        },
     )
     and_mask, or_value = _packed_patch_masks(rule["modify"])
     assert and_mask == FULL & ~0x0000_FF1F
@@ -198,7 +234,8 @@ def test_codegen_masks_intel_cross_byte(set_core_config) -> None:
     from esphome.components.can_gateway import _declared_mask, _packed_patch_masks
 
     rule = _validated_rule(
-        set_core_config, {"signals": [{"bit_offset": 12, "bit_length": 8, "value": 0xA5}]}
+        set_core_config,
+        {"signals": [{"bit_offset": 12, "bit_length": 8, "value": 0xA5}]},
     )
     and_mask, or_value = _packed_patch_masks(rule["modify"])
     assert and_mask == FULL & ~0x000F_F000
@@ -249,7 +286,13 @@ def _signal_gateway(set_core_config):
                             "id": "current_limit",
                             "can_id": 0x1A0,
                             "modify": {
-                                "signals": [{"bit_offset": 4, "bit_length": 13, "byte_order": "big"}],
+                                "signals": [
+                                    {
+                                        "bit_offset": 4,
+                                        "bit_length": 13,
+                                        "byte_order": "big",
+                                    }
+                                ],
                                 "e2e": {"crc_byte": 7},
                             },
                         }
@@ -263,9 +306,20 @@ def _signal_gateway(set_core_config):
 def test_v37_set_signal_defaults(set_core_config) -> None:
     setup_c6(set_core_config)
     action = _set_signal_schema()(
-        {"id": "current_limit", "bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 12.5}
+        {
+            "id": "current_limit",
+            "bit_offset": 4,
+            "bit_length": 13,
+            "byte_order": "big",
+            "value": 12.5,
+        }
     )
-    assert (action["factor"], action["offset"], action["signed"], action["enabled"]) == (
+    assert (
+        action["factor"],
+        action["offset"],
+        action["signed"],
+        action["enabled"],
+    ) == (
         1.0,
         0.0,
         False,
@@ -285,14 +339,26 @@ def test_v37_field_outside_frame_rejected(set_core_config) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="past byte 7"):
         _set_signal_schema()(
-            {"id": "x", "bit_offset": 56, "bit_length": 2, "byte_order": "big", "value": 1}
+            {
+                "id": "x",
+                "bit_offset": 56,
+                "bit_length": 2,
+                "byte_order": "big",
+                "value": 1,
+            }
         )
 
 
 def test_v38_declared_field_accepted(set_core_config, set_component_config) -> None:
     config = _signal_gateway(set_core_config)
     action = _set_signal_schema()(
-        {"id": "current_limit", "bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 1}
+        {
+            "id": "current_limit",
+            "bit_offset": 4,
+            "bit_length": 13,
+            "byte_order": "big",
+            "value": 1,
+        }
     )
     _final_validate(config, [{"can_gateway.set_signal": action}], set_component_config)
 
@@ -304,13 +370,23 @@ def test_v38_undeclared_field_rejected(set_core_config, set_component_config) ->
         {"id": "current_limit", "bit_offset": 4, "bit_length": 13, "value": 1}
     )
     with pytest.raises(cv.Invalid, match="does not declare the signal"):
-        _final_validate(config, [{"can_gateway.set_signal": action}], set_component_config)
+        _final_validate(
+            config, [{"can_gateway.set_signal": action}], set_component_config
+        )
 
 
 def test_v38_unknown_rule_rejected(set_core_config, set_component_config) -> None:
     config = _signal_gateway(set_core_config)
     action = _set_signal_schema()(
-        {"id": "nope", "bit_offset": 4, "bit_length": 13, "byte_order": "big", "value": 1}
+        {
+            "id": "nope",
+            "bit_offset": 4,
+            "bit_length": 13,
+            "byte_order": "big",
+            "value": 1,
+        }
     )
     with pytest.raises(cv.Invalid, match="not an updatable"):
-        _final_validate(config, [{"can_gateway.set_signal": action}], set_component_config)
+        _final_validate(
+            config, [{"can_gateway.set_signal": action}], set_component_config
+        )

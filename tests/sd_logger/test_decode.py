@@ -15,9 +15,9 @@ import hashlib
 import importlib.util
 import json
 import os
+from pathlib import Path
 import sys
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -116,13 +116,31 @@ def run(config: Path, sink, command: str = "run") -> int:
 @pytest.mark.parametrize(
     "body, why",
     [
-        ('archive = "/a"\nsink = "fake"\nbogus = 1\n[[device]]\nname = "d"\nvehicle = "v"\n', "unknown key"),
-        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\nvehicle = "v"\n[[device]]\nname = "d"\nvehicle = "v"\n', "duplicate"),
-        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\nvehicle = "v"\n[device.dbc]\nEV = "/no/such.dbc"\n', "not found"),
-        ('archive = "/a"\nsink = "mongo"\n[[device]]\nname = "d"\nvehicle = "v"\n', "unknown sink"),
+        (
+            'archive = "/a"\nsink = "fake"\nbogus = 1\n[[device]]\nname = "d"\nvehicle = "v"\n',
+            "unknown key",
+        ),
+        (
+            'archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\nvehicle = "v"\n[[device]]\nname = "d"\nvehicle = "v"\n',
+            "duplicate",
+        ),
+        (
+            'archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\nvehicle = "v"\n[device.dbc]\nEV = "/no/such.dbc"\n',
+            "not found",
+        ),
+        (
+            'archive = "/a"\nsink = "mongo"\n[[device]]\nname = "d"\nvehicle = "v"\n',
+            "unknown sink",
+        ),
         ('archive = "/a"\nsink = "fake"\n', "at least one"),
-        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "../x"\nvehicle = "v"\n', "safe path"),
-        ('archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\n', "vehicle is required"),
+        (
+            'archive = "/a"\nsink = "fake"\n[[device]]\nname = "../x"\nvehicle = "v"\n',
+            "safe path",
+        ),
+        (
+            'archive = "/a"\nsink = "fake"\n[[device]]\nname = "d"\n',
+            "vehicle is required",
+        ),
     ],
 )
 def test_config_rejects(tmp_path: Path, capsys, body: str, why: str) -> None:
@@ -149,8 +167,14 @@ def test_extract_unchanged_after_refactor(tmp_path: Path, capsys) -> None:
             "4163,EV,300,-,3,01B80B,1999811",
             "4173,EV,7FF,-,0,,1999821",
         ],
-        "L": ["t_us,label,id_hex,flags,dlc,data_hex,utc_us", "4139,lin,3C,-,2,55AA,1000027"],
-        "X": ["t_us,level,tag,message,utc_us", "4133,I,sd_logger,records=3, dropped=0,1000021"],
+        "L": [
+            "t_us,label,id_hex,flags,dlc,data_hex,utc_us",
+            "4139,lin,3C,-,2,55AA,1000027",
+        ],
+        "X": [
+            "t_us,level,tag,message,utc_us",
+            "4133,I,sd_logger,records=3, dropped=0,1000021",
+        ],
     }
     for kind, expected in golden.items():
         assert sdlog.main(["extract", str(path), "--type", kind]) == 0
@@ -170,8 +194,10 @@ def test_reader_yields_frames_with_utc(tmp_path: Path) -> None:
 # Fictional values throughout.
 STATED = [
     FIXTURE[0],
-    "#ident,id=mr-orange,mac=02:00:5e:10:20:30,date=1970-01-01T00:00:01Z,clock=est/card:6,"
-    "build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234",
+    (
+        "#ident,id=mr-orange,mac=02:00:5e:10:20:30,date=1970-01-01T00:00:01Z,clock=est/card:6,"
+        "build=2026-10-04T09:12:33Z,elf=1a2b3c4d5e6f7a8b,cfg=5eed1234"
+    ),
     "#clock,@0,F4240,est,card,6",
     *FIXTURE[1:6],
     "#clock,@1010,F4240,utc,sync",
@@ -181,7 +207,9 @@ STATED = [
 
 def _rows(sink, table: str) -> list[dict]:
     # The chunk key carries the file's sha, which the extra header lines change.
-    return [{k: v for k, v in row.items() if k != "chunk"} for row in sink.tables[table]]
+    return [
+        {k: v for k, v in row.items() if k != "chunk"} for row in sink.tables[table]
+    ]
 
 
 def test_ident_and_clock_lines_change_no_frame(setup) -> None:
@@ -197,7 +225,9 @@ def test_ident_and_clock_lines_change_no_frame(setup) -> None:
     assert marker["result"] == "ok", marker["detail"]
     assert _rows(stated, "frames") == _rows(plain, "frames")
     assert _rows(stated, "signals") == _rows(plain, "signals")
-    assert stated.tables["frames"][0]["utc"] == 999  # from the `#utc`, not from the card floor
+    assert (
+        stated.tables["frames"][0]["utc"] == 999
+    )  # from the `#utc`, not from the card floor
 
 
 def test_reader_estimates_are_opt_in(tmp_path: Path) -> None:
@@ -207,11 +237,20 @@ def test_reader_estimates_are_opt_in(tmp_path: Path) -> None:
     reference = write_chunk(tmp_path / "plain", "L0000007.LOG", FIXTURE)
     plain = list(sdlog.StreamReader(path))
     assert {s.utc_best for s in plain} == {None}
-    assert [(s.t_us, s.utc_us) for s in plain] == [(s.t_us, s.utc_us) for s in sdlog.StreamReader(reference)]
+    assert [(s.t_us, s.utc_us) for s in plain] == [
+        (s.t_us, s.utc_us) for s in sdlog.StreamReader(reference)
+    ]
     best = list(sdlog.StreamReader(path, estimates=True))
-    assert (best[0].utc_us, best[0].utc_best) == (None, (1_004_096, "est"))  # floor 1 s + boot 4096 µs
+    assert (best[0].utc_us, best[0].utc_best) == (
+        None,
+        (1_004_096, "est"),
+    )  # floor 1 s + boot 4096 µs
     assert (best[1].utc_us, best[1].utc_best) == (1_000_016, (1_000_016, "utc"))
-    bad = write_chunk(tmp_path / "bad", "L0000007.LOG", [*STATED[:2], "#clock,@0,F4240,utc,card,6", *STATED[3:]])
+    bad = write_chunk(
+        tmp_path / "bad",
+        "L0000007.LOG",
+        [*STATED[:2], "#clock,@0,F4240,utc,card,6", *STATED[3:]],
+    )
     assert len(list(sdlog.StreamReader(bad))) == len(plain)
     with pytest.raises(sdlog.ReadError, match="#clock"):
         list(sdlog.StreamReader(bad, estimates=True))
@@ -227,7 +266,9 @@ def test_frames_match_extract(setup) -> None:
     frames = sink.tables["frames"]
     # utc in ms: boot µs 4096 lies before the first `#utc` (1010 = 4112 µs -> 1 000 000 µs),
     # so it resolves backwards to 999 984 µs; 4163/4173 sit under the second anchor.
-    assert [(f["kind"], f["label"], f["utc"], f["id"], f["flags"], f["dlc"]) for f in frames] == [
+    assert [
+        (f["kind"], f["label"], f["utc"], f["id"], f["flags"], f["dlc"]) for f in frames
+    ] == [
         ("C", "EV", 999, 0x100, "-", 8),
         ("C", "EV", 1000, 0x200, "-", 8),
         ("L", "lin", 1000, 0x3C, "-", 2),
@@ -248,7 +289,11 @@ def test_utc_before_the_first_anchor_is_resolved_backwards(setup) -> None:
     assert run(config, sink) == 0
     first = sink.tables["frames"][0]
     assert first["utc"] == (1_000_000 - (0x1010 - 0x1000)) // 1000
-    assert [s["utc"] for s in sink.tables["signals"] if s["signal"].startswith("DEMO_STATUS.")] == [999] * 3
+    assert [
+        s["utc"]
+        for s in sink.tables["signals"]
+        if s["signal"].startswith("DEMO_STATUS.")
+    ] == [999] * 3
     (marker,) = sink.tables["chunks"]
     assert (marker["utc_min"], marker["utc_max"]) == (999, 1999)
 
@@ -265,7 +310,11 @@ def test_a_chunk_without_anchor_has_null_utc(setup) -> None:
     assert {f["utc"] for f in sink.tables["frames"]} == {None}
     assert {s["utc"] for s in sink.tables["signals"]} == {None}
     (marker,) = sink.tables["chunks"]
-    assert (marker["result"], marker["utc_min"], marker["utc_max"]) == ("ok", None, None)
+    assert (marker["result"], marker["utc_min"], marker["utc_max"]) == (
+        "ok",
+        None,
+        None,
+    )
 
 
 def test_a_clock_line_with_basis_utc_is_an_anchor(setup) -> None:
@@ -306,7 +355,11 @@ def test_decode_against_reference(setup) -> None:
     _, _, config = setup
     sink = dec.FakeSink()
     run(config, sink)
-    got = {s["signal"]: s["value"] for s in sink.tables["signals"] if s["signal"] != "DEMO_MUX.Mux"}
+    got = {
+        s["signal"]: s["value"]
+        for s in sink.tables["signals"]
+        if s["signal"] != "DEMO_MUX.Mux"
+    }
     assert got == pytest.approx(EXPECTED_SIGNALS)
     assert {s["vehicle"] for s in sink.tables["signals"]} == {"demo-car"}
 
@@ -317,14 +370,23 @@ def test_unknown_id_is_frames_only(setup) -> None:
     run(config, sink)
     # 0x7FF has no message and LIN is not DBC-decoded: every signal comes from one of the
     # five matched CAN frames.
-    assert {s["signal"].split(".")[0] for s in sink.tables["signals"]} == {"DEMO_STATUS", "DEMO_PACK", "DEMO_EXT", "DEMO_MUX"}
+    assert {s["signal"].split(".")[0] for s in sink.tables["signals"]} == {
+        "DEMO_STATUS",
+        "DEMO_PACK",
+        "DEMO_EXT",
+        "DEMO_MUX",
+    }
     (marker,) = sink.tables["chunks"]
     assert (marker["can_frames"], marker["matched"]) == (6, 5)
 
 
 def test_an_extended_flag_mismatch_does_not_match(tmp_path: Path, setup) -> None:
     archive, _, config = setup
-    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:4], "C1x,@1000,100,E803F60300000000", "#close,@2000,rotate"])
+    write_chunk(
+        archive / "mr-orange",
+        "L0000007.LOG",
+        [*FIXTURE[:4], "C1x,@1000,100,E803F60300000000", "#close,@2000,rotate"],
+    )
     sink = dec.FakeSink()
     run(config, sink)
     assert sink.tables["signals"] == []
@@ -333,7 +395,12 @@ def test_an_extended_flag_mismatch_does_not_match(tmp_path: Path, setup) -> None
 def test_a_signal_that_does_not_fit_spares_the_rest_of_the_dbc(setup) -> None:
     """Real DBCs carry mistakes. One signal past the message end must not cost the file."""
     _, dbc, config = setup
-    dbc.write_text(dbc.read_text().replace(' SG_ Gear : 24|4@1+', ' SG_ Broken : 60|16@1+ (1,0) [0|1] "" Vector__XXX\n SG_ Gear : 24|4@1+'))
+    dbc.write_text(
+        dbc.read_text().replace(
+            " SG_ Gear : 24|4@1+",
+            ' SG_ Broken : 60|16@1+ (1,0) [0|1] "" Vector__XXX\n SG_ Gear : 24|4@1+',
+        )
+    )
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     got = {s["signal"] for s in sink.tables["signals"]}
@@ -343,8 +410,17 @@ def test_a_signal_that_does_not_fit_spares_the_rest_of_the_dbc(setup) -> None:
 def test_decode_failures_are_counted_per_frame(setup) -> None:
     """D4a counts failed frames, not distinct payloads: the decode cache must not hide repeats."""
     archive, dbc, config = setup
-    dbc.write_text(dbc.read_text().replace(' SG_ Gear : 24|4@1+', ' SG_ Broken : 60|16@1+ (1,0) [0|1] "" Vector__XXX\n SG_ Gear : 24|4@1+'))
-    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:5], "C1,10,100,E803F60300000000", "#close,@2000,rotate"])
+    dbc.write_text(
+        dbc.read_text().replace(
+            " SG_ Gear : 24|4@1+",
+            ' SG_ Broken : 60|16@1+ (1,0) [0|1] "" Vector__XXX\n SG_ Gear : 24|4@1+',
+        )
+    )
+    write_chunk(
+        archive / "mr-orange",
+        "L0000007.LOG",
+        [*FIXTURE[:5], "C1,10,100,E803F60300000000", "#close,@2000,rotate"],
+    )
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     (marker,) = sink.tables["chunks"]
@@ -387,13 +463,19 @@ def test_dbc_edit_redecodes_without_duplicates(setup) -> None:
     run(config, sink)
     frames_before = len(sink.tables["frames"])
     # Change the Speed factor: same signals, new values, new catalog.
-    dbc.write_text(dbc.read_text().replace("Speed : 0|16@1+ (0.01,0)", "Speed : 0|16@1+ (0.1,0)"))
+    dbc.write_text(
+        dbc.read_text().replace("Speed : 0|16@1+ (0.01,0)", "Speed : 0|16@1+ (0.1,0)")
+    )
     assert run(config, sink) == 0
-    speeds = [s["value"] for s in sink.tables["signals"] if s["signal"] == "DEMO_STATUS.Speed"]
+    speeds = [
+        s["value"] for s in sink.tables["signals"] if s["signal"] == "DEMO_STATUS.Speed"
+    ]
     assert speeds == [pytest.approx(100.0)]
     assert len(sink.tables["frames"]) == frames_before
     state = sink.chunk_state("mr-orange")
-    assert state["L0000007.LOG"][1] == dec.catalog_hash(dec.load_config(config).devices[0])
+    assert state["L0000007.LOG"][1] == dec.catalog_hash(
+        dec.load_config(config).devices[0]
+    )
 
 
 # ------------------------------------------------------------------ D8/D9 defects and gaps
@@ -408,7 +490,9 @@ def test_dbc_edit_redecodes_without_duplicates(setup) -> None:
         (["#sdlog,2,7,@0,2026.7.0", "#origin,mr-blue", *FIXTURE[2:]], "#origin"),
     ],
 )
-def test_a_bad_chunk_is_a_defect_and_writes_nothing(setup, lines: list[str], why: str) -> None:
+def test_a_bad_chunk_is_a_defect_and_writes_nothing(
+    setup, lines: list[str], why: str
+) -> None:
     archive, _, config = setup
     write_chunk(archive / "mr-orange", "L0000007.LOG", lines)
     sink = dec.FakeSink()
@@ -421,7 +505,9 @@ def test_a_bad_chunk_is_a_defect_and_writes_nothing(setup, lines: list[str], why
 def test_a_torn_last_line_is_not_a_defect(setup) -> None:
     archive, _, config = setup
     path = archive / "mr-orange" / "L0000007.LOG"
-    path.write_bytes(path.read_bytes() + b"C1,5,100,E8")  # power cut mid-line, after #close
+    path.write_bytes(
+        path.read_bytes() + b"C1,5,100,E8"
+    )  # power cut mid-line, after #close
     sink = dec.FakeSink()
     assert run(config, sink) == 0
 
@@ -431,37 +517,57 @@ def test_a_collector_accepted_torn_chunk_loads(setup) -> None:
     (sdlog-fleet-spec C12): loaded up to the last complete line, ok, detail says torn.
     A sidecar for other bytes vouches for nothing."""
     archive, _, config = setup
-    torn = ("\n".join(FIXTURE[:-1]) + "\nC1,5,100,E8").encode("latin-1")  # no #close, torn last line
+    torn = ("\n".join(FIXTURE[:-1]) + "\nC1,5,100,E8").encode(
+        "latin-1"
+    )  # no #close, torn last line
     path = archive / "mr-orange" / "L0000007.LOG"
     path.write_bytes(torn)
     sidecar = path.with_name(path.name + ".torn")
     sidecar.write_text(json.dumps({"sha256": "0" * 64, "reason": "x"}))
     sink = dec.FakeSink()
     assert run(config, sink) == 1  # the sidecar is for other bytes
-    sidecar.write_text(json.dumps({"sha256": hashlib.sha256(torn).hexdigest(), "reason": "stable twice"}))
+    sidecar.write_text(
+        json.dumps(
+            {"sha256": hashlib.sha256(torn).hexdigest(), "reason": "stable twice"}
+        )
+    )
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     (marker,) = sink.tables["chunks"]
-    assert (marker["result"], marker["detail"], marker["frames"]) == ("ok", "torn: stable twice", 7)
+    assert (marker["result"], marker["detail"], marker["frames"]) == (
+        "ok",
+        "torn: stable twice",
+        7,
+    )
 
 
 def test_a_chunk_sealed_by_the_next_boot_decodes_like_a_clean_one(setup) -> None:
     """F2c R5: `#close,…,recovered` is a sealed chunk, written by the boot after a
     power cut. It decodes in full and is marked ok, exactly like `rotate`."""
     archive, _, config = setup
-    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:-1], "#close,@1100,recovered"])
+    write_chunk(
+        archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:-1], "#close,@1100,recovered"]
+    )
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     (marker,) = sink.tables["chunks"]
     assert marker["result"] == "ok"
     assert len(sink.tables["frames"]) == 7
-    got = {s["signal"]: s["value"] for s in sink.tables["signals"] if s["signal"] != "DEMO_MUX.Mux"}
+    got = {
+        s["signal"]: s["value"]
+        for s in sink.tables["signals"]
+        if s["signal"] != "DEMO_MUX.Mux"
+    }
     assert got == pytest.approx(EXPECTED_SIGNALS)
 
 
 def test_gaps_are_recorded(setup) -> None:
     archive, _, config = setup
-    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:5], "#gap,@1005,3,12000,2,4", *FIXTURE[5:]])
+    write_chunk(
+        archive / "mr-orange",
+        "L0000007.LOG",
+        [*FIXTURE[:5], "#gap,@1005,3,12000,2,4", *FIXTURE[5:]],
+    )
     sink = dec.FakeSink()
     assert run(config, sink) == 0
     assert sink.tables["chunks"][0]["gaps"] == 1
@@ -471,7 +577,13 @@ def test_gaps_are_recorded(setup) -> None:
 def test_a_reused_seq_is_a_new_chunk_key(setup) -> None:
     """After a card erase, seq restarts: same seq, different content → different key."""
     archive, _, config = setup
-    write_chunk(archive / "mr-orange", "L0000008.LOG", with_seq([*FIXTURE[:4], "C1,@1000,100,0000000000000000", "#close,@2000,rotate"], 7))
+    write_chunk(
+        archive / "mr-orange",
+        "L0000008.LOG",
+        with_seq(
+            [*FIXTURE[:4], "C1,@1000,100,0000000000000000", "#close,@2000,rotate"], 7
+        ),
+    )
     sink = dec.FakeSink()
     run(config, sink)
     keys = {c["chunk"] for c in sink.tables["chunks"]}
@@ -487,7 +599,12 @@ def three_chunks(archive: Path) -> None:
 
 
 def edit_dbc(dbc: Path) -> None:
-    dbc.write_text(dbc.read_text().replace("Speed : 0|16@1+ (0.01,0)", "Speed : 0|16@1+ (0.1,0)"))
+    dbc.write_text(
+        dbc.read_text(encoding=None).replace(
+            "Speed : 0|16@1+ (0.01,0)", "Speed : 0|16@1+ (0.1,0)"
+        ),
+        encoding=None,
+    )
 
 
 def test_new_chunks_need_no_delete(setup) -> None:
@@ -519,10 +636,15 @@ def test_a_catalog_change_deletes_once_per_table(setup) -> None:
     edit_dbc(dbc)
     lookups = sink.lookups
     assert run(config, sink) == 0
-    assert sink.deletes == [("frames", keys), ("signals", keys)]  # events: none to delete
+    assert sink.deletes == [
+        ("frames", keys),
+        ("signals", keys),
+    ]  # events: none to delete
     assert sink.lookups == lookups + 3  # one batch lookup per table, none per chunk
     assert {t: len(rows) for t, rows in sink.tables.items() if t != "chunks"} == counts
-    speeds = [s["value"] for s in sink.tables["signals"] if s["signal"] == "DEMO_STATUS.Speed"]
+    speeds = [
+        s["value"] for s in sink.tables["signals"] if s["signal"] == "DEMO_STATUS.Speed"
+    ]
     assert speeds == [pytest.approx(100.0)] * 3
 
 
@@ -541,7 +663,9 @@ def test_rows_a_crash_left_are_deleted_before_the_reload(setup, redo: bool) -> N
     assert run(config, sink) == 0
     clean = dec.FakeSink()
     assert run(config, clean) == 0
-    assert {t: len(sink.tables[t]) for t in dec.ROW_TABLES} == {t: len(clean.tables[t]) for t in dec.ROW_TABLES}
+    assert {t: len(sink.tables[t]) for t in dec.ROW_TABLES} == {
+        t: len(clean.tables[t]) for t in dec.ROW_TABLES
+    }
 
 
 def test_rows_of_files_not_redone_stay(setup) -> None:
@@ -551,7 +675,9 @@ def test_rows_of_files_not_redone_stay(setup) -> None:
     three_chunks(archive)
     sink = dec.FakeSink()
     assert run(config, sink) == 0
-    pruned = next(c["chunk"] for c in sink.tables["chunks"] if c["file"] == "L0000009.LOG")
+    pruned = next(
+        c["chunk"] for c in sink.tables["chunks"] if c["file"] == "L0000009.LOG"
+    )
     (archive / "mr-orange" / "L0000009.LOG").unlink()
     edit_dbc(dbc)
     assert run(config, sink) == 0
@@ -566,7 +692,9 @@ def test_a_redone_file_loses_the_rows_of_its_previous_key(setup) -> None:
     archive, dbc, config = setup
     sink = dec.FakeSink()
     assert run(config, sink) == 0
-    write_chunk(archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:-1], "#close,@2001,rotate"])
+    write_chunk(
+        archive / "mr-orange", "L0000007.LOG", [*FIXTURE[:-1], "#close,@2001,rotate"]
+    )
     edit_dbc(dbc)
     assert run(config, sink) == 0
     assert len({r["chunk"] for r in sink.tables["frames"]}) == 1
@@ -601,7 +729,9 @@ def test_archive_is_untouched(setup) -> None:
 
 def test_partials_are_not_loaded(setup) -> None:
     archive, _, config = setup
-    (archive / "mr-orange" / "L0000008.LOG.part").write_bytes(b"#sdlog,2,8,@0,2026.7.0\n")
+    (archive / "mr-orange" / "L0000008.LOG.part").write_bytes(
+        b"#sdlog,2,8,@0,2026.7.0\n"
+    )
     sink = dec.FakeSink()
     run(config, sink)
     assert [c["file"] for c in sink.tables["chunks"]] == ["L0000007.LOG"]
@@ -618,7 +748,7 @@ def test_exit_status(setup, case: str, code: int) -> None:
 
 def test_a_held_lock_skips(setup, capsys) -> None:
     _, _, config = setup
-    with open(str(config) + ".lock", "a") as held:
+    with Path(str(config) + ".lock").open("a", encoding=None) as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         sink = dec.FakeSink()
         assert run(config, sink) == 0
@@ -672,8 +802,13 @@ def test_the_example_config_loads(tmp_path: Path) -> None:
     text = deploy.joinpath("decode.example.toml").read_text()
     for placeholder, real in {
         "/path/to/consuming-project/vehicles/demo/dbc/ev.dbc": MINI_DBC,
-        "/path/to/consuming-project/vehicles/demo/uds/mini.dcat": root / "tests" / "uds" / "fixtures" / "mini.dcat",
-        "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml": deploy / "names.example.toml",
+        "/path/to/consuming-project/vehicles/demo/uds/mini.dcat": root
+        / "tests"
+        / "uds"
+        / "fixtures"
+        / "mini.dcat",
+        "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml": deploy
+        / "names.example.toml",
     }.items():
         assert placeholder in text
         text = text.replace(placeholder, str(real))
@@ -688,7 +823,9 @@ def test_the_example_config_loads(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ ClickHouse round trip (optional)
 
 
-@pytest.mark.skipif(not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set")
+@pytest.mark.skipif(
+    not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set"
+)
 def test_clickhouse_round_trip(setup) -> None:
     _, dbc, config = setup
     url = os.environ["SDLOG_CLICKHOUSE_URL"]
@@ -706,21 +843,33 @@ def test_clickhouse_round_trip(setup) -> None:
                 f"SELECT signal, toString(value) FROM {database}.signals WHERE signal != 'DEMO_MUX.Mux' FORMAT TSV"
             ).splitlines()
         )
-        assert {k: float(v) for k, v in values.items()} == pytest.approx(EXPECTED_SIGNALS)
-        utc = sink._query(f"SELECT groupArray(toString(utc)) FROM (SELECT utc FROM {database}.frames WHERE id IN (256, 512) ORDER BY utc)").strip()
+        assert {k: float(v) for k, v in values.items()} == pytest.approx(
+            EXPECTED_SIGNALS
+        )
+        utc = sink._query(
+            f"SELECT groupArray(toString(utc)) FROM (SELECT utc FROM {database}.frames WHERE id IN (256, 512) ORDER BY utc)"
+        ).strip()
         assert utc == "['1970-01-01 00:00:00.999','1970-01-01 00:00:01.000']"
-        assert sink.coverage("mr-orange", dec.catalog_hash(dec.load_config(config).devices[0])) == (5, 6)
-        bounds = sink._query(f"SELECT toString(utc_min), toString(utc_max) FROM {database}.chunks FORMAT TSV").strip()
+        assert sink.coverage(
+            "mr-orange", dec.catalog_hash(dec.load_config(config).devices[0])
+        ) == (5, 6)
+        bounds = sink._query(
+            f"SELECT toString(utc_min), toString(utc_max) FROM {database}.chunks FORMAT TSV"
+        ).strip()
         assert bounds == "1970-01-01 00:00:00.999\t1970-01-01 00:00:01.999"
         dbc.write_text(dbc.read_text().replace("(0.01,0)", "(0.1,0)"))
         assert run(config, sink) == 0
-        speed = sink._query(f"SELECT groupArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'").strip()
+        speed = sink._query(
+            f"SELECT groupArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'"
+        ).strip()
         assert speed == "[100]"
     finally:
         sink._query(f"DROP DATABASE IF EXISTS {database}")
 
 
-@pytest.mark.skipif(not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set")
+@pytest.mark.skipif(
+    not os.environ.get("SDLOG_CLICKHOUSE_URL"), reason="SDLOG_CLICKHOUSE_URL not set"
+)
 def test_clickhouse_few_deletes(setup) -> None:
     """D17/D18 against a real ClickHouse: new chunks issue no DELETE, a catalog change issues
     one per table that holds rows (frames, signals) for all three chunks and ends without
@@ -736,10 +885,12 @@ def test_clickhouse_few_deletes(setup) -> None:
 
     def deletes() -> int:
         sink._query("SYSTEM FLUSH LOGS")
-        return int(sink._query(
-            "SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND query_kind = 'Delete'"
-            f" AND has(databases, '{database}')"
-        ))
+        return int(
+            sink._query(
+                "SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND query_kind = 'Delete'"
+                f" AND has(databases, '{database}')"
+            )
+        )
 
     try:
         assert run(config, sink) == 0
@@ -755,11 +906,32 @@ def test_clickhouse_few_deletes(setup) -> None:
         assert run(config, sink) == 0
         assert deletes() == 2  # frames and signals, once each, for all three chunks
         assert (count("frames"), count("signals")) == before
-        speed = sink._query(f"SELECT groupUniqArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'").strip()
+        speed = sink._query(
+            f"SELECT groupUniqArray(value) FROM {database}.signals WHERE signal = 'DEMO_STATUS.Speed'"
+        ).strip()
         assert speed == "[100]"
         # a crash leftover under a new chunk's key: rows, no marker
         write_chunk(archive / "mr-orange", "L0000010.LOG", with_seq(FIXTURE, 10))
-        sink.insert("frames", dec.FRAME_COLUMNS, [("mr-orange", "10-" + hashlib.sha256((archive / "mr-orange" / "L0000010.LOG").read_bytes()).hexdigest()[:12], "C", "EV", None, 1, "-", 0, 0)])
+        sink.insert(
+            "frames",
+            dec.FRAME_COLUMNS,
+            [
+                (
+                    "mr-orange",
+                    "10-"
+                    + hashlib.sha256(
+                        (archive / "mr-orange" / "L0000010.LOG").read_bytes()
+                    ).hexdigest()[:12],
+                    "C",
+                    "EV",
+                    None,
+                    1,
+                    "-",
+                    0,
+                    0,
+                )
+            ],
+        )
         assert run(config, sink) == 0
         assert deletes() == 3
         assert count("frames") == 4 * 7

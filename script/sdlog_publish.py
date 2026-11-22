@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Publish the sd_logger pipeline's state to Home Assistant (docs/sdlog-publish-spec.md).
 
 A long-running service. Every ``interval_s`` it collects
@@ -24,15 +25,15 @@ Only this tool needs ``paho-mqtt`` (https://pypi.org/project/paho-mqtt/), and on
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 import importlib.util
 import json
+from pathlib import Path
 import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 try:
     import tomllib
@@ -46,7 +47,9 @@ GAP_WINDOW = timedelta(days=7)
 def _load(name: str):
     if name in sys.modules:
         return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).absolute().parent / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).absolute().parent / f"{name}.py"
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -56,8 +59,16 @@ def _load(name: str):
 dec = _load("sdlog_decode")
 
 _TOP_KEYS = {
-    "node", "decode_config", "fleet_state", "archive_min_free_mb", "trigger", "interval_s",
-    "expire_after_s", "discovery_prefix", "mqtt", "vehicle",
+    "node",
+    "decode_config",
+    "fleet_state",
+    "archive_min_free_mb",
+    "trigger",
+    "interval_s",
+    "expire_after_s",
+    "discovery_prefix",
+    "mqtt",
+    "vehicle",
 }
 _MQTT_KEYS = {"host", "port", "user", "password_file"}
 _VEHICLE_KEYS = {"name", "sensor"}
@@ -103,7 +114,8 @@ class Config:
 
 def load_config(path: Path) -> Config:
     try:
-        raw = tomllib.loads(path.read_text())
+        # Preserve the interpreter default codec, including UTF-8 mode.
+        raw = tomllib.loads(path.read_text(encoding=None))
     except (OSError, tomllib.TOMLDecodeError) as err:
         raise ConfigError(f"{path}: {err}") from None
     unknown = set(raw) - _TOP_KEYS
@@ -142,16 +154,26 @@ def load_config(path: Path) -> Config:
         for s in entry.get("sensor", []):
             unknown = set(s) - _SENSOR_KEYS
             if unknown:
-                raise ConfigError(f"vehicle {name!r} sensor: unknown key(s): {', '.join(sorted(unknown))}")
+                raise ConfigError(
+                    f"vehicle {name!r} sensor: unknown key(s): {', '.join(sorted(unknown))}"
+                )
             key = s.get("key")
             if not isinstance(key, str) or not _KEY.match(key):
-                raise ConfigError(f"vehicle {name!r}: sensor key {key!r} is not a lowercase identifier")
+                raise ConfigError(
+                    f"vehicle {name!r}: sensor key {key!r} is not a lowercase identifier"
+                )
             if key in keys:
                 raise ConfigError(f"vehicle {name!r}: duplicate sensor key {key!r}")
             keys.add(key)
             if not s.get("signal") or not s.get("name"):
-                raise ConfigError(f"vehicle {name!r} sensor {key!r}: name and signal are required")
-            sensors.append(Sensor(key, s["name"], s["signal"], s.get("unit"), s.get("device_class")))
+                raise ConfigError(
+                    f"vehicle {name!r} sensor {key!r}: name and signal are required"
+                )
+            sensors.append(
+                Sensor(
+                    key, s["name"], s["signal"], s.get("unit"), s.get("device_class")
+                )
+            )
         vehicles.append(Vehicle(name, tuple(sensors)))
     return Config(
         node=node,
@@ -178,7 +200,9 @@ class ClickHouseDb:
 
     def __init__(self, decode_config) -> None:
         self.cfg = decode_config
-        self.sink = dec.ClickHouseSink(decode_config.clickhouse_url, decode_config.database, timeout_s=30.0)
+        self.sink = dec.ClickHouseSink(
+            decode_config.clickhouse_url, decode_config.database, timeout_s=30.0
+        )
         self.db = decode_config.database
 
     def ping(self) -> None:
@@ -228,20 +252,35 @@ class FakeSinkDb:
     def last_utc(self, device):
         self.sink._check()
         # The tables hold ms (decode spec §2); this class answers in µs like the real one.
-        values = [f["utc"] for f in self.sink.tables["frames"] if f["device"] == device and f["utc"] is not None]
+        values = [
+            f["utc"]
+            for f in self.sink.tables["frames"]
+            if f["device"] == device and f["utc"] is not None
+        ]
         return max(values) * 1000 if values else None
 
     def gaps_since(self, device, since_us):
         self.sink._check()
         latest = {}
         for c in self.sink.tables["chunks"]:
-            if c["device"] == device and (c["file"] not in latest or c["decoded_at"] >= latest[c["file"]]["decoded_at"]):
+            if c["device"] == device and (
+                c["file"] not in latest
+                or c["decoded_at"] >= latest[c["file"]]["decoded_at"]
+            ):
                 latest[c["file"]] = c
-        return sum(c["gaps"] for c in latest.values() if (c["utc_max"] or 0) * 1000 >= since_us)
+        return sum(
+            c["gaps"] for c in latest.values() if (c["utc_max"] or 0) * 1000 >= since_us
+        )
 
     def latest(self, vehicle, signal):
         self.sink._check()
-        rows = [r for r in self.sink.tables["signals"] if r["vehicle"] == vehicle and r["signal"] == signal and r["utc"] is not None]
+        rows = [
+            r
+            for r in self.sink.tables["signals"]
+            if r["vehicle"] == vehicle
+            and r["signal"] == signal
+            and r["utc"] is not None
+        ]
         if not rows:
             return None
         best = max(rows, key=lambda r: r["utc"])
@@ -254,7 +293,7 @@ class FakeSinkDb:
 def _iso_us(utc_us: int | None) -> str | None:
     if utc_us is None:
         return None
-    return datetime.fromtimestamp(utc_us / 1e6, tz=timezone.utc).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(utc_us / 1e6, tz=UTC).isoformat(timespec="seconds")
 
 
 def _fleet(config: Config, device: str) -> dict:
@@ -265,13 +304,19 @@ def _fleet(config: Config, device: str) -> dict:
         return {"last_pull": None, "result": None, "verdict": None}
     last = beat.get("last_success")
     if last:
-        last = datetime.fromisoformat(last).astimezone(timezone.utc).isoformat(timespec="seconds")
-    return {"last_pull": last, "result": beat.get("last_result"), "verdict": beat.get("verdict")}
+        last = (
+            datetime.fromisoformat(last).astimezone(UTC).isoformat(timespec="seconds")
+        )
+    return {
+        "last_pull": last,
+        "result": beat.get("last_result"),
+        "verdict": beat.get("verdict"),
+    }
 
 
 def collect(config: Config, db, now: datetime | None = None) -> dict:
     """The whole state as one JSON-able dict. Reads only (P10)."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     reasons: list[str] = []
     db_ok = True
     try:
@@ -286,13 +331,22 @@ def collect(config: Config, db, now: datetime | None = None) -> dict:
     devices = {}
     for device in config.decode.devices:
         fleet = _fleet(config, device.name)
-        entry = {"last_pull": fleet["last_pull"], "result": fleet["result"],
-                 "last_data": None, "ok": None, "defect": None, "pending": None, "gaps_7d": None}
+        entry = {
+            "last_pull": fleet["last_pull"],
+            "result": fleet["result"],
+            "last_data": None,
+            "ok": None,
+            "defect": None,
+            "pending": None,
+            "gaps_7d": None,
+        }
         if fleet["verdict"] == "error":
             reasons.append(f"collect:{device.name}")
         if db_ok:
             try:
-                entry["ok"], entry["defect"], entry["pending"] = db.device_status(device)
+                entry["ok"], entry["defect"], entry["pending"] = db.device_status(
+                    device
+                )
                 entry["last_data"] = _iso_us(db.last_utc(device.name))
                 entry["gaps_7d"] = db.gaps_since(device.name, since_us)
             except (dec.SinkUnavailable, dec.SinkError):
@@ -312,7 +366,10 @@ def collect(config: Config, db, now: datetime | None = None) -> dict:
                     hit = db.latest(vehicle.name, sensor.signal)
                 except (dec.SinkUnavailable, dec.SinkError):
                     hit = None
-            values[sensor.key] = {"value": hit[0] if hit else None, "time": _iso_us(hit[1]) if hit else None}
+            values[sensor.key] = {
+                "value": hit[0] if hit else None,
+                "time": _iso_us(hit[1]) if hit else None,
+            }
         vehicles[vehicle.name] = values
     return {
         "problem": "ON" if reasons else "OFF",
@@ -346,43 +403,110 @@ def discovery(config: Config) -> list[tuple[str, dict]]:
             body["expire_after"] = config.expire_after_s
         out.append((f"{config.discovery_prefix}/{component}/{node}/{oid}/config", body))
 
-    add("binary_sensor", _oid(node, "problem"), {
-        "name": "Problem", "device_class": "problem", "value_template": "{{ value_json.problem }}",
-        "payload_on": "ON", "payload_off": "OFF", "json_attributes_topic": state,
-        "json_attributes_template": "{{ {'reasons': value_json.reasons, 'updated': value_json.updated} | tojson }}",
-        "device": hub,
-    })
-    add("sensor", _oid(node, "archive_free"), {
-        "name": "Archive free", "unit_of_measurement": "GB", "value_template": "{{ value_json.archive_free_gb }}",
-        "entity_category": "diagnostic", "device": hub,
-    })
+    add(
+        "binary_sensor",
+        _oid(node, "problem"),
+        {
+            "name": "Problem",
+            "device_class": "problem",
+            "value_template": "{{ value_json.problem }}",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "json_attributes_topic": state,
+            "json_attributes_template": "{{ {'reasons': value_json.reasons, 'updated': value_json.updated} | tojson }}",
+            "device": hub,
+        },
+    )
+    add(
+        "sensor",
+        _oid(node, "archive_free"),
+        {
+            "name": "Archive free",
+            "unit_of_measurement": "GB",
+            "value_template": "{{ value_json.archive_free_gb }}",
+            "entity_category": "diagnostic",
+            "device": hub,
+        },
+    )
     for device in config.decode.devices:
         d = device.name
         dev = {"identifiers": [_oid(node, d)], "name": d, "via_device": node}
         path = f"value_json.devices['{d}']"
-        add("sensor", _oid(node, d, "last_pull"), {"name": "Last pull", "device_class": "timestamp",
-            "value_template": f"{{{{ {path}.last_pull }}}}", "device": dev})
-        add("sensor", _oid(node, d, "result"), {"name": "Pull result",
-            "value_template": f"{{{{ {path}.result }}}}", "device": dev})
-        add("sensor", _oid(node, d, "last_data"), {"name": "Last data", "device_class": "timestamp",
-            "value_template": f"{{{{ {path}.last_data }}}}", "device": dev})
-        for key, label in (("pending", "Chunks pending"), ("defect", "Chunks defect"), ("gaps_7d", "Gaps 7 days")):
-            add("sensor", _oid(node, d, key), {"name": label, "entity_category": "diagnostic",
-                "value_template": f"{{{{ {path}.{key} }}}}", "device": dev})
+        add(
+            "sensor",
+            _oid(node, d, "last_pull"),
+            {
+                "name": "Last pull",
+                "device_class": "timestamp",
+                "value_template": f"{{{{ {path}.last_pull }}}}",
+                "device": dev,
+            },
+        )
+        add(
+            "sensor",
+            _oid(node, d, "result"),
+            {
+                "name": "Pull result",
+                "value_template": f"{{{{ {path}.result }}}}",
+                "device": dev,
+            },
+        )
+        add(
+            "sensor",
+            _oid(node, d, "last_data"),
+            {
+                "name": "Last data",
+                "device_class": "timestamp",
+                "value_template": f"{{{{ {path}.last_data }}}}",
+                "device": dev,
+            },
+        )
+        for key, label in (
+            ("pending", "Chunks pending"),
+            ("defect", "Chunks defect"),
+            ("gaps_7d", "Gaps 7 days"),
+        ):
+            add(
+                "sensor",
+                _oid(node, d, key),
+                {
+                    "name": label,
+                    "entity_category": "diagnostic",
+                    "value_template": f"{{{{ {path}.{key} }}}}",
+                    "device": dev,
+                },
+            )
     for vehicle in config.vehicles:
-        dev = {"identifiers": [_oid(node, "vehicle", vehicle.name)], "name": vehicle.name, "via_device": node}
+        dev = {
+            "identifiers": [_oid(node, "vehicle", vehicle.name)],
+            "name": vehicle.name,
+            "via_device": node,
+        }
         for sensor in vehicle.sensors:
             path = f"value_json.vehicles['{vehicle.name}'].{sensor.key}"
-            payload = {"name": sensor.name, "value_template": f"{{{{ {path}.value }}}}",
-                       "json_attributes_topic": state,
-                       "json_attributes_template": f"{{{{ {{'time': {path}.time}} | tojson }}}}", "device": dev}
+            payload = {
+                "name": sensor.name,
+                "value_template": f"{{{{ {path}.value }}}}",
+                "json_attributes_topic": state,
+                "json_attributes_template": f"{{{{ {{'time': {path}.time}} | tojson }}}}",
+                "device": dev,
+            }
             if sensor.unit:
                 payload["unit_of_measurement"] = sensor.unit
             if sensor.device_class:
                 payload["device_class"] = sensor.device_class
             add("sensor", _oid(node, vehicle.name, sensor.key), payload)
-    add("button", _oid(node, "collect_now"), {"name": "Collect now", "command_topic": f"{node}/cmd/collect",
-        "payload_press": "PRESS", "device": hub}, expire=False)
+    add(
+        "button",
+        _oid(node, "collect_now"),
+        {
+            "name": "Collect now",
+            "command_topic": f"{node}/cmd/collect",
+            "payload_press": "PRESS",
+            "device": hub,
+        },
+        expire=False,
+    )
     for _, body in out:
         if "command_topic" in body:
             body.pop("state_topic", None)
@@ -411,21 +535,33 @@ class Publisher:
 
     def publish_state(self) -> dict:
         state = collect(self.config, self.db)
-        self.client.publish(f"{self.config.node}/state", json.dumps(state), qos=1, retain=True)
+        self.client.publish(
+            f"{self.config.node}/state", json.dumps(state), qos=1, retain=True
+        )
         return state
 
 
-def cmd_run(config: Config) -> int:  # pragma: no cover - wiring around paho, exercised on the host
+def cmd_run(
+    config: Config,
+) -> int:  # pragma: no cover - wiring around paho, exercised on the host
     import paho.mqtt.client as mqtt
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{config.node}-publish")
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2, client_id=f"{config.node}-publish"
+    )
     if config.mqtt_user:
-        password = config.mqtt_password_file.read_text().strip() if config.mqtt_password_file else None
+        password = (
+            config.mqtt_password_file.read_text().strip()
+            if config.mqtt_password_file
+            else None
+        )
         client.username_pw_set(config.mqtt_user, password)
     publisher = Publisher(config, client, ClickHouseDb(config.decode))
     client.will_set(publisher.avail, "offline", qos=1, retain=True)
     client.on_connect = lambda c, u, flags, rc, props: (
-        print(f"mqtt connect failed: {rc}", file=sys.stderr) if rc.is_failure else publisher.on_connect()
+        print(f"mqtt connect failed: {rc}", file=sys.stderr)
+        if rc.is_failure
+        else publisher.on_connect()
     )
     client.on_message = lambda c, u, msg: publisher.on_message(msg.topic, msg.payload)
     client.reconnect_delay_set(1, 60)

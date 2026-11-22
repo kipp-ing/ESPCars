@@ -29,16 +29,16 @@ Exit codes: 0 normal, 2 nothing attached.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import re
 import sys
 import threading
 import time
-from pathlib import Path
 
 import serial
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ports import KNOWN_MACS, enumerate_boards  # noqa: E402 — sibling script
+from ports import KNOWN_MACS, enumerate_boards
 
 # "[I][topo:208]: seg1 [20:6E:F1:0A:D1:E0.bus0] = 94:B9:7E:E4:80:C0.bus0(0x300)"
 # "[W][topo:205]: seg2 [20:6E:F1:0A:D1:E0.bus1] = nothing"
@@ -60,7 +60,9 @@ def nice(mac: str) -> str:
     return f"{name}" if name else mac
 
 
-def reader(port: str, board: str, sink: list, lock: threading.Lock, stop: threading.Event) -> None:
+def reader(
+    port: str, board: str, sink: list, lock: threading.Lock, stop: threading.Event
+) -> None:
     """Follow one console forever, appending parsed lines to `sink`.
 
     DTR/RTS are deasserted *before* open(), never after: on the C6's
@@ -76,7 +78,7 @@ def reader(port: str, board: str, sink: list, lock: threading.Lock, stop: thread
         s.dtr = False
         s.rts = False
         s.open()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- Keep port failures isolated so other boards are still reported.
         with lock:
             sink.append(("error", board, str(exc)))
         return
@@ -84,18 +86,20 @@ def reader(port: str, board: str, sink: list, lock: threading.Lock, stop: thread
     while not stop.is_set():
         try:
             buf += s.read(4096)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- Keep port failures isolated so other boards are still reported.
             with lock:
                 sink.append(("error", board, str(exc)))
             break
         while b"\n" in buf:
             raw, _, buf = buf.partition(b"\n")
-            line = re.sub(r"\x1b\[[0-9;]*m", "", raw.decode("utf-8", "replace")).rstrip()
+            line = re.sub(
+                r"\x1b\[[0-9;]*m", "", raw.decode("utf-8", "replace")
+            ).rstrip()
             with lock:
                 sink.append(("line", board, line))
-    try:
+    try:  # noqa: SIM105 -- Retain the bench cleanup path without changing exception handling.
         s.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 -- Cleanup must not hide a captured port failure.
         pass
 
 
@@ -129,7 +133,9 @@ def render(model: dict, names: dict) -> str:
         if len(group) == 1 and not live:
             lines.append(f"  {DIM}loose{RESET}  {label(group[0], names)}")
         else:
-            lines.append(f"  {BOLD}wire{RESET}   " + "  ↔  ".join(label(n, names) for n in group))
+            lines.append(
+                f"  {BOLD}wire{RESET}   " + "  ↔  ".join(label(n, names) for n in group)
+            )
     return "\n".join(lines) if lines else "  (nothing reporting yet)"
 
 
@@ -143,7 +149,9 @@ def label(node: str, names: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=None, help="stop after N seconds")
-    ap.add_argument("--once", action="store_true", help="print one settled picture and exit")
+    ap.add_argument(
+        "--once", action="store_true", help="print one settled picture and exit"
+    )
     args = ap.parse_args()
 
     boards = [b for b in enumerate_boards() if b["name"]]
@@ -155,7 +163,9 @@ def main() -> int:
     lock = threading.Lock()
     stop = threading.Event()
     threads = [
-        threading.Thread(target=reader, args=(b["port"], b["name"], sink, lock, stop), daemon=True)
+        threading.Thread(
+            target=reader, args=(b["port"], b["name"], sink, lock, stop), daemon=True
+        )
         for b in boards
     ]
     for t in threads:

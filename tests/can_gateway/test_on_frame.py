@@ -119,8 +119,12 @@ def test_on_frame_coexists_with_the_port_state_triggers(set_core_config) -> None
                 port(
                     PORT_A,
                     on_frame=[SNIFF],
-                    on_bus_off={"then": [{"lambda": cv.Lambda('ESP_LOGW("t", "off");')}]},
-                    on_recovered={"then": [{"lambda": cv.Lambda('ESP_LOGI("t", "up");')}]},
+                    on_bus_off={
+                        "then": [{"lambda": cv.Lambda('ESP_LOGW("t", "off");')}]
+                    },
+                    on_recovered={
+                        "then": [{"lambda": cv.Lambda('ESP_LOGI("t", "up");')}]
+                    },
                 ),
                 dict(PORT_B),
             ]

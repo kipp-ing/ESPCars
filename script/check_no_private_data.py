@@ -16,10 +16,10 @@ Run via `script/check.sh`, or directly:
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import subprocess
 import sys
-from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SELF = Path(__file__).resolve()
@@ -38,22 +38,75 @@ SELF = Path(__file__).resolve()
 # changes nothing about what the pattern matches, but breaks the literal byte
 # run in this file's own source.
 PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"smart[ _-]?451", re.I), "names the real bench vehicle by manufacturer and chassis code"),
-    (re.compile(r"fort(?:)two", re.I), "names the real bench vehicle's marketing name"),
-    (re.compile(r"\bsmart[ _-]?ed\b", re.I), "names the real bench vehicle's marketing name, chassis code omitted"),
-    (re.compile(r"\bdaim(?:)ler\b", re.I), "names the real vehicle's manufacturer"),
-    (re.compile(r"mcc[-_ ]?smart", re.I), "names the real vehicle's manufacturing entity"),
-    (re.compile(r"\bov(?:)ms\b", re.I), "names a real reverse-engineering project tied to the bench vehicle"),
-    (re.compile(r"ed_(?:)bmsdiag", re.I), "names a real reverse-engineering project tied to the bench vehicle"),
-    (re.compile(r"cbf.convert", re.I), "names the private factory-database conversion tool by name"),
-    (re.compile(r"/dev/repos/(cbf.convert|smart.diag)\b"), "hardcodes an absolute path into a sibling private repo"),
-    (re.compile(r"(?<!private/)catalogs/bms(?:)-live\."), "references the real compiled bench catalog at a PUBLIC path"),
-    (re.compile(r"\bPNHV(?:)_"), "names real CAN signal identifiers from the bench vehicle's factory DBC"),
-    (re.compile(r"smart.ev.battery.rig", re.I), "names a real sibling simulator project tied to the bench vehicle"),
+    (
+        re.compile(r"smart[ _-]?451", re.IGNORECASE),
+        "names the real bench vehicle by manufacturer and chassis code",
+    ),
+    (
+        re.compile(r"fort(?:)two", re.IGNORECASE),
+        "names the real bench vehicle's marketing name",
+    ),
+    (
+        re.compile(r"\bsmart[ _-]?ed\b", re.IGNORECASE),
+        "names the real bench vehicle's marketing name, chassis code omitted",
+    ),
+    (
+        re.compile(r"\bdaim(?:)ler\b", re.IGNORECASE),
+        "names the real vehicle's manufacturer",
+    ),
+    (
+        re.compile(r"mcc[-_ ]?smart", re.IGNORECASE),
+        "names the real vehicle's manufacturing entity",
+    ),
+    (
+        re.compile(r"\bov(?:)ms\b", re.IGNORECASE),
+        "names a real reverse-engineering project tied to the bench vehicle",
+    ),
+    (
+        re.compile(r"ed_(?:)bmsdiag", re.IGNORECASE),
+        "names a real reverse-engineering project tied to the bench vehicle",
+    ),
+    (
+        re.compile(r"cbf.convert", re.IGNORECASE),
+        "names the private factory-database conversion tool by name",
+    ),
+    (
+        re.compile(r"/dev/repos/(cbf.convert|smart.diag)\b"),
+        "hardcodes an absolute path into a sibling private repo",
+    ),
+    (
+        re.compile(r"(?<!private/)catalogs/bms(?:)-live\."),
+        "references the real compiled bench catalog at a PUBLIC path",
+    ),
+    (
+        re.compile(r"\bPNHV(?:)_"),
+        "names real CAN signal identifiers from the bench vehicle's factory DBC",
+    ),
+    (
+        re.compile(r"smart.ev.battery.rig", re.IGNORECASE),
+        "names a real sibling simulator project tied to the bench vehicle",
+    ),
 ]
 
 # Extensions worth scanning as text; skip binaries entirely.
-TEXT_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".h", ".hpp", ".cpp", ".cc", ".json", ".txt", ".sh", ".cfg", ".ini", ".toml", ".service", ".timer"}
+TEXT_SUFFIXES = {
+    ".py",
+    ".md",
+    ".yaml",
+    ".yml",
+    ".h",
+    ".hpp",
+    ".cpp",
+    ".cc",
+    ".json",
+    ".txt",
+    ".sh",
+    ".cfg",
+    ".ini",
+    ".toml",
+    ".service",
+    ".timer",
+}
 
 
 def tracked_files() -> list[Path]:
@@ -83,7 +136,9 @@ def main() -> int:
                     violations.append(f"{rel}:{lineno}: {reason}\n    {line.strip()}")
 
     if violations:
-        print("Real/private diagnostic data found in tracked files (docs/CONVENTIONS.md):\n")
+        print(
+            "Real/private diagnostic data found in tracked files (docs/CONVENTIONS.md):\n"
+        )
         print("\n".join(violations))
         print(
             "\nMove real data into the consuming project's repository, or use a "

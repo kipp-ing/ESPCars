@@ -7,7 +7,6 @@ page itself and evaluated as is, so there is no second copy to drift. Skipped wi
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -22,24 +21,37 @@ pytestmark = pytest.mark.skipif(not NODE, reason="node not installed")
 
 
 def _core() -> str:
-    m = re.search(r"/\* portal-core:start.*?/\* portal-core:end \*/", PAGE.read_text(), re.S)
+    m = re.search(
+        r"/\* portal-core:start.*?/\* portal-core:end \*/", PAGE.read_text(), re.DOTALL
+    )
     assert m, "portal-core markers missing"
     return m.group(0)
 
 
 def _run(expr: str):
     """Evaluate `expr` with the core loaded (as `C`) and return its JSON value."""
-    js = _core() + "\nvar C = globalThis.PortalCore;\nprocess.stdout.write(JSON.stringify(" + expr + "));\n"
-    r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    js = (
+        _core()
+        + "\nvar C = globalThis.PortalCore;\nprocess.stdout.write(JSON.stringify("
+        + expr
+        + "));\n"
+    )
+    r = subprocess.run(
+        [NODE, "-e", js], capture_output=True, text=True, timeout=30, check=False
+    )
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
 def _hold(tag: str, typ: str, ago) -> bool:
-    return _run(f"C.holdsRepaint({json.dumps({'tag': tag, 'type': typ, 'touched_ago_ms': ago})})")
+    return _run(
+        f"C.holdsRepaint({json.dumps({'tag': tag, 'type': typ, 'touched_ago_ms': ago})})"
+    )
 
 
-@pytest.mark.parametrize("tag,typ", [("INPUT", "checkbox"), ("BUTTON", "submit"), ("A", "")])
+@pytest.mark.parametrize(
+    "tag,typ", [("INPUT", "checkbox"), ("BUTTON", "submit"), ("A", "")]
+)
 def test_toggle_and_button_never_hold_the_repaint(tag, typ) -> None:
     assert _hold(tag, typ, 0) is False
 
@@ -58,13 +70,25 @@ def test_nothing_focused_holds_nothing() -> None:
 
 
 ENVELOPE = {
-    "schema_version": 2, "seq": 7,
+    "schema_version": 2,
+    "seq": 7,
     "served_by": {"board": "demo", "uptime_ms": 15800},
-    "tree": {"id": "car", "actions": [], "provenance": None, "children": [
-        {"id": "car.dev", "provenance": {"age_ms": 572},
-         "actions": [{"key": "go", "result": {"state": "accepted", "age_ms": 7600}},
-                     {"key": "idle", "result": None}],
-         "children": []}]},
+    "tree": {
+        "id": "car",
+        "actions": [],
+        "provenance": None,
+        "children": [
+            {
+                "id": "car.dev",
+                "provenance": {"age_ms": 572},
+                "actions": [
+                    {"key": "go", "result": {"state": "accepted", "age_ms": 7600}},
+                    {"key": "idle", "result": None},
+                ],
+                "children": [],
+            }
+        ],
+    },
 }
 
 
@@ -77,8 +101,10 @@ def test_uptime_and_result_age_advance_while_held() -> None:
 
 
 def test_provenance_age_is_not_advanced_and_input_is_not_mutated() -> None:
-    out = _run(f"(function(){{var e={json.dumps(ENVELOPE)}; var o=C.advanceClocks(e, 3000);"
-               "return [o.tree.children[0].provenance.age_ms, e.served_by.uptime_ms];})()")
+    out = _run(
+        f"(function(){{var e={json.dumps(ENVELOPE)}; var o=C.advanceClocks(e, 3000);"
+        "return [o.tree.children[0].provenance.age_ms, e.served_by.uptime_ms];})()"
+    )
     assert out == [572, 15800]
 
 
@@ -93,6 +119,8 @@ def test_page_refetches_in_full_and_repaints_on_navigation() -> None:
     t = PAGE.read_text()
     assert re.search(r"var REFRESH_MS = \d+;", t)
     assert "C.holdsRepaint(" in t and "C.advanceClocks(" in t
-    assert re.search(r"function readHash\(\) \{[^}]*ae\.blur\(\)", t, re.S)
+    assert re.search(r"function readHash\(\) \{[^}]*ae\.blur\(\)", t, re.DOTALL)
     assert "ctl.blur(); doAction(a, ctl.value)" in t
-    assert "inp.blur(); setb.click();" in t, "Enter in a number field sends and releases the hold"
+    assert "inp.blur(); setb.click();" in t, (
+        "Enter in a number field sends and releases the hold"
+    )

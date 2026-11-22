@@ -13,15 +13,13 @@ from ipaddress import ip_address
 from pathlib import Path
 import sys
 
-import pytest
-
 from homeassistant.components.http.ban import KEY_FAILED_LOGIN_ATTEMPTS
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.setup import async_setup_component
-
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.sdlog_relay.const import CONF_LOGGER_ID, DOMAIN
@@ -57,7 +55,9 @@ def device():
     fake.stop()
 
 
-async def setup_relay(hass: HomeAssistant, tmp_path: Path, entries: dict[str, tuple[str, int]]) -> None:
+async def setup_relay(
+    hass: HomeAssistant, tmp_path: Path, entries: dict[str, tuple[str, int]]
+) -> None:
     hass.config.config_dir = str(tmp_path)
     assert await async_setup_component(hass, "http", HTTP_CONFIG)
     for logger_id, (host, port) in entries.items():
@@ -82,7 +82,9 @@ def device_target(device) -> tuple[str, int]:
 # ------------------------------------------------------------------ R7, R8
 
 
-async def test_relay_requires_auth(hass, hass_client, hass_client_no_auth, device, tmp_path) -> None:
+async def test_relay_requires_auth(
+    hass, hass_client, hass_client_no_auth, device, tmp_path
+) -> None:
     device.add(431)
     await setup_relay(hass, tmp_path, {"car": device_target(device)})
 
@@ -97,12 +99,16 @@ async def test_relay_requires_auth(hass, hass_client, hass_client_no_auth, devic
     assert (await response.json())["device"] == "mr-orange"
 
 
-async def test_relay_any_user_may_pull(hass, hass_client, hass_read_only_access_token, device, tmp_path) -> None:
+async def test_relay_any_user_may_pull(
+    hass, hass_client, hass_read_only_access_token, device, tmp_path
+) -> None:
     name = device.add(431)
     await setup_relay(hass, tmp_path, {"car": device_target(device)})
     client = await hass_client(hass_read_only_access_token)
 
-    response = await client.get(f"/api/sdlog_relay/car/sdlog/f/{name}", headers={"Range": "bytes=0-9"})
+    response = await client.get(
+        f"/api/sdlog_relay/car/sdlog/f/{name}", headers={"Range": "bytes=0-9"}
+    )
     assert response.status == 206
     assert await response.read() == device.chunks[name][:10]
 
@@ -111,10 +117,14 @@ async def test_relay_any_user_may_pull(hass, hass_client, hass_read_only_access_
     assert device.confirmed == [name]
 
 
-async def test_only_ha_auth_counts_a_failed_login(hass, hass_client, hass_client_no_auth, device, tmp_path) -> None:
+async def test_only_ha_auth_counts_a_failed_login(
+    hass, hass_client, hass_client_no_auth, device, tmp_path
+) -> None:
     """One 401 from HA's auth layer is one failed login. Nothing the relay
     answers on its own (404, 400, 502, the firmware 404) is."""
-    await setup_relay(hass, tmp_path, {"car": device_target(device), "other": ("192.0.2.10", 8080)})
+    await setup_relay(
+        hass, tmp_path, {"car": device_target(device), "other": ("192.0.2.10", 8080)}
+    )
     client = await hass_client()
     anonymous = await hass_client_no_auth()
 
@@ -125,7 +135,9 @@ async def test_only_ha_auth_counts_a_failed_login(hass, hass_client, hass_client
     ):
         assert (await client.get(path)).status in (400, 404)
     for _ in range(6):
-        assert (await anonymous.get("/api/sdlog_relay/other/fw/manifest.json")).status == 404
+        assert (
+            await anonymous.get("/api/sdlog_relay/other/fw/manifest.json")
+        ).status == 404
     assert failed_logins(hass) == {}
 
     assert (await anonymous.get("/api/sdlog_relay/car/sdlog/index")).status == 401
@@ -137,11 +149,15 @@ async def test_only_ha_auth_counts_a_failed_login(hass, hass_client, hass_client
 
 async def upload(client, data: bytes, logger: str = "car"):
     return await client.put(
-        f"/api/sdlog_relay/{logger}/fw", params={"version": "1.2.3", "chip_family": "ESP32-C6"}, data=data
+        f"/api/sdlog_relay/{logger}/fw",
+        params={"version": "1.2.3", "chip_family": "ESP32-C6"},
+        data=data,
     )
 
 
-async def test_fw_upload_admin_only(hass, hass_client, hass_read_only_access_token, tmp_path) -> None:
+async def test_fw_upload_admin_only(
+    hass, hass_client, hass_read_only_access_token, tmp_path
+) -> None:
     await setup_relay(hass, tmp_path, {"car": ("127.0.0.1", 8080)})
 
     user = await hass_client(hass_read_only_access_token)
@@ -153,12 +169,18 @@ async def test_fw_upload_admin_only(hass, hass_client, hass_read_only_access_tok
     admin = await hass_client()
     response = await upload(admin, b"image")
     assert response.status == 200
-    md5 = hashlib.md5(b"image").hexdigest()  # noqa: S324
-    assert (tmp_path / "sdlog_relay" / "car" / f"firmware-{md5}.ota.bin").read_bytes() == b"image"
+    md5 = hashlib.md5(b"image").hexdigest()
+    assert (
+        tmp_path / "sdlog_relay" / "car" / f"firmware-{md5}.ota.bin"
+    ).read_bytes() == b"image"
 
 
-async def test_fw_only_for_logger_ip(hass, hass_client, hass_client_no_auth, tmp_path) -> None:
-    await setup_relay(hass, tmp_path, {"car": ("127.0.0.1", 8080), "other": ("192.0.2.10", 8080)})
+async def test_fw_only_for_logger_ip(
+    hass, hass_client, hass_client_no_auth, tmp_path
+) -> None:
+    await setup_relay(
+        hass, tmp_path, {"car": ("127.0.0.1", 8080), "other": ("192.0.2.10", 8080)}
+    )
     admin = await hass_client()
     await upload(admin, b"car-image")
     await upload(admin, b"other-image", logger="other")
@@ -166,11 +188,17 @@ async def test_fw_only_for_logger_ip(hass, hass_client, hass_client_no_auth, tmp
     anonymous = await hass_client_no_auth()
     response = await anonymous.get("/api/sdlog_relay/car/fw/manifest.json")
     assert response.status == 200
-    assert (await response.json())["builds"][0]["ota"]["md5"] == hashlib.md5(b"car-image").hexdigest()  # noqa: S324
-    assert (await anonymous.get("/api/sdlog_relay/other/fw/manifest.json")).status == 404
+    assert (await response.json())["builds"][0]["ota"]["md5"] == hashlib.md5(
+        b"car-image"
+    ).hexdigest()
+    assert (
+        await anonymous.get("/api/sdlog_relay/other/fw/manifest.json")
+    ).status == 404
 
 
-async def test_fw_xff_from_trusted_proxy_not_spoofable(hass, hass_client, hass_client_no_auth, tmp_path) -> None:
+async def test_fw_xff_from_trusted_proxy_not_spoofable(
+    hass, hass_client, hass_client_no_auth, tmp_path
+) -> None:
     """Behind a trusted proxy HA takes the rightmost untrusted XFF entry. A
     client that writes the logger's address in front of its own gets nothing."""
     await setup_relay(hass, tmp_path, {"other": ("192.0.2.10", 8080)})
@@ -178,7 +206,9 @@ async def test_fw_xff_from_trusted_proxy_not_spoofable(hass, hass_client, hass_c
     anonymous = await hass_client_no_auth()
     url = "/api/sdlog_relay/other/fw/manifest.json"
 
-    spoofed = await anonymous.get(url, headers={"X-Forwarded-For": "192.0.2.10, 203.0.113.9"})
+    spoofed = await anonymous.get(
+        url, headers={"X-Forwarded-For": "192.0.2.10, 203.0.113.9"}
+    )
     assert spoofed.status == 404
     honest = await anonymous.get(url, headers={"X-Forwarded-For": "192.0.2.10"})
     assert honest.status == 200
@@ -190,35 +220,60 @@ async def test_fw_xff_from_trusted_proxy_not_spoofable(hass, hass_client, hass_c
 
 async def test_flow_creates_entry_and_validates(hass: HomeAssistant, tmp_path) -> None:
     hass.config.config_dir = str(tmp_path)
-    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
     assert result["type"] is FlowResultType.FORM
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_LOGGER_ID: "Car 1", CONF_HOST: "logger.local", CONF_PORT: 0}
+        result["flow_id"],
+        {CONF_LOGGER_ID: "Car 1", CONF_HOST: "logger.local", CONF_PORT: 0},
     )
-    assert result["errors"] == {CONF_LOGGER_ID: "bad_logger_id", CONF_HOST: "bad_host", CONF_PORT: "bad_port"}
+    assert result["errors"] == {
+        CONF_LOGGER_ID: "bad_logger_id",
+        CONF_HOST: "bad_host",
+        CONF_PORT: "bad_port",
+    }
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_LOGGER_ID: "car", CONF_HOST: "192.0.2.10", CONF_PORT: 8080}
+        result["flow_id"],
+        {CONF_LOGGER_ID: "car", CONF_HOST: "192.0.2.10", CONF_PORT: 8080},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {CONF_LOGGER_ID: "car", CONF_HOST: "192.0.2.10", CONF_PORT: 8080}
+    assert result["data"] == {
+        CONF_LOGGER_ID: "car",
+        CONF_HOST: "192.0.2.10",
+        CONF_PORT: 8080,
+    }
 
-    again = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
-    again = await hass.config_entries.flow.async_configure(
-        again["flow_id"], {CONF_LOGGER_ID: "car", CONF_HOST: "192.0.2.11", CONF_PORT: 8080}
+    again = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
     )
-    assert again["type"] is FlowResultType.ABORT and again["reason"] == "already_configured"
+    again = await hass.config_entries.flow.async_configure(
+        again["flow_id"],
+        {CONF_LOGGER_ID: "car", CONF_HOST: "192.0.2.11", CONF_PORT: 8080},
+    )
+    assert (
+        again["type"] is FlowResultType.ABORT
+        and again["reason"] == "already_configured"
+    )
 
 
-async def test_reconfigure_moves_the_target(hass, hass_client, device, tmp_path) -> None:
+async def test_reconfigure_moves_the_target(
+    hass, hass_client, device, tmp_path
+) -> None:
     await setup_relay(hass, tmp_path, {"car": ("192.0.2.10", 8080)})
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     host, port = device_target(device)
 
     result = await entry.start_reconfigure_flow(hass)
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_HOST: host, CONF_PORT: port})
-    assert result["type"] is FlowResultType.ABORT and result["reason"] == "reconfigure_successful"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_HOST: host, CONF_PORT: port}
+    )
+    assert (
+        result["type"] is FlowResultType.ABORT
+        and result["reason"] == "reconfigure_successful"
+    )
     await hass.async_block_till_done()
 
     client = await hass_client()

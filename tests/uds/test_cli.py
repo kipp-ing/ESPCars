@@ -23,11 +23,10 @@ def make_table(diag_size: int = 0x40000) -> bytes:
 
     def entry(ptype, subtype, offset, size, label):
         return struct.pack(
-            "<2sBBII16sI", b"\xaa\x50", ptype, subtype, offset, size,
-            label.encode(), 0
+            "<2sBBII16sI", b"\xaa\x50", ptype, subtype, offset, size, label.encode(), 0
         )
 
-    table = b"".join(
+    return b"".join(
         [
             entry(1, 0x02, 0x9000, 0x5000, "nvs"),
             entry(1, 0x00, 0xE000, 0x2000, "otadata"),
@@ -38,7 +37,6 @@ def make_table(diag_size: int = 0x40000) -> bytes:
             b"\xff" * 32,  # terminator
         ]
     )
-    return table
 
 
 def test_parse_partition_table():
@@ -56,8 +54,11 @@ def test_flash_dry_run_reads_offset_back(tmp_path, capsys):
     table.write_bytes(make_table())
     rc = cli.main(
         [
-            "flash", str(FIXTURES / "mini.dcat"),
-            "--table", str(table), "--dry-run",
+            "flash",
+            str(FIXTURES / "mini.dcat"),
+            "--table",
+            str(table),
+            "--dry-run",
         ]
     )
     assert rc == 0
@@ -80,8 +81,15 @@ def test_flash_refuses_unknown_partition(tmp_path, capsys):
     table = tmp_path / "partition-table.bin"
     table.write_bytes(make_table())
     rc = cli.main(
-        ["flash", str(FIXTURES / "mini.dcat"), "--table", str(table),
-         "--partition", "diagg", "--dry-run"]
+        [
+            "flash",
+            str(FIXTURES / "mini.dcat"),
+            "--table",
+            str(table),
+            "--partition",
+            "diagg",
+            "--dry-run",
+        ]
     )
     assert rc == 1
     err = capsys.readouterr().err
@@ -112,9 +120,15 @@ def test_compile_cli_end_to_end(tmp_path):
     out = tmp_path / "mini.dcat"
     rc = cli.main(
         [
-            "compile", str(FIXTURES / "mini-source.json"),
-            "--ecu", "MINI", "--variant", "Mini_Var", "--all",
-            "-o", str(out),
+            "compile",
+            str(FIXTURES / "mini-source.json"),
+            "--ecu",
+            "MINI",
+            "--variant",
+            "Mini_Var",
+            "--all",
+            "-o",
+            str(out),
         ]
     )
     assert rc == 0
@@ -138,7 +152,9 @@ def mini_db():
 def test_profile_unknown_did_lists_known(mini_db):
     with pytest.raises(cli.CompileError) as exc:
         cli.compile_catalog(
-            mini_db, "MINI", "Mini_Var",
+            mini_db,
+            "MINI",
+            "Mini_Var",
             profile={"groups": [{"did": 0x0202}]},
         )
     msg = str(exc.value)
@@ -148,7 +164,9 @@ def test_profile_unknown_did_lists_known(mini_db):
 def test_profile_unknown_service_suggests(mini_db):
     with pytest.raises(cli.CompileError) as exc:
         cli.compile_catalog(
-            mini_db, "MINI", "Mini_Var",
+            mini_db,
+            "MINI",
+            "Mini_Var",
             profile={"groups": [{"service": "DT_Mini_Temperatur"}]},
         )
     assert "DT_Mini_Temperature" in str(exc.value)
@@ -156,7 +174,9 @@ def test_profile_unknown_service_suggests(mini_db):
 
 def test_profile_selection_and_invalid_override(mini_db):
     cat, manifest, _ = cli.compile_catalog(
-        mini_db, "MINI", "Mini_Var",
+        mini_db,
+        "MINI",
+        "Mini_Var",
         profile={
             "groups": [{"did": 0xD000, "interval": "5s"}],
             "invalid_overrides": [{"text": "closed", "invalid": True}],

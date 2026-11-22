@@ -18,7 +18,9 @@ COMPONENT = Path(__file__).resolve().parents[2] / "components" / "sd_logger"
 
 
 def _ids(validated) -> list[str]:
-    return [item.id if isinstance(item, ID) else str(item) for item in validated["time_id"]]
+    return [
+        item.id if isinstance(item, ID) else str(item) for item in validated["time_id"]
+    ]
 
 
 def test_c9_a_single_time_id_is_still_accepted(set_core_config) -> None:
@@ -45,7 +47,9 @@ def test_c6_the_component_never_sets_the_system_clock() -> None:
     for path in sorted(COMPONENT.rglob("*")):
         if path.suffix not in {".h", ".cpp", ".py"}:
             continue
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
             code = line.split("//", 1)[0]
             if re.search(r"\b(settimeofday|clock_settime|sntp_sync_time)\s*\(", code):
                 offenders.append(f"{path.name}:{number}: {line.strip()}")
@@ -73,4 +77,6 @@ def test_c12_an_unstepped_callback_returns_before_it_can_upgrade_the_basis() -> 
     assert body.index("return;", guard) < body.index("this->set_utc_anchor(")
     # The sample is taken in setup(), before anything a loop() can fire.
     setup = _body("setup")
-    assert setup.index("this->setup_clock_.utc_us = gettimeofday_us();") < setup.index("this->capture_ident_();")
+    assert setup.index("this->setup_clock_.utc_us = gettimeofday_us();") < setup.index(
+        "this->capture_ident_();"
+    )

@@ -141,16 +141,26 @@ def test_partition_exactly_big_enough_accepted(set_core_config) -> None:
 
     _cat, _crc, blob = load_catalog(MINI_PATH)
     rounded = -(-blob // 0x1000) * 0x1000
-    assert validate(hub(catalog=partition_catalog(MINI, size=rounded)))["catalog"]["size"] == rounded
+    assert (
+        validate(hub(catalog=partition_catalog(MINI, size=rounded)))["catalog"]["size"]
+        == rounded
+    )
 
 
 @pytest.mark.parametrize("name", ["diag", "d", "a_b_9", "sixteencharacter"])
 def test_partition_names_accepted(set_core_config, name: str) -> None:
     setup_c6(set_core_config)
-    assert validate(hub(catalog=partition_catalog(MINI, partition=name)))["catalog"]["partition"] == name
+    assert (
+        validate(hub(catalog=partition_catalog(MINI, partition=name)))["catalog"][
+            "partition"
+        ]
+        == name
+    )
 
 
-@pytest.mark.parametrize("name", ["", "seventeencharacter", "with space", "dash-ed", "dot.ted"])
+@pytest.mark.parametrize(
+    "name", ["", "seventeencharacter", "with space", "dash-ed", "dot.ted"]
+)
 def test_partition_names_rejected(set_core_config, name: str) -> None:
     """The label goes into a 16-byte field in the partition table, verbatim."""
     setup_c6(set_core_config)

@@ -124,9 +124,8 @@ jobs:
           python script/lint_report.py --only clang-format --summary
 
   upstream-lint:
-    name: Upstream lint (report-only)
+    name: Python, YAML and whitespace lint
     runs-on: ubuntu-latest
-    # Deliberately absent from Required checks.needs until P2/P3 are clean.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -135,8 +134,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements_lint.txt
       - run: pip install -r requirements_lint.txt
-      - name: Report every P1a tool without modifying source files
-        run: python script/lint_report.py --report-only
+      - name: Check Python, YAML and whitespace without modifying source files
+        run: python script/lint_report.py --only ruff ruff-format pyupgrade yamllint end-of-file-fixer trailing-whitespace --summary
+      - name: Summarize remaining advisory hooks
+        if: always()
+        run: python script/lint_report.py --only hook-config no-commit-to-branch ci-custom clang-tidy --report-only --summary
 
   clang-tidy:
     name: clang-tidy (report-only)
@@ -191,7 +193,7 @@ jobs:
   required-checks:
     name: Required checks
     if: always()
-    needs: [validate, host-tests, compile, clang-format, ha-integration]
+    needs: [validate, host-tests, compile, clang-format, upstream-lint, ha-integration]
     runs-on: ubuntu-latest
     steps:
       # One stable context for branch protection to require, instead of

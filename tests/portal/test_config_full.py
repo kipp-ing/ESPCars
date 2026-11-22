@@ -75,7 +75,9 @@ def test_complete_identity_with_owns_is_accepted(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("missing", ["board", "node_id", "mac"])
-def test_incomplete_identity_without_owns_is_accepted(tmp_path: Path, missing: str) -> None:
+def test_incomplete_identity_without_owns_is_accepted(
+    tmp_path: Path, missing: str
+) -> None:
     """PS-M1-03 accept: with an incomplete identity `owns: []` is fine (wire emits state unknown)."""
     ident = {k: v for k, v in IDENT.items() if k != missing}
     assert errors_of(tmp_path, portal_yaml(portal(**ident))) == []
@@ -132,11 +134,15 @@ def test_portal_with_web_server_is_rejected(tmp_path: Path) -> None:
     assert errs and "web_server" in _joined(errs), errs
 
 
-def test_portal_without_web_server_loads_with_captive_portal_and_ap(tmp_path: Path) -> None:
+def test_portal_without_web_server_loads_with_captive_portal_and_ap(
+    tmp_path: Path,
+) -> None:
     """PS-M2-02 control / PS-M2-03: captive_portal plus `wifi: ap:` coexist with the portal."""
     text = portal_yaml()
-    text = text.replace("wifi:\n  ssid: demo-net\n  password: demo-pass-123\n",
-                        "wifi:\n  ssid: demo-net\n  password: demo-pass-123\n  ap:\n    ssid: demo-ap\n    password: demo-ap-pass-1\ncaptive_portal:\n")
+    text = text.replace(
+        "wifi:\n  ssid: demo-net\n  password: demo-pass-123\n",
+        "wifi:\n  ssid: demo-net\n  password: demo-pass-123\n  ap:\n    ssid: demo-ap\n    password: demo-ap-pass-1\ncaptive_portal:\n",
+    )
     assert errors_of(tmp_path, text) == []
 
 
@@ -173,14 +179,20 @@ def test_actions_with_auth_are_accepted(tmp_path: Path) -> None:
 
 def test_action_bound_to_a_missing_entity_is_rejected(tmp_path: Path) -> None:
     """PS-M3-01 reject: the bound entity id must exist."""
-    tree = [tree_node(segment="dev", actions=[action_entry("switch", switch="no_such_switch")])]
+    tree = [
+        tree_node(
+            segment="dev", actions=[action_entry("switch", switch="no_such_switch")]
+        )
+    ]
     errs = errors_of(tmp_path, portal_yaml(portal(tree=tree, auth=AUTH)))
     assert errs and "no_such_switch" in _joined(errs), errs
 
 
 def test_action_bound_to_the_wrong_domain_is_rejected(tmp_path: Path) -> None:
     """PS-M3-01 reject: a `switch:` key must name a switch, not a button."""
-    tree = [tree_node(segment="dev", actions=[action_entry("switch", switch="demo_button")])]
+    tree = [
+        tree_node(segment="dev", actions=[action_entry("switch", switch="demo_button")])
+    ]
     errs = errors_of(tmp_path, portal_yaml(portal(tree=tree, auth=AUTH)))
     assert errs, "binding a switch action to a button id must not load"
 
@@ -193,8 +205,15 @@ def test_no_actions_needs_no_auth(tmp_path: Path) -> None:
 # --- submodule derivation (4.5), PS-M1-06 ---------------------------------------------
 
 
-def _pack_tree(*, position: int | None, frame, index_base: int = 7, depth: int = 2, own: bool = False):
-    """ecu -> pack -> grp(position) -> [group ->]* seg(series)."""
+def _pack_tree(
+    *,
+    position: int | None,
+    frame,
+    index_base: int = 7,
+    depth: int = 2,
+    own: bool = False,
+):
+    """Ecu -> pack -> grp(position) -> [group ->]* seg(series)."""
     series = series_entry(index_base=index_base, index_frame=frame)
     leaf = tree_node(segment="seg0", kind="seg", series=series)
     node = leaf
@@ -205,11 +224,17 @@ def _pack_tree(*, position: int | None, frame, index_base: int = 7, depth: int =
         grp["segment"] = "grp1"
         if position is not None:
             grp["submodule_position"] = position
-        return [tree_node(segment="ecu", children=[tree_node(segment="pack", children=[grp])])]
+        return [
+            tree_node(
+                segment="ecu", children=[tree_node(segment="pack", children=[grp])]
+            )
+        ]
     grp = tree_node(segment="grp1", children=[node])
     if position is not None:
         grp["submodule_position"] = position
-    return [tree_node(segment="ecu", children=[tree_node(segment="pack", children=[grp])])]
+    return [
+        tree_node(segment="ecu", children=[tree_node(segment="pack", children=[grp])])
+    ]
 
 
 def _find_series(cfg: dict, segment: str) -> dict:
@@ -262,7 +287,9 @@ def test_pack_index_base_none_for_another_named_frame(tmp_path: Path) -> None:
     assert _find_series(cfg, "seg0")["resolved_pack_index_base"] is None
 
 
-def test_null_frame_with_no_position_is_accepted_and_resolves_to_none(tmp_path: Path) -> None:
+def test_null_frame_with_no_position_is_accepted_and_resolves_to_none(
+    tmp_path: Path,
+) -> None:
     """PS-M1-06: the explicit null stays legal when nothing would be derived from it."""
     tree = _pack_tree(position=None, frame=NULL)
     cfg = config_of(tmp_path, portal_yaml(portal(tree=tree)))
@@ -271,7 +298,9 @@ def test_null_frame_with_no_position_is_accepted_and_resolves_to_none(tmp_path: 
 
 
 @pytest.mark.parametrize("own", [False, True], ids=["ancestor", "self"])
-def test_null_frame_under_a_position_is_a_config_error_naming_the_node(tmp_path: Path, own: bool) -> None:
+def test_null_frame_under_a_position_is_a_config_error_naming_the_node(
+    tmp_path: Path, own: bool
+) -> None:
     """PS-M1-06 reject: an unnamed frame never gets an offset; the error names the series node."""
     tree = _pack_tree(position=2, frame=NULL, own=own)
     errs = errors_of(tmp_path, portal_yaml(portal(tree=tree, submodule_size=12)))
@@ -312,6 +341,14 @@ def test_submodule_size_without_any_position_is_accepted(tmp_path: Path) -> None
 
 def test_value_entries_still_resolve_with_entities_present(tmp_path: Path) -> None:
     """Loader sanity for the value sources used above."""
-    tree = [tree_node(segment="v", values=[value_entry(), value_entry(key="t", sensor=None, text_sensor="state_text"),
-                                           value_entry(key="b", sensor=None, binary_sensor="link_up")])]
+    tree = [
+        tree_node(
+            segment="v",
+            values=[
+                value_entry(),
+                value_entry(key="t", sensor=None, text_sensor="state_text"),
+                value_entry(key="b", sensor=None, binary_sensor="link_up"),
+            ],
+        )
+    ]
     assert errors_of(tmp_path, portal_yaml(portal(tree=tree))) == []

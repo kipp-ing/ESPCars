@@ -78,9 +78,7 @@ def test_req_len_zero_and_over_255():
         )
     expect_limit(
         catalog.Catalog(
-            ecus=(
-                catalog.Ecu("E", 1, 2, groups=(catalog.Group("G", b"\x22" * 256),)),
-            )
+            ecus=(catalog.Ecu("E", 1, 2, groups=(catalog.Group("G", b"\x22" * 256),)),)
         ),
         "u8 req_len",
     )
@@ -152,9 +150,7 @@ def test_duplicate_field_names_in_a_group_refused():
     # §5.1a: YAML addresses a field by group plus name, so a duplicate makes
     # that address meaningless. The writer is the enforcement point.
     expect_limit(
-        one_group_catalog(
-            (catalog.Field("F", 24, 8), catalog.Field("F", 32, 8))
-        ),
+        one_group_catalog((catalog.Field("F", 24, 8), catalog.Field("F", 32, 8))),
         "duplicate name within a group",
     )
 
@@ -165,7 +161,9 @@ def test_same_name_in_two_groups_is_fine():
         catalog.Catalog(
             ecus=(
                 catalog.Ecu(
-                    "E", 1, 2,
+                    "E",
+                    1,
+                    2,
                     groups=(
                         catalog.Group(
                             "G1", b"\x22\x00\x01", fields=(catalog.Field("F", 24, 8),)
@@ -184,17 +182,13 @@ def test_fields_out_of_bit_order_refused():
     # Ascending bit_pos is normative (§5.1b) so element k means the same thing
     # in both implementations.
     expect_limit(
-        one_group_catalog(
-            (catalog.Field("B", 32, 8), catalog.Field("A", 24, 8))
-        ),
+        one_group_catalog((catalog.Field("B", 32, 8), catalog.Field("A", 24, 8))),
         "fields must be ordered by ascending bit_pos",
     )
 
 
 def test_field_count_over_u16():
-    fields = tuple(
-        catalog.Field("F", 24, 1) for _ in range(catalog.MAX_RECORDS + 1)
-    )
+    fields = tuple(catalog.Field("F", 24, 1) for _ in range(catalog.MAX_RECORDS + 1))
     expect_limit(one_group_catalog(fields), "u16 field indices")
 
 
@@ -208,9 +202,7 @@ def test_security_level_over_nibble():
                         1,
                         2,
                         groups=(
-                            catalog.Group(
-                                "G", b"\x22\x00\x01", security_level=16
-                            ),
+                            catalog.Group("G", b"\x22\x00\x01", security_level=16),
                         ),
                     ),
                 )

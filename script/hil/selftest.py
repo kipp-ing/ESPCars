@@ -68,18 +68,18 @@ drives the schedule, Blue answers it, everyone else listens.
 """
 
 import argparse
+from datetime import UTC, datetime
+from pathlib import Path
 import re
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 
 import serial
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ports import enumerate_boards  # noqa: E402
+from ports import enumerate_boards
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "tests" / "hil" / "selftest.yaml"
@@ -109,7 +109,10 @@ PROFILES = {
     # LIN master in every other config, so it keeps the role here.
     "green": {
         "color": "00ff00",
-        "ports": [("can1", "GPIO2", "GPIO3", "0x0C0"), ("can2", "GPIO10", "GPIO11", "0x0C1")],
+        "ports": [
+            ("can1", "GPIO2", "GPIO3", "0x0C0"),
+            ("can2", "GPIO10", "GPIO11", "0x0C1"),
+        ],
         "lin_mode": "master",
         "sd": False,
         # Deliberately not on any segment — see HIL.md ("loose: Blue can2,
@@ -120,14 +123,20 @@ PROFILES = {
     },
     "blue": {
         "color": "0033ff",
-        "ports": [("can1", "GPIO2", "GPIO3", "0x0C2"), ("can2", "GPIO10", "GPIO11", "0x0C3")],
+        "ports": [
+            ("can1", "GPIO2", "GPIO3", "0x0C2"),
+            ("can2", "GPIO10", "GPIO11", "0x0C3"),
+        ],
         "lin_mode": "slave",
         "sd": False,
         "loose": ["can2"],
     },
     "orange": {
         "color": "ff5900",
-        "ports": [("seg1", "GPIO2", "GPIO3", "0x0C4"), ("seg2", "GPIO10", "GPIO11", "0x0C5")],
+        "ports": [
+            ("seg1", "GPIO2", "GPIO3", "0x0C4"),
+            ("seg2", "GPIO10", "GPIO11", "0x0C5"),
+        ],
         "lin_mode": "listener",
         "sd": True,
         "loose": [],
@@ -143,7 +152,9 @@ BENCH_V = re.compile(r"\[bench:\d+\]:\s+v1 node=(\S+)")
 BENCH_GATE = re.compile(r"\[bench:\d+\]:\s+gate=(\S+)\s+state=(\S+)\s+detail=(\S*)")
 # `first_broken=` on a FAIL, `first_unproven=` on an INCONCLUSIVE — both name
 # the gate to go and look at, so both parse into the same slot.
-BENCH_VERDICT = re.compile(r"\[bench:\d+\]:\s+verdict=(\S+)\s+first_(?:broken|unproven)=(\S+)")
+BENCH_VERDICT = re.compile(
+    r"\[bench:\d+\]:\s+verdict=(\S+)\s+first_(?:broken|unproven)=(\S+)"
+)
 TOPO_LINE = re.compile(r"\[topo:\d+\]:\s+(\S+)\s+<-\s+(.*)")
 HEARD = re.compile(r"(\w+)\.bus(\d)(?:\s+\((\d+) ms\))?(\s+SAME-WIRE|\s+ECHO)?")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -179,29 +190,83 @@ def flash(board, profile, color):
     """Build and upload selftest.yaml for one board. Returns True on success."""
     (pa, pa_tx, pa_rx, ba), (pb, pb_tx, pb_rx, bb) = profile["ports"]
     r, g, b = hexcolor(color)
+
     # selftest.yaml needs each pin twice — as an ESPHome pin name for
     # can_gateway, and as a bare number for the pre-can_gateway echo lambda,
     # where the IDF wants a gpio_num_t. Deriving the second from the first here
     # is what stops the two forms drifting apart.
-    num = lambda p: p.removeprefix("GPIO")  # noqa: E731
+    def num(pin):
+        return pin.removeprefix("GPIO")
+
     cmd = [
         str(ESPHOME),
-        "-s", "node_name", f"mr-{board}",
-        "-s", "id_r", r, "-s", "id_g", g, "-s", "id_b", b,
-        "-s", "port_a_id", pa, "-s", "pin_a_tx", pa_tx, "-s", "pin_a_rx", pa_rx, "-s", "beacon_a", ba,
-        "-s", "port_b_id", pb, "-s", "pin_b_tx", pb_tx, "-s", "pin_b_rx", pb_rx, "-s", "beacon_b", bb,
-        "-s", "pin_a_tx_num", num(pa_tx), "-s", "pin_a_rx_num", num(pa_rx),
-        "-s", "pin_b_tx_num", num(pb_tx), "-s", "pin_b_rx_num", num(pb_rx),
-        "-s", "lin_mode", profile["lin_mode"],
-        "-s", "sd_expected", "true" if profile["sd"] else "false",
-        "run", "--no-logs",
+        "-s",
+        "node_name",
+        f"mr-{board}",
+        "-s",
+        "id_r",
+        r,
+        "-s",
+        "id_g",
+        g,
+        "-s",
+        "id_b",
+        b,
+        "-s",
+        "port_a_id",
+        pa,
+        "-s",
+        "pin_a_tx",
+        pa_tx,
+        "-s",
+        "pin_a_rx",
+        pa_rx,
+        "-s",
+        "beacon_a",
+        ba,
+        "-s",
+        "port_b_id",
+        pb,
+        "-s",
+        "pin_b_tx",
+        pb_tx,
+        "-s",
+        "pin_b_rx",
+        pb_rx,
+        "-s",
+        "beacon_b",
+        bb,
+        "-s",
+        "pin_a_tx_num",
+        num(pa_tx),
+        "-s",
+        "pin_a_rx_num",
+        num(pa_rx),
+        "-s",
+        "pin_b_tx_num",
+        num(pb_tx),
+        "-s",
+        "pin_b_rx_num",
+        num(pb_rx),
+        "-s",
+        "lin_mode",
+        profile["lin_mode"],
+        "-s",
+        "sd_expected",
+        "true" if profile["sd"] else "false",
+        "run",
+        "--no-logs",
         str(CONFIG_FOR_MODE.get(profile["lin_mode"], CONFIG)),
-        "--device", board_port(board),
+        "--device",
+        board_port(board),
     ]
     print(f"  flashing {board} ...", flush=True)
-    res = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
+    res = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
     if res.returncode != 0:
-        print(f"  ! {board}: flash failed\n{res.stdout[-1500:]}{res.stderr[-1500:]}", file=sys.stderr)
+        print(
+            f"  ! {board}: flash failed\n{res.stdout[-1500:]}{res.stderr[-1500:]}",
+            file=sys.stderr,
+        )
         return False
     return True
 
@@ -229,17 +294,35 @@ def diagnose_unreachable(board):
     peripheral answers whether or not the core executes.
     """
     port = board_port(board)
-    probe = [sys.executable, "-m", "esptool", "--chip", "esp32c6", "--port", port,
-             "--before", "no-reset", "--after", "no-reset", "chip-id"]
+    probe = [
+        sys.executable,
+        "-m",
+        "esptool",
+        "--chip",
+        "esp32c6",
+        "--port",
+        port,
+        "--before",
+        "no-reset",
+        "--after",
+        "no-reset",
+        "chip-id",
+    ]
     try:
-        res = subprocess.run(probe, cwd=REPO, capture_output=True, text=True, timeout=90)
+        res = subprocess.run(
+            probe, cwd=REPO, capture_output=True, text=True, timeout=90, check=False
+        )
     except subprocess.TimeoutExpired:
         return ("unreachable", "esptool probe timed out")
     if res.returncode == 0:
-        return ("ROM download stub",
-                f"recoverable in software: python -m esptool --port {port} --after hard-reset chip-id")
-    return ("no esptool sync on any reset mode",
-            "physical power cycle required — 12 V and re-plug the board; see tests/hil/HIL.md")
+        return (
+            "ROM download stub",
+            f"recoverable in software: python -m esptool --port {port} --after hard-reset chip-id",
+        )
+    return (
+        "no esptool sync on any reset mode",
+        "physical power cycle required — 12 V and re-plug the board; see tests/hil/HIL.md",
+    )
 
 
 def reset_all(names):
@@ -259,12 +342,28 @@ def reset_all(names):
     print("resetting all boards so the echo gate runs on a quiet bench ...")
     for name in names:
         res = subprocess.run(
-            [str(REPO / ".venv" / "bin" / "python"), "-m", "esptool",
-             "--chip", "esp32c6", "--port", board_port(name), "--after", "hard-reset", "chip-id"],
-            cwd=REPO, capture_output=True, text=True,
+            [
+                str(REPO / ".venv" / "bin" / "python"),
+                "-m",
+                "esptool",
+                "--chip",
+                "esp32c6",
+                "--port",
+                board_port(name),
+                "--after",
+                "hard-reset",
+                "chip-id",
+            ],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if res.returncode != 0:
-            print(f"  ! {name}: reset failed, its echo gate may read INDETERMINATE", file=sys.stderr)
+            print(
+                f"  ! {name}: reset failed, its echo gate may read INDETERMINATE",
+                file=sys.stderr,
+            )
 
 
 def board_port(name):
@@ -330,15 +429,29 @@ def parse(lines):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--board", action="append", help="bench name; repeatable. Default: all known")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--board", action="append", help="bench name; repeatable. Default: all known"
+    )
     ap.add_argument("--mac", action="append", help="select by MAC instead of name")
     ap.add_argument("--port", action="append", help="select by USB device path")
-    ap.add_argument("--color", action="append", metavar="BOARD=RRGGBB",
-                    help="override a board's identity hue")
-    ap.add_argument("--seconds", type=float, default=35.0,
-                    help="console capture window (default 35; the report is on a 10 s cadence)")
-    ap.add_argument("--no-flash", action="store_true", help="read what is already running")
+    ap.add_argument(
+        "--color",
+        action="append",
+        metavar="BOARD=RRGGBB",
+        help="override a board's identity hue",
+    )
+    ap.add_argument(
+        "--seconds",
+        type=float,
+        default=35.0,
+        help="console capture window (default 35; the report is on a 10 s cadence)",
+    )
+    ap.add_argument(
+        "--no-flash", action="store_true", help="read what is already running"
+    )
     ap.add_argument("--report", type=Path, default=REPORT)
     args = ap.parse_args()
 
@@ -396,7 +509,10 @@ def main():
         if targets:
             reset_all(targets)
         else:
-            print("no board took a flash — every gate below is unmeasurable", file=sys.stderr)
+            print(
+                "no board took a flash — every gate below is unmeasurable",
+                file=sys.stderr,
+            )
 
     if targets:
         print(f"listening {args.seconds:.0f}s to {', '.join(targets)} ...")
@@ -404,7 +520,9 @@ def main():
     for name in targets:
         sinks[name] = []
         # Re-resolve the port: flashing resets the board and the hub renumbers.
-        t = threading.Thread(target=capture, args=(board_port(name), args.seconds, sinks[name]))
+        t = threading.Thread(
+            target=capture, args=(board_port(name), args.seconds, sinks[name])
+        )
         t.start()
         threads.append(t)
     for t in threads:
@@ -417,8 +535,14 @@ def main():
         for port in (PROFILES[n].get("loose") or [])
         if slot_of(n, port)
     }
-    text = render(results, skipped, loose, unreachable, did_flash=not args.no_flash,
-                  invocation=sys.argv[1:])
+    text = render(
+        results,
+        skipped,
+        loose,
+        unreachable,
+        did_flash=not args.no_flash,
+        invocation=sys.argv[1:],
+    )
     print(text)
     args.report.write_text(text)
     try:
@@ -432,9 +556,16 @@ def main():
     return 1 if (failed or silent or unreachable) else 0
 
 
-def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True, invocation=None):
+def render(
+    results,
+    skipped,
+    loose=frozenset(),
+    unreachable=None,
+    did_flash=True,
+    invocation=None,
+):
     """Build the report. Ordering is the product here, not decoration."""
-    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    now = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     # The header carries the exact invocation, because this file is tracked and a later,
     # narrower run overwrites an earlier, fuller one — which is fine exactly as long as the
     # report says so itself. A --no-flash overwrite cost a good report once (restored from
@@ -449,13 +580,17 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
     ]
     caveats = []
     if invocation and any(a in ("--board", "--mac", "--port") for a in invocation):
-        caveats.append("**Partial run** — boards not selected were not measured. Their state "
-                       "here is absent, not passing.")
+        caveats.append(
+            "**Partial run** — boards not selected were not measured. Their state "
+            "here is absent, not passing."
+        )
     if not did_flash:
-        caveats.append("**`--no-flash`** — this read whatever firmware was already running, "
-                       "which may not be the selftest firmware; a gate can FAIL or read "
-                       "INDETERMINATE for that reason alone, and this report may say less "
-                       "than the one it overwrote (`git diff` before trusting it).")
+        caveats.append(
+            "**`--no-flash`** — this read whatever firmware was already running, "
+            "which may not be the selftest firmware; a gate can FAIL or read "
+            "INDETERMINATE for that reason alone, and this report may say less "
+            "than the one it overwrote (`git diff` before trusting it)."
+        )
     for c in caveats:
         out += [c, ""]
     out += [
@@ -468,7 +603,7 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
         "| gate | proves |",
         "|---|---|",
         "| `reach` | the board can be talked to at all — it accepted a flash. Above every gate below it: an unreachable board has no measurements, only a recovery. |",
-        "| `rail` | 12 V on J8 (P1) **and** GPIO7 high (P2). The GPIO6 sense is itself gated by GPIO7, so 0 V means *GPIO7 low **or** no 12 V*, never \"no 12 V\" alone. |",
+        '| `rail` | 12 V on J8 (P1) **and** GPIO7 high (P2). The GPIO6 sense is itself gated by GPIO7, so 0 V means *GPIO7 low **or** no 12 V*, never "no 12 V" alone. |',
         "| `xcvr.<port>` | the +5 V domain (U18, **JP14**), the TJA1044, and the logic-side jumpers (JP20/JP22 arm the GPIO10/11 channel). One TXD→RXD echo, no fixture needed. |",
         "| `bus` | that traffic **survives** on the wire — the controller's own `bus_err` / `tx_fail` / TEC / REC, judged on movement between windows. The echo above proves the transceiver; this proves the segment. A missing terminator or a long stub echoes perfectly and still shreds frames. |",
         "| `lin` | the LIN transceiver — which runs off 12 V and does **not** need +5 V. LIN healthy with both CAN ports dead is the signature of JP14 open. |",
@@ -484,20 +619,28 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
 
     if unreachable:
         out += [
-            "## Unreachable — no gate below this was measured", "",
+            "## Unreachable — no gate below this was measured",
+            "",
             "These boards would not accept a flash, so nothing further about them",
             "is known. `ports.py` still lists them: it reads the MAC off the USB",
             "descriptor, which the serial peripheral answers whether or not the",
-            "core is executing. Recover them, then re-run.", "",
+            "core is executing. Recover them, then re-run.",
+            "",
             "| board | state | recovery |",
             "|---|---|---|",
         ]
-        out += [f"| **{n}** | {state} | {fix} |" for n, (state, fix) in sorted(unreachable.items())]
+        out += [
+            f"| **{n}** | {state} | {fix} |"
+            for n, (state, fix) in sorted(unreachable.items())
+        ]
         out.append("")
 
-    out += ["## Gates", "",
-            "| board | reach | rail | xcvr | bus | lin | sd | verdict |",
-            "|---|---|---|---|---|---|---|---|"]
+    out += [
+        "## Gates",
+        "",
+        "| board | reach | rail | xcvr | bus | lin | sd | verdict |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for name, (state, _fix) in sorted((unreachable or {}).items()):
         out.append(
             f"| **{name}** | FAIL ({state}) | — | — | — | — | — | "
@@ -505,15 +648,20 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
         )
     for name, (gates, _topo, verdict) in sorted(results.items()):
         if not gates:
-            why = ("took the flash, then said nothing" if did_flash
-                   else "no `[bench]` line — is selftest.yaml the running firmware?")
+            why = (
+                "took the flash, then said nothing"
+                if did_flash
+                else "no `[bench]` line — is selftest.yaml the running firmware?"
+            )
             out.append(
                 f"| **{name}** | {'PASS' if did_flash else 'n/a'} | — | — | — | — | — | "
                 f"**SILENT — {why}** |"
             )
             continue
         xc = " / ".join(
-            f"{k.split('.', 1)[1]}:{v[0]}" for k, v in sorted(gates.items()) if k.startswith("xcvr.")
+            f"{k.split('.', 1)[1]}:{v[0]}"
+            for k, v in sorted(gates.items())
+            if k.startswith("xcvr.")
         )
         v = f"**{verdict[0]}**" if verdict else "**—**"
         if verdict and verdict[1] != "none":
@@ -560,7 +708,10 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
         out.append("")
 
     if not hears:
-        out += ["No port qualified. Fix the gates above before looking at any wire.", ""]
+        out += [
+            "No port qualified. Fix the gates above before looking at any wire.",
+            "",
+        ]
     else:
         heard_by = {s: [] for s in hears}
         for s, info in hears.items():
@@ -569,7 +720,9 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
         out += ["| port | hears | heard by |", "|---|---|---|"]
         for s in sorted(hears):
             h = ", ".join(f"`{x}`" for x in hears[s]["heard"]) or "— nothing —"
-            hb = ", ".join(f"`{x}`" for x in sorted(heard_by.get(s, []))) or "— nobody —"
+            hb = (
+                ", ".join(f"`{x}`" for x in sorted(heard_by.get(s, []))) or "— nobody —"
+            )
             flags = " ".join(hears[s]["flags"])
             out.append(f"| `{s}`{' **' + flags + '**' if flags else ''} | {h} | {hb} |")
         out.append("")
@@ -585,13 +738,22 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
                 if cur in comp:
                     continue
                 comp.add(cur)
-                stack += [p for p in hears.get(cur, {}).get("heard", []) if p not in comp]
+                stack += [
+                    p for p in hears.get(cur, {}).get("heard", []) if p not in comp
+                ]
                 stack += [p for p in heard_by.get(cur, []) if p not in comp]
             seen |= comp
             segments.append(sorted(comp))
-        out += ["Segments measured (connected components of \"can hear\"):", ""]
+        out += ['Segments measured (connected components of "can hear"):', ""]
         for i, comp in enumerate(segments, 1):
-            out.append(f"{i}. " + (" ↔ ".join(f"`{c}`" for c in comp) if len(comp) > 1 else f"`{comp[0]}` — isolated"))
+            out.append(
+                f"{i}. "
+                + (
+                    " ↔ ".join(f"`{c}`" for c in comp)
+                    if len(comp) > 1
+                    else f"`{comp[0]}` — isolated"
+                )
+            )
         out.append("")
 
         problems, expected = [], []
@@ -599,20 +761,33 @@ def render(results, skipped, loose=frozenset(), unreachable=None, did_flash=True
             h, hb = hears[s]["heard"], heard_by.get(s, [])
             if not h and not hb:
                 if s in loose:
-                    expected.append(f"`{s}` is isolated — declared loose in PROFILES, so this is the expected state.")
+                    expected.append(
+                        f"`{s}` is isolated — declared loose in PROFILES, so this is the expected state."
+                    )
                 else:
-                    problems.append(f"`{s}` hears nobody and is heard by nobody. Its xcvr gate PASSED, so the board is fine — this is a cable, a jumper or a termination.")
+                    problems.append(
+                        f"`{s}` hears nobody and is heard by nobody. Its xcvr gate PASSED, so the board is fine — this is a cable, a jumper or a termination."
+                    )
             elif not hb:
-                problems.append(f"`{s}` hears others but nobody hears it — TX side open.")
+                problems.append(
+                    f"`{s}` hears others but nobody hears it — TX side open."
+                )
             elif not h:
                 problems.append(f"`{s}` is heard but hears nothing — RX side open.")
             if hears[s]["flags"]:
-                problems.append(f"`{s}` reports {' '.join(hears[s]['flags'])} — two ports on one physical wire.")
+                problems.append(
+                    f"`{s}` reports {' '.join(hears[s]['flags'])} — two ports on one physical wire."
+                )
         if problems:
             out += ["### Problems", ""] + [f"- {p}" for p in problems] + [""]
         else:
-            out += ["No unexpected wiring problems: every qualified port either "
-                    "hears someone and is heard by someone, or is declared loose.", ""]
+            out += [
+                (
+                    "No unexpected wiring problems: every qualified port either "
+                    "hears someone and is heard by someone, or is declared loose."
+                ),
+                "",
+            ]
         if expected:
             out += ["### Expected loose", ""] + [f"- {e}" for e in expected] + [""]
 

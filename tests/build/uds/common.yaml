@@ -49,7 +49,7 @@ can_gateway:
       bit_rate: 500kbps
       # V5: must cover the block size isotp grants (8) plus margin.
       observe_queue_depth: 32
-  # No routes: a diagnostic tester observes and sends, it never relays.
+      # No routes: a diagnostic tester observes and sends, it never relays.
 
 isotp:
   # The tester pair. One hub per isotp instance is a hard rule — set_consumer()

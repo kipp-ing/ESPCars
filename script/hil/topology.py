@@ -41,16 +41,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import re
 import sys
 import threading
 import time
-from pathlib import Path
 
 import serial
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ports import enumerate_boards  # noqa: E402  — sibling script, not a package
+from ports import enumerate_boards
 
 # Which bus index each board's port ids map to, matching the fixed slot map in
 # tests/hil/topology_rx.yaml (slot = node*2 + bus, beacon id = 0x0C0 + slot).
@@ -94,7 +94,7 @@ def capture(port: str, seconds: float, out: dict, key: str) -> None:
             buf += s.read(4096)
         s.close()
         out[key] = re.sub(r"\x1b\[[0-9;]*m", "", buf.decode("utf-8", "replace"))
-    except Exception as exc:  # port busy/missing — an empty capture, not a crash
+    except Exception as exc:  # noqa: BLE001 -- Port failures remain capture errors, not worker crashes.
         out[key] = f"__CAPTURE_ERROR__ {exc}"
 
 
@@ -109,7 +109,9 @@ def parse(board: str, text: str) -> dict[str, dict]:
         entry = {"heard": [], "flags": set()}
         if not rest.startswith("nothing"):
             for node, bus, age, flag in HEARD.findall(rest):
-                entry["heard"].append({"slot": f"{node}.bus{bus}", "age_ms": int(age or 0)})
+                entry["heard"].append(
+                    {"slot": f"{node}.bus{bus}", "age_ms": int(age or 0)}
+                )
                 if flag and flag.strip():
                     entry["flags"].add(flag.strip())
         # Overwrite: the newest line in the window is the current truth.
@@ -144,12 +146,16 @@ def main() -> int:
 
     logs: dict[str, str] = {}
     threads = [
-        threading.Thread(target=capture, args=(b["port"], args.seconds, logs, b["name"]))
+        threading.Thread(
+            target=capture, args=(b["port"], args.seconds, logs, b["name"])
+        )
         for b in boards
     ]
     if not args.json:
         names = ", ".join(sorted(b["name"] for b in boards))
-        print(f"listening {args.seconds:.0f}s to {names} (beacons are 1 Hz, lines every 10 s)\n")
+        print(
+            f"listening {args.seconds:.0f}s to {names} (beacons are 1 Hz, lines every 10 s)\n"
+        )
     for t in threads:
         t.start()
     for t in threads:
@@ -181,7 +187,11 @@ def main() -> int:
             "parser does not read — use script/hil/topo-watch.py for those."
         )
         if args.json:
-            print(json.dumps({"ports": {}, "segments": [], "problems": [message]}, indent=2))
+            print(
+                json.dumps(
+                    {"ports": {}, "segments": [], "problems": [message]}, indent=2
+                )
+            )
         else:
             print(message, file=sys.stderr)
         return 2
@@ -239,9 +249,13 @@ def main() -> int:
         elif not listeners:
             problems.append(f"{slot} can receive but nobody hears it — TX side dead")
         elif not entry["heard"]:
-            problems.append(f"{slot} is heard by {', '.join(listeners)} but hears nobody — RX side dead")
+            problems.append(
+                f"{slot} is heard by {', '.join(listeners)} but hears nobody — RX side dead"
+            )
         if entry["flags"]:
-            problems.append(f"{slot} reports {'/'.join(sorted(entry['flags']))} — two ports on one wire")
+            problems.append(
+                f"{slot} reports {'/'.join(sorted(entry['flags']))} — two ports on one wire"
+            )
 
     for spec in args.expect:
         left, _, right = spec.partition("=")
@@ -287,9 +301,9 @@ def main() -> int:
         print("\nPROBLEMS")
         for problem in problems:
             print(f"  ! {problem}")
-        if any("PROVEN GOOD" not in p for p in problems) and healthy_boards != set(
+        if any("PROVEN GOOD" not in p for p in problems) and healthy_boards != {
             e["board"] for e in ports.values()
-        ):
+        }:
             print(
                 "\nWhere every CAN port on a board is absent, it is a board/power question\n"
                 "before a cabling one: the transceivers need +5 V, which needs GPIO7 high\n"

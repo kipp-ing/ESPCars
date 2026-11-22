@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run upstream linters without modifying the checkout; findings are advisory.
+"""Run upstream linters without modifying the checkout; findings fail by default.
 
 Install requirements_lint.txt into the same environment as requirements_test.txt.
 Both check.sh and CI call this entry point. Mutating tools run on disposable
@@ -225,6 +225,7 @@ def main(argv=None):
         help="Print only per-tool counts and full tool errors",
     )
     args = parser.parse_args(argv)
+    mode = "report-only" if args.report_only else "blocking"
     config = yaml.safe_load(
         (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     )
@@ -257,7 +258,7 @@ def main(argv=None):
                 print(f"SKIP [clang-tidy]: {counts[tool]}")
                 continue
         if not args.summary:
-            print(f"== report-only: {tool} ==", flush=True)
+            print(f"== {mode}: {tool} ==", flush=True)
         details = io.StringIO()
         try:
             with redirect_stdout(details) if args.summary else nullcontext():
@@ -267,9 +268,7 @@ def main(argv=None):
                 print(details.getvalue(), end="")
             print(f"ERROR [{tool}]: {error}")
             counts[tool] = None
-    print(
-        "Upstream lint summary (report-only; units described in script/lint_report.py):"
-    )
+    print(f"Upstream lint summary ({mode}; units described in script/lint_report.py):")
     for tool, count in counts.items():
         print(f"  {tool}: {count if count is not None else 'ERROR (no count)'}")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

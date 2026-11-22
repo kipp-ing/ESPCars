@@ -87,9 +87,12 @@ def test_unknown_ecu_lists_what_the_catalog_holds(set_core_config) -> None:
 def test_read_of_a_safe_group_accepted(set_core_config) -> None:
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI)))
-    assert run_hub_final_validate(
-        config, extra=_automation(_read(config["id"], "DT_Mini_Contactor_State"))
-    ) is config
+    assert (
+        run_hub_final_validate(
+            config, extra=_automation(_read(config["id"], "DT_Mini_Contactor_State"))
+        )
+        is config
+    )
 
 
 def test_read_of_an_unsafe_group_rejected(set_core_config) -> None:
@@ -97,7 +100,9 @@ def test_read_of_an_unsafe_group_rejected(set_core_config) -> None:
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI)))
     with pytest.raises(cv.Invalid) as excinfo:
-        run_hub_final_validate(config, extra=_automation(_read(config["id"], "RT_Mini_Routine_Start")))
+        run_hub_final_validate(
+            config, extra=_automation(_read(config["id"], "RT_Mini_Routine_Start"))
+        )
     message = str(excinfo.value)
     assert "SAFE_READ groups only" in message
     assert "0x31" in message
@@ -109,7 +114,9 @@ def test_read_of_an_unsafe_group_rejected_even_with_the_flag(set_core_config) ->
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI), allow_active_services=True))
     with pytest.raises(cv.Invalid, match="SAFE_READ groups only"):
-        run_hub_final_validate(config, extra=_automation(_read(config["id"], "RT_Mini_Routine_Start")))
+        run_hub_final_validate(
+            config, extra=_automation(_read(config["id"], "RT_Mini_Routine_Start"))
+        )
 
 
 # --------------------------------------------------- U11: execute and raw need the explicit flag
@@ -121,7 +128,8 @@ def test_active_actions_rejected_without_the_flag(set_core_config, make_action) 
     config = validate(hub(catalog=catalog(MINI)))
     with pytest.raises(cv.Invalid) as excinfo:
         run_hub_final_validate(
-            config, extra=_automation(make_action(config["id"], "RT_Mini_Routine_Start"))
+            config,
+            extra=_automation(make_action(config["id"], "RT_Mini_Routine_Start")),
         )
     message = str(excinfo.value)
     assert "allow_active_services: true" in message
@@ -132,9 +140,13 @@ def test_active_actions_rejected_without_the_flag(set_core_config, make_action) 
 def test_active_actions_accepted_with_the_flag(set_core_config, make_action) -> None:
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI), allow_active_services=True))
-    assert run_hub_final_validate(
-        config, extra=_automation(make_action(config["id"], "RT_Mini_Routine_Start"))
-    ) is config
+    assert (
+        run_hub_final_validate(
+            config,
+            extra=_automation(make_action(config["id"], "RT_Mini_Routine_Start")),
+        )
+        is config
+    )
 
 
 def test_another_hubs_flag_does_not_unlock_this_one(set_core_config) -> None:
@@ -142,7 +154,9 @@ def test_another_hubs_flag_does_not_unlock_this_one(set_core_config) -> None:
     setup_c6(set_core_config)
     strict = validate(hub(catalog=catalog(MINI)))
     with pytest.raises(cv.Invalid, match="allow_active_services"):
-        run_hub_final_validate(strict, extra=_automation(_execute(strict["id"], "RT_Mini_Routine_Start")))
+        run_hub_final_validate(
+            strict, extra=_automation(_execute(strict["id"], "RT_Mini_Routine_Start"))
+        )
 
 
 def test_actions_nested_deep_in_an_automation_are_still_gated(set_core_config) -> None:
@@ -177,7 +191,9 @@ def test_transport_too_small_names_both_numbers(set_core_config) -> None:
     config = validate(hub(catalog=catalog(MINI)))
     bound = _bound("PRES_Mini_Cell_2Byte", update_interval="60s")
     with pytest.raises(cv.Invalid) as excinfo:
-        run_hub_final_validate(config, isotp=[isotp_entry(max_message_size=8)], sensors=[bound])
+        run_hub_final_validate(
+            config, isotp=[isotp_entry(max_message_size=8)], sensors=[bound]
+        )
     message = str(excinfo.value)
     assert "11" in message  # what the group answers with
     assert "8" in message  # what the transport holds
@@ -188,7 +204,12 @@ def test_transport_big_enough_accepted(set_core_config) -> None:
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI)))
     bound = _bound("PRES_Mini_Cell_2Byte", update_interval="60s")
-    assert run_hub_final_validate(config, isotp=[isotp_entry(max_message_size=16)], sensors=[bound]) is config
+    assert (
+        run_hub_final_validate(
+            config, isotp=[isotp_entry(max_message_size=16)], sensors=[bound]
+        )
+        is config
+    )
 
 
 def test_only_the_groups_the_config_reads_are_measured(set_core_config) -> None:
@@ -196,7 +217,12 @@ def test_only_the_groups_the_config_reads_are_measured(set_core_config) -> None:
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI)))
     bound = _bound("PRES_Mini_State", update_interval="5s")
-    assert run_hub_final_validate(config, isotp=[isotp_entry(max_message_size=4)], sensors=[bound]) is config
+    assert (
+        run_hub_final_validate(
+            config, isotp=[isotp_entry(max_message_size=4)], sensors=[bound]
+        )
+        is config
+    )
 
 
 def test_a_group_reached_only_by_an_action_still_counts(set_core_config) -> None:
@@ -229,9 +255,15 @@ def test_short_n_cr_timeout_warns_but_builds(set_core_config, caplog) -> None:
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI), ecu="MINI"))
     with caplog.at_level("WARNING"):
-        assert run_hub_final_validate(
-            config, isotp=[isotp_entry(n_cr_timeout=TimePeriodMilliseconds(milliseconds=500))]
-        ) is config
+        assert (
+            run_hub_final_validate(
+                config,
+                isotp=[
+                    isotp_entry(n_cr_timeout=TimePeriodMilliseconds(milliseconds=500))
+                ],
+            )
+            is config
+        )
     assert "P2*" in caplog.text
 
 
@@ -240,7 +272,9 @@ def test_block_size_mismatch_is_information_only(set_core_config, caplog) -> Non
     setup_c6(set_core_config)
     config = validate(hub(catalog=catalog(MINI), ecu="MINI"))
     with caplog.at_level("INFO"):
-        assert run_hub_final_validate(config, isotp=[isotp_entry(block_size=4)]) is config
+        assert (
+            run_hub_final_validate(config, isotp=[isotp_entry(block_size=4)]) is config
+        )
     assert "block_size" in caplog.text
 
 
@@ -252,10 +286,10 @@ def test_two_hubs_on_one_isotp_instance_rejected(set_core_config) -> None:
     setup_c6(set_core_config)
     first = validate(hub(catalog=catalog(MINI)))
     second = validate(hub(id="other", catalog=catalog(MINI)))
+    from esphome.components.uds import _final_validate
     import esphome.final_validate as fv
 
     from .glue import full_config
-    from esphome.components.uds import _final_validate
 
     token = fv.full_config.set(full_config([first, second]))
     try:
@@ -272,10 +306,10 @@ def test_two_hubs_on_separate_transports_accepted(set_core_config) -> None:
     setup_c6(set_core_config)
     first = validate(hub(catalog=catalog(MINI)))
     second = validate(hub(id="other", isotp_id="tp2", catalog=catalog(MINI)))
+    from esphome.components.uds import _final_validate
     import esphome.final_validate as fv
 
     from .glue import full_config
-    from esphome.components.uds import _final_validate
 
     token = fv.full_config.set(
         full_config([first, second], isotp=[isotp_entry(), isotp_entry(id="tp2")])
@@ -292,10 +326,10 @@ def test_hubs_may_share_one_catalog_partition(set_core_config) -> None:
     setup_c6(set_core_config)
     first = validate(hub(catalog=partition_catalog(MINI)))
     second = validate(hub(id="other", isotp_id="tp2", catalog=partition_catalog(MINI)))
+    from esphome.components.uds import _final_validate
     import esphome.final_validate as fv
 
     from .glue import full_config
-    from esphome.components.uds import _final_validate
 
     token = fv.full_config.set(
         full_config([first, second], isotp=[isotp_entry(), isotp_entry(id="tp2")])
@@ -310,11 +344,13 @@ def test_shared_partition_with_two_sizes_rejected(set_core_config) -> None:
     """One partition has one size, and the table is written once."""
     setup_c6(set_core_config)
     first = validate(hub(catalog=partition_catalog(MINI, size="256KB")))
-    second = validate(hub(id="other", isotp_id="tp2", catalog=partition_catalog(MINI, size="128KB")))
+    second = validate(
+        hub(id="other", isotp_id="tp2", catalog=partition_catalog(MINI, size="128KB"))
+    )
+    from esphome.components.uds import _final_validate
     import esphome.final_validate as fv
 
     from .glue import full_config
-    from esphome.components.uds import _final_validate
 
     token = fv.full_config.set(
         full_config([first, second], isotp=[isotp_entry(), isotp_entry(id="tp2")])

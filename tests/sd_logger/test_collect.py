@@ -39,21 +39,21 @@ green for the wrong reason.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import errno
 import hashlib
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import threading
 import urllib.error
-import urllib.request
-from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import unquote
+import urllib.request
 
 import pytest
 
@@ -134,8 +134,7 @@ def v1_chunk(seq: int) -> bytes:
     is — which is the point: only the `#sdlog` version says so."""
     base = seq * 1000
     lines = [f"#sdlog,1,{seq},{base},2026.7.0", *HEADER]
-    for i in range(20):
-        lines.append(f"C,{base + i},seg1,1A2,x,8,00112233445566{i:02X}")
+    lines.extend(f"C,{base + i},seg1,1A2,x,8,00112233445566{i:02X}" for i in range(20))
     lines.append(f"#close,{base + 20},rotate")
     return ("\n".join(lines) + "\n").encode("latin-1")
 
@@ -159,7 +158,9 @@ def recovered_chunk(seq: int) -> bytes:
     """A file torn by a power cut and sealed by the next boot (spec F2c): the torn
     tail cut back to the last complete line, then `#close,@<t>,recovered`."""
     base = seq * 1000
-    return sealed_chunk(seq, close=False) + f"#close,@{base:X},recovered\n".encode("latin-1")
+    return sealed_chunk(seq, close=False) + f"#close,@{base:X},recovered\n".encode(
+        "latin-1"
+    )
 
 
 # ------------------------------------------------------------------ fake device
@@ -179,7 +180,7 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "sdlog-fake/1"
 
-    def log_message(self, fmt, *args):  # noqa: A002 - a test suite is not a web log
+    def log_message(self, fmt, *args):
         pass
 
     @property
@@ -204,7 +205,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return True
-        if dev.token is not None and self.headers.get("Authorization") != f"Bearer {dev.token}":
+        if (
+            dev.token is not None
+            and self.headers.get("Authorization") != f"Bearer {dev.token}"
+        ):
             self._json(401, {"message": "Unauthorized"})
             return True
         if dev.refuse_after is not None and len(dev.requests) > dev.refuse_after:
@@ -212,7 +216,7 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         return False
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
+    def do_GET(self) -> None:
         dev = self._dev
         rng = self.headers.get("Range")
         dev.record(Request("GET", self.path, rng, self.headers.get("Authorization")))
@@ -297,7 +301,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self.wfile.write(body)
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
+    def do_POST(self) -> None:
         dev = self._dev
         length = int(self.headers.get("Content-Length") or 0)
         if length:
@@ -466,7 +470,11 @@ class FakeDevice:
 
     def gets(self, name: str | None = None) -> list[Request]:
         want = None if name is None else f"/sdlog/f/{name}"
-        return [r for r in self.requests if r.method == "GET" and (want is None or r.path == want)]
+        return [
+            r
+            for r in self.requests
+            if r.method == "GET" and (want is None or r.path == want)
+        ]
 
     def bodies(self, name: str) -> list[Request]:
         """GETs that asked for the chunk itself rather than an identity window.
@@ -477,7 +485,11 @@ class FakeDevice:
 
     def confirms(self, name: str | None = None) -> list[Request]:
         want = None if name is None else f"/sdlog/done/{name}"
-        return [r for r in self.requests if r.method == "POST" and (want is None or r.path == want)]
+        return [
+            r
+            for r in self.requests
+            if r.method == "POST" and (want is None or r.path == want)
+        ]
 
     # -- lifecycle
 
@@ -546,7 +558,9 @@ def stored(dest: Path, device: str) -> list[str]:
 
 
 def http_get(url: str, headers: dict | None = None):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=5)
+    return urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers or {}), timeout=5
+    )
 
 
 # ------------------------------------------------- the fixture proves itself first
@@ -569,7 +583,9 @@ def test_the_fake_device_serves_the_index_contract(device: FakeDevice) -> None:
     assert [c["name"] for c in payload["chunks"]] == ["L0000432.LOG"]
 
 
-def test_the_fake_device_serves_the_complete_status_contract(device: FakeDevice) -> None:
+def test_the_fake_device_serves_the_complete_status_contract(
+    device: FakeDevice,
+) -> None:
     payload = json.loads(http_get(f"{device.url}/sdlog/status").read())
     assert set(payload) == {
         "device",
@@ -606,18 +622,27 @@ def test_the_fake_device_can_stumble_on_its_own_index(device: FakeDevice) -> Non
     with pytest.raises(urllib.error.HTTPError) as caught:
         http_get(f"{device.url}/sdlog/index")
     assert caught.value.code == 500
-    assert json.loads(http_get(f"{device.url}/sdlog/index").read())["chunks"]  # recovered
+    assert json.loads(http_get(f"{device.url}/sdlog/index").read())[
+        "chunks"
+    ]  # recovered
 
 
-def test_the_fake_device_serves_a_range_as_206_and_cuts_on_demand(device: FakeDevice) -> None:
+def test_the_fake_device_serves_a_range_as_206_and_cuts_on_demand(
+    device: FakeDevice,
+) -> None:
     """The three behaviours every resume case below leans on: an open-ended
     range, a bounded one (the identity window), and a cut."""
     name = device.add(431)
     data = device.chunks[name]
 
-    tail = http_get(f"{device.url}/sdlog/f/{name}", {"Range": f"bytes={len(data) - 10}-"})
+    tail = http_get(
+        f"{device.url}/sdlog/f/{name}", {"Range": f"bytes={len(data) - 10}-"}
+    )
     assert tail.status == 206
-    assert tail.headers["Content-Range"] == f"bytes {len(data) - 10}-{len(data) - 1}/{len(data)}"
+    assert (
+        tail.headers["Content-Range"]
+        == f"bytes {len(data) - 10}-{len(data) - 1}/{len(data)}"
+    )
     assert tail.read() == data[-10:]
 
     head = http_get(f"{device.url}/sdlog/f/{name}", {"Range": "bytes=0-255"})
@@ -647,7 +672,9 @@ def test_the_fake_device_can_ignore_a_range_entirely(device: FakeDevice) -> None
     assert response.read() == device.chunks[name]
 
 
-def test_the_fake_device_never_lists_the_open_file_and_409s_it(device: FakeDevice) -> None:
+def test_the_fake_device_never_lists_the_open_file_and_409s_it(
+    device: FakeDevice,
+) -> None:
     """OPEN is not servable and not listed (§3). ``list_open`` is the stale-index
     race, which is the only way a well-behaved collector ever sees the 409."""
     device.add(431)
@@ -666,7 +693,9 @@ def test_the_fake_device_never_lists_the_open_file_and_409s_it(device: FakeDevic
     assert [c["name"] for c in payload["chunks"]] == ["L0000431.LOG", open_name]
 
 
-def test_the_fake_device_confirms_idempotently_and_can_refuse(device: FakeDevice) -> None:
+def test_the_fake_device_confirms_idempotently_and_can_refuse(
+    device: FakeDevice,
+) -> None:
     """The confirm route and its two failure knobs. Without this, a broken
     ``do_POST`` would surface as a puzzling collector failure five cases below."""
     name = device.add(431)
@@ -727,7 +756,9 @@ def test_every_sealed_chunk_is_stored_verified_and_confirmed(
     assert device.index_entries() == []
 
 
-def test_no_partial_file_survives_a_successful_run(device: FakeDevice, dest: Path) -> None:
+def test_no_partial_file_survives_a_successful_run(
+    device: FakeDevice, dest: Path
+) -> None:
     """A partial never wears the final name, so anything without ``.part`` is
     complete — and nothing keeps ``.part`` once the chunk landed."""
     device.add(431)
@@ -783,13 +814,17 @@ def test_the_wire_order_is_serve_then_confirm(device: FakeDevice, dest: Path) ->
     name = device.add(431)
     collector(device, dest).collect()
     kinds = [(r.method, r.path) for r in device.requests]
-    assert kinds.index(("GET", f"/sdlog/f/{name}")) < kinds.index(("POST", f"/sdlog/done/{name}"))
+    assert kinds.index(("GET", f"/sdlog/f/{name}")) < kinds.index(
+        ("POST", f"/sdlog/done/{name}")
+    )
 
 
 # ------------------------------------------------------------- drops and resumes
 
 
-def test_a_cut_transfer_resumes_at_the_byte_offset(device: FakeDevice, dest: Path) -> None:
+def test_a_cut_transfer_resumes_at_the_byte_offset(
+    device: FakeDevice, dest: Path
+) -> None:
     """A dropped connection resumes with ``Range``, it does not restart. The
     device promised a Content-Length the body did not reach — nothing else says
     the transfer failed, since a short body is not an HTTP error.
@@ -857,7 +892,9 @@ def test_retries_are_bounded_and_back_off(device: FakeDevice, dest: Path) -> Non
     device.cut(name, 0, once=False)
     slept: list[float] = []
 
-    outcome = collector(device, dest, retries=3, backoff=0.25, sleeper=slept.append).collect()
+    outcome = collector(
+        device, dest, retries=3, backoff=0.25, sleeper=slept.append
+    ).collect()
 
     assert len(device.gets(name)) == 3
     assert len(slept) == 2
@@ -868,7 +905,9 @@ def test_retries_are_bounded_and_back_off(device: FakeDevice, dest: Path) -> Non
     assert device.confirms(name) == []
 
 
-def test_a_device_that_vanished_is_reported_not_raised(device: FakeDevice, dest: Path) -> None:
+def test_a_device_that_vanished_is_reported_not_raised(
+    device: FakeDevice, dest: Path
+) -> None:
     """The normal case in a car, per the design: the collector reports and exits,
     it does not traceback."""
     pull = collector(device, dest)
@@ -914,7 +953,9 @@ def test_a_device_that_ignores_range_restarts_instead_of_splicing(
 # ---------------------------------------------------------------- the open file
 
 
-def test_a_409_on_the_open_file_does_not_stop_the_run(device: FakeDevice, dest: Path) -> None:
+def test_a_409_on_the_open_file_does_not_stop_the_run(
+    device: FakeDevice, dest: Path
+) -> None:
     """A stale index can name the file the writer holds. That chunk is not
     collectable — but it is also not a reason to abandon the ones that are, and
     it must never be confirmed, because confirming it makes the *live* file
@@ -998,7 +1039,9 @@ def test_the_archive_is_device_then_chunk_name(device: FakeDevice, dest: Path) -
     assert pull.partial_path(name) == dest / "mr-orange" / (name + ".part")
 
 
-def test_an_explicit_device_name_overrides_the_index(device: FakeDevice, dest: Path) -> None:
+def test_an_explicit_device_name_overrides_the_index(
+    device: FakeDevice, dest: Path
+) -> None:
     device.add(431)
     outcome = collector(device, dest, device="orange-spare").collect()
     assert outcome.device == "orange-spare"
@@ -1266,10 +1309,15 @@ def test_a_torn_chunk_is_a_candidate_first(device: FakeDevice, dest: Path) -> No
 
     assert device.confirms(name) == []
     assert outcome.failed and outcome.transient == [name]
-    assert stored(dest, "mr-orange") == [f"{name}.torn-candidate", f"{name}.torn-candidate.json"]
+    assert stored(dest, "mr-orange") == [
+        f"{name}.torn-candidate",
+        f"{name}.torn-candidate.json",
+    ]
 
 
-def test_a_torn_chunk_seen_twice_is_archived_and_confirmed(device: FakeDevice, dest: Path, capsys) -> None:
+def test_a_torn_chunk_seen_twice_is_archived_and_confirmed(
+    device: FakeDevice, dest: Path, capsys
+) -> None:
     """C12/C15. The same bytes twice: archived unchanged with a `.torn` sidecar,
     confirmed, reported as TORN, and the candidate is gone. Exit 0, not a defect."""
     name = device.add(431, unclosed_chunk(431))
@@ -1286,10 +1334,16 @@ def test_a_torn_chunk_seen_twice_is_archived_and_confirmed(device: FakeDevice, d
     assert stored(dest, "mr-orange") == [name, f"{name}.torn"]
     sidecar = json.loads((dest / "mr-orange" / f"{name}.torn").read_text())
     assert sidecar["sha256"] == hashlib.sha256(unclosed_chunk(431)).hexdigest()
-    assert (sidecar["device"], sidecar["name"], sidecar["bytes"]) == ("mr-orange", name, len(unclosed_chunk(431)))
+    assert (sidecar["device"], sidecar["name"], sidecar["bytes"]) == (
+        "mr-orange",
+        name,
+        len(unclosed_chunk(431)),
+    )
 
 
-def test_an_unstable_torn_chunk_becomes_a_defect(device: FakeDevice, dest: Path) -> None:
+def test_an_unstable_torn_chunk_becomes_a_defect(
+    device: FakeDevice, dest: Path
+) -> None:
     """C13. Different bytes every time start the count over; after 3 sightings with no
     two equal in a row it needs a human."""
     name = device.add(431, sealed_chunk(431, close=False, vary_from=5, mark="A1"))
@@ -1307,7 +1361,9 @@ def test_an_unstable_torn_chunk_becomes_a_defect(device: FakeDevice, dest: Path)
     assert stored(dest, "mr-orange") == []
 
 
-def test_a_torn_chunk_with_a_foreign_header_is_a_defect(device: FakeDevice, dest: Path) -> None:
+def test_a_torn_chunk_with_a_foreign_header_is_a_defect(
+    device: FakeDevice, dest: Path
+) -> None:
     """C13. A header that does not name the chunk is not a torn copy of it."""
     name = device.add(431, unclosed_chunk(432))
 
@@ -1318,7 +1374,9 @@ def test_a_torn_chunk_with_a_foreign_header_is_a_defect(device: FakeDevice, dest
     assert stored(dest, "mr-orange") == []
 
 
-def test_a_torn_chunk_naming_another_device_is_a_defect(device: FakeDevice, dest: Path) -> None:
+def test_a_torn_chunk_naming_another_device_is_a_defect(
+    device: FakeDevice, dest: Path
+) -> None:
     data = unclosed_chunk(431).replace(b"#src,", b"#origin,mr-pink\n#src,", 1)
     name = device.add(431, data)
 
@@ -1328,7 +1386,9 @@ def test_a_torn_chunk_naming_another_device_is_a_defect(device: FakeDevice, dest
     assert "mr-pink" in outcome.failed[0][1]
 
 
-def test_a_short_fetch_is_never_a_torn_candidate(device: FakeDevice, dest: Path) -> None:
+def test_a_short_fetch_is_never_a_torn_candidate(
+    device: FakeDevice, dest: Path
+) -> None:
     """C14. Only a fetch of exactly the index's `bytes` can prove the file is whole on
     the card; without that length it stays a transient short transfer."""
     device.report_bytes = False
@@ -1342,7 +1402,9 @@ def test_a_short_fetch_is_never_a_torn_candidate(device: FakeDevice, dest: Path)
     assert not any(n.endswith(".torn-candidate") for n in stored(dest, "mr-orange"))
 
 
-def test_an_accepted_torn_chunk_whose_confirm_was_lost_is_confirmed_again(device: FakeDevice, dest: Path) -> None:
+def test_an_accepted_torn_chunk_whose_confirm_was_lost_is_confirmed_again(
+    device: FakeDevice, dest: Path
+) -> None:
     """The dedup path vouches for an archived torn copy through its sidecar (C12), so a
     confirm that did not stick is resent instead of turning into a defect."""
     name = device.add(431, unclosed_chunk(431))
@@ -1409,7 +1471,9 @@ def test_a_confirm_that_stumbles_is_retried_and_a_refusal_is_not(
     device.confirm_status[busy] = 500
     slept: list[float] = []
 
-    outcome = collector(device, dest, retries=3, backoff=0.1, sleeper=slept.append).collect()
+    outcome = collector(
+        device, dest, retries=3, backoff=0.1, sleeper=slept.append
+    ).collect()
 
     assert len(device.confirms(busy)) == 3
     assert [n for n, _ in outcome.failed] == [busy]
@@ -1433,7 +1497,15 @@ def test_a_confirm_that_stumbles_is_retried_and_a_refusal_is_not(
         (v1_chunk(431), True),
         (b"", True),
     ],
-    ids=["intact", "malformed-line", "no-close", "truncated", "unknown-version", "v1", "empty"],
+    ids=[
+        "intact",
+        "malformed-line",
+        "no-close",
+        "truncated",
+        "unknown-version",
+        "v1",
+        "empty",
+    ],
 )
 def test_verify_chunk_reuses_the_reader_s_verdict(
     tmp_path: Path, data: bytes, defective: bool
@@ -1483,7 +1555,9 @@ def test_an_index_that_keeps_stumbling_is_reported_as_unreachable(
     assert device.confirms() == []
 
 
-def test_an_index_that_answers_4xx_is_not_retried(device: FakeDevice, dest: Path) -> None:
+def test_an_index_that_answers_4xx_is_not_retried(
+    device: FakeDevice, dest: Path
+) -> None:
     """A 404 means this device has no such route — a different firmware, a wrong
     port. Asking three times only makes the operator wait for the same answer."""
     device.add(431)
@@ -1573,7 +1647,9 @@ def test_a_chunk_name_may_never_become_a_path(device: FakeDevice, dest: Path) ->
     "name",
     ["../x.LOG", "/tmp/x.LOG", "a/b.LOG", "", ".", "..", ".hidden", "x\x00.LOG"],
 )
-def test_archive_paths_reject_an_unusable_name(device: FakeDevice, dest: Path, name: str) -> None:
+def test_archive_paths_reject_an_unusable_name(
+    device: FakeDevice, dest: Path, name: str
+) -> None:
     pull = collector(device, dest)
     with pytest.raises(ValueError):
         pull.archive_path(name)
@@ -1634,7 +1710,9 @@ def test_a_local_filesystem_that_says_no_is_reported_not_raised(
 # --------------------------------------------------------------- the pinned surface
 
 
-def test_fetch_stores_and_verifies_without_confirming(device: FakeDevice, dest: Path) -> None:
+def test_fetch_stores_and_verifies_without_confirming(
+    device: FakeDevice, dest: Path
+) -> None:
     """``fetch`` is the half of the pass that may be used on its own — it puts
     verified bytes under the final name and tells the device nothing."""
     name = device.add(431)
@@ -1702,13 +1780,17 @@ def test_print_outcome_names_the_device_and_the_failures(capsys) -> None:
 # ------------------------------------------------------------------- the CLI shell
 
 
-def test_pull_exits_zero_when_everything_was_collected(device: FakeDevice, dest: Path) -> None:
+def test_pull_exits_zero_when_everything_was_collected(
+    device: FakeDevice, dest: Path
+) -> None:
     device.add(431)
     assert sdlog_collect.main(["pull", device.url, "--into", str(dest)]) == 0
     assert stored(dest, "mr-orange") == ["L0000431.LOG"]
 
 
-def test_index_lists_and_confirms_nothing(device: FakeDevice, dest: Path, capsys) -> None:
+def test_index_lists_and_confirms_nothing(
+    device: FakeDevice, dest: Path, capsys
+) -> None:
     """The read-only subcommand: the one that is safe to point at a car that is
     still driving."""
     device.add(431)
@@ -1728,7 +1810,10 @@ def test_index_reports_an_entry_it_could_not_read(device: FakeDevice, capsys) ->
     device.add(431)
     device.index_override = {
         "device": "mr-orange",
-        "chunks": [{"name": "../oops.LOG", "seq": 1, "bytes": 3}, *device.index_entries()],
+        "chunks": [
+            {"name": "../oops.LOG", "seq": 1, "bytes": 3},
+            *device.index_entries(),
+        ],
     }
 
     assert sdlog_collect.main(["index", device.url]) == 1
@@ -1749,10 +1834,22 @@ EX_WRONG_TARGET = 3
 
 
 def pull_argv(device: FakeDevice, dest: Path, *extra: str) -> list[str]:
-    return ["pull", device.url, "--into", str(dest), "--retries", "2", "--backoff", "0", *extra]
+    return [
+        "pull",
+        device.url,
+        "--into",
+        str(dest),
+        "--retries",
+        "2",
+        "--backoff",
+        "0",
+        *extra,
+    ]
 
 
-def test_pull_exits_tempfail_when_the_device_is_unreachable(device: FakeDevice, dest: Path) -> None:
+def test_pull_exits_tempfail_when_the_device_is_unreachable(
+    device: FakeDevice, dest: Path
+) -> None:
     """C1. Not 2: argparse and `python missing.py` both exit 2, so a broken deploy
     would read as 'car away' forever."""
     url = device.url
@@ -1761,7 +1858,9 @@ def test_pull_exits_tempfail_when_the_device_is_unreachable(device: FakeDevice, 
     assert sdlog_collect.main(argv) == os.EX_TEMPFAIL
 
 
-def test_index_exits_tempfail_when_the_device_is_unreachable(device: FakeDevice, capsys) -> None:
+def test_index_exits_tempfail_when_the_device_is_unreachable(
+    device: FakeDevice, capsys
+) -> None:
     """C1, for the read-only subcommand."""
     url = device.url
     device.stop()
@@ -1769,7 +1868,9 @@ def test_index_exits_tempfail_when_the_device_is_unreachable(device: FakeDevice,
     assert "index:" in capsys.readouterr().err
 
 
-def test_an_index_that_keeps_stumbling_exits_tempfail(device: FakeDevice, dest: Path) -> None:
+def test_an_index_that_keeps_stumbling_exits_tempfail(
+    device: FakeDevice, dest: Path
+) -> None:
     """C2. A heap-bound httpd answering 500 is busy, not broken (§5a)."""
     device.add(431)
     device.index_faults = [500] * 10
@@ -1803,7 +1904,9 @@ def test_an_index_from_something_else_exits_wrong_target(
 def test_index_exits_wrong_target_for_something_else(device: FakeDevice) -> None:
     """C3, for the read-only subcommand."""
     device.index_raw = b"<html></html>"
-    assert sdlog_collect.main(["index", device.url, "--retries", "2"]) == EX_WRONG_TARGET
+    assert (
+        sdlog_collect.main(["index", device.url, "--retries", "2"]) == EX_WRONG_TARGET
+    )
 
 
 def test_expect_refuses_a_different_device(devices, dest: Path) -> None:
@@ -1813,7 +1916,10 @@ def test_expect_refuses_a_different_device(devices, dest: Path) -> None:
     other = devices("mr-blue")
     other.add(431)
 
-    assert sdlog_collect.main(pull_argv(other, dest, "--expect", "mr-orange")) == EX_WRONG_TARGET
+    assert (
+        sdlog_collect.main(pull_argv(other, dest, "--expect", "mr-orange"))
+        == EX_WRONG_TARGET
+    )
     assert other.gets("L0000431.LOG") == []
     assert other.confirms() == []
     assert not dest.exists() or list(dest.rglob("*")) == []
@@ -1826,7 +1932,10 @@ def test_expect_refuses_a_device_that_does_not_say_who_it_is(
     device.add(431)
     device.index_override = {"chunks": device.index_entries()}
 
-    assert sdlog_collect.main(pull_argv(device, dest, "--expect", "mr-orange")) == EX_WRONG_TARGET
+    assert (
+        sdlog_collect.main(pull_argv(device, dest, "--expect", "mr-orange"))
+        == EX_WRONG_TARGET
+    )
     assert device.confirms() == []
 
 
@@ -1837,7 +1946,9 @@ def test_expect_accepts_the_right_device(device: FakeDevice, dest: Path) -> None
     assert stored(dest, "mr-orange") == ["L0000431.LOG"]
 
 
-def test_a_pass_cut_short_by_the_network_exits_tempfail(device: FakeDevice, dest: Path) -> None:
+def test_a_pass_cut_short_by_the_network_exits_tempfail(
+    device: FakeDevice, dest: Path
+) -> None:
     """C5 — E3's 'WiFi gone mid-transfer'. The partial stays for the next run,
     and the pass is silent: nothing here needs a human."""
     name = device.add(431)
@@ -1869,12 +1980,17 @@ def test_a_broken_index_entry_exits_defect(device: FakeDevice, dest: Path) -> No
     device.add(431)
     device.index_override = {
         "device": "mr-orange",
-        "chunks": [{"name": "../oops.LOG", "seq": 1, "bytes": 3}, *device.index_entries()],
+        "chunks": [
+            {"name": "../oops.LOG", "seq": 1, "bytes": 3},
+            *device.index_entries(),
+        ],
     }
     assert sdlog_collect.main(pull_argv(device, dest)) == 1
 
 
-def test_a_confirm_lost_to_the_network_exits_tempfail(device: FakeDevice, dest: Path) -> None:
+def test_a_confirm_lost_to_the_network_exits_tempfail(
+    device: FakeDevice, dest: Path
+) -> None:
     """C7. The bytes are safe on disk; the confirm will be resent next run (the
     dedup path re-proves the archived copy first)."""
     name = device.add(431)
@@ -1900,12 +2016,19 @@ def write_token(tmp_path: Path, text: str = "s3cret\n", mode: int = 0o600) -> Pa
     return path
 
 
-def test_a_token_file_sends_a_bearer(device: FakeDevice, dest: Path, tmp_path: Path, capsys) -> None:
+def test_a_token_file_sends_a_bearer(
+    device: FakeDevice, dest: Path, tmp_path: Path, capsys
+) -> None:
     """C16. Every request carries the token; the token is never printed."""
     device.token = "s3cret"
     name = device.add(431)
 
-    assert sdlog_collect.main(pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))) == 0
+    assert (
+        sdlog_collect.main(
+            pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))
+        )
+        == 0
+    )
 
     assert device.confirmed == [name]
     assert {r.auth for r in device.requests} == {"Bearer s3cret"}
@@ -1939,7 +2062,9 @@ def test_a_bad_token_file_is_a_usage_error(
 
 
 @pytest.mark.parametrize("status", [401, 403])
-@pytest.mark.parametrize(("after", "where"), [(0, "index"), (1, "fetch"), (2, "confirm")])
+@pytest.mark.parametrize(
+    ("after", "where"), [(0, "index"), (1, "fetch"), (2, "confirm")]
+)
 def test_a_refusal_stops_the_pass_at_once(
     device: FakeDevice, dest: Path, tmp_path: Path, capsys, status, after, where
 ) -> None:
@@ -1953,32 +2078,51 @@ def test_a_refusal_stops_the_pass_at_once(
     argv = pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))
     assert sdlog_collect.main(argv) == os.EX_NOPERM
 
-    assert len(device.requests) == after + 1, f"refused at the {where}, then kept asking"
+    assert len(device.requests) == after + 1, (
+        f"refused at the {where}, then kept asking"
+    )
     assert device.confirmed == []
     out = capsys.readouterr()
-    assert "REFUSED" in out.err and str(status) in out.err and "s3cret" not in out.out + out.err
+    assert (
+        "REFUSED" in out.err
+        and str(status) in out.err
+        and "s3cret" not in out.out + out.err
+    )
 
 
-def test_a_refusal_on_the_identity_window_stops_too(device: FakeDevice, dest: Path) -> None:
+def test_a_refusal_on_the_identity_window_stops_too(
+    device: FakeDevice, dest: Path
+) -> None:
     """C17, for the resume path: the head window is a request like any other."""
     name = device.add(431)
     device.cut(name, 400)
-    assert sdlog_collect.main(pull_argv(device, dest, "--retries", "1")) == os.EX_TEMPFAIL
+    assert (
+        sdlog_collect.main(pull_argv(device, dest, "--retries", "1")) == os.EX_TEMPFAIL
+    )
     device.requests.clear()
     device.refuse_after = 1
 
     assert sdlog_collect.main(pull_argv(device, dest)) == os.EX_NOPERM
     assert [r.range for r in device.requests] == [None, f"bytes=0-{HEAD - 1}"]
-    assert (dest / "mr-orange" / f"{name}.part").is_file(), "the partial waits for the next pass"
+    assert (dest / "mr-orange" / f"{name}.part").is_file(), (
+        "the partial waits for the next pass"
+    )
 
 
-def test_a_redirect_never_carries_the_token(devices, dest: Path, tmp_path: Path) -> None:
+def test_a_redirect_never_carries_the_token(
+    devices, dest: Path, tmp_path: Path
+) -> None:
     """C18. With a token, a 3xx is an answer: exit 3, and the other URL sees nothing."""
     device = devices()
     other = devices("mr-blue")
     device.redirect_to = other.url
 
-    assert sdlog_collect.main(pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))) == 3
+    assert (
+        sdlog_collect.main(
+            pull_argv(device, dest, "--token-file", str(write_token(tmp_path)))
+        )
+        == 3
+    )
     assert other.requests == []
 
 

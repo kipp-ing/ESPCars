@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Diagnostic answers in sd_logger chunks → signals and events (docs/sdlog-decode-spec.md §7).
 
 A device that polls an ECU logs the answers as plain CAN frames. This reassembles them as
@@ -12,15 +13,15 @@ one ``UdsChunk`` per chunk (every chunk starts fresh, spec §7.1). Standard libr
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
 import difflib
 import importlib.util
 import math
+from pathlib import Path
 import re
 import sys
-from collections import Counter
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
 
 try:
     import tomllib
@@ -29,7 +30,9 @@ except ModuleNotFoundError:  # pragma: no cover - the host is too old, say so pl
 
 # The catalog reader is shared with the ESPHome codegen and script/uds_catalog.py, and loaded by
 # path under the name uds_catalog.py uses, so both tools in one process share one module.
-_CATALOG_PATH = Path(__file__).absolute().parent.parent / "components" / "uds" / "catalog.py"
+_CATALOG_PATH = (
+    Path(__file__).absolute().parent.parent / "components" / "uds" / "catalog.py"
+)
 if "uds_catalog_lib" in sys.modules:
     lib = sys.modules["uds_catalog_lib"]
 else:
@@ -94,8 +97,10 @@ class UdsSpec:
     def hash_parts(self) -> list[bytes]:
         """What the catalog hash covers for this entry (U13)."""
         parts = [self.label.encode(), self.dcat.read_bytes(), (self.ecu or "").encode()]
-        for path in (self.names, self.dtc):
-            parts.append(path.read_bytes() if path is not None else b"")
+        parts.extend(
+            path.read_bytes() if path is not None else b""
+            for path in (self.names, self.dtc)
+        )
         return parts
 
 
@@ -104,7 +109,9 @@ def parse_spec(entry: object, where: str) -> UdsSpec:
         raise UdsConfigError(f"{where}: uds must be [[device.uds]] tables")
     unknown = set(entry) - KEYS
     if unknown:
-        raise UdsConfigError(f"{where}: uds: unknown key(s): {', '.join(sorted(unknown))}")
+        raise UdsConfigError(
+            f"{where}: uds: unknown key(s): {', '.join(sorted(unknown))}"
+        )
     label = entry.get("label")
     if not isinstance(label, str) or not label:
         raise UdsConfigError(f"{where}: uds: label is required")
@@ -117,12 +124,16 @@ def parse_spec(entry: object, where: str) -> UdsSpec:
             paths[key] = None
             continue
         if not isinstance(value, str) or not Path(value).is_file():
-            raise UdsConfigError(f"{where}: uds {label!r}: {key} file not found: {value}")
+            raise UdsConfigError(
+                f"{where}: uds {label!r}: {key} file not found: {value}"
+            )
         paths[key] = Path(value)
     ecu = entry.get("ecu")
     if ecu is not None and (not isinstance(ecu, str) or not ecu):
         raise UdsConfigError(f"{where}: uds {label!r}: ecu must be a name")
-    return UdsSpec(label=label, dcat=paths["dcat"], ecu=ecu, names=paths["names"], dtc=paths["dtc"])
+    return UdsSpec(
+        label=label, dcat=paths["dcat"], ecu=ecu, names=paths["names"], dtc=paths["dtc"]
+    )
 
 
 # ------------------------------------------------------------------------ one ECU, loaded
@@ -136,13 +147,17 @@ def dtc_code(record: bytes) -> str:
 
 def load_dtc_texts(path: Path) -> dict[str, str]:
     texts: dict[str, str] = {}
-    for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+    for number, line in enumerate(
+        path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         code, sep, text = line.partition("\t")
         code = code.strip().upper()
         if not sep or not _DTC_CODE.match(code):
-            raise UdsConfigError(f"{path}:{number}: expected CODE<TAB>text with an SAE code like P056200")
+            raise UdsConfigError(
+                f"{path}:{number}: expected CODE<TAB>text with an SAE code like P056200"
+            )
         texts[code] = text.strip()
     return texts
 
@@ -156,24 +171,32 @@ class UdsEcu:
         try:
             catalog = lib.read_catalog(spec.dcat.read_bytes())
         except lib.CatalogError as err:
-            raise UdsConfigError(f"{where}: uds {spec.label!r}: {spec.dcat} is not a catalog: {err}") from None
+            raise UdsConfigError(
+                f"{where}: uds {spec.label!r}: {spec.dcat} is not a catalog: {err}"
+            ) from None
         if spec.ecu is None:
             if len(catalog.ecus) != 1:
                 names = ", ".join(e.name for e in catalog.ecus)
-                raise UdsConfigError(f"{where}: uds {spec.label!r}: the catalog holds several ECUs ({names}), name one with ecu")
+                raise UdsConfigError(
+                    f"{where}: uds {spec.label!r}: the catalog holds several ECUs ({names}), name one with ecu"
+                )
             self.ecu = catalog.ecus[0]
         else:
             found = [e for e in catalog.ecus if e.name == spec.ecu]
             if not found:
                 names = ", ".join(e.name for e in catalog.ecus)
-                raise UdsConfigError(f"{where}: uds {spec.label!r}: ecu {spec.ecu!r} is not in {spec.dcat.name} ({names})")
+                raise UdsConfigError(
+                    f"{where}: uds {spec.label!r}: ecu {spec.ecu!r} is not in {spec.dcat.name} ({names})"
+                )
             self.ecu = found[0]
         self.catalog = catalog
         self.source = self.ecu.name
         # positive answer prefix -> group index: `request[0] + 0x40`, then the echoed request bytes
         self.answers: dict[bytes, int] = {}
         for gi, group in enumerate(self.ecu.groups):
-            self.answers.setdefault(bytes([(group.sid + 0x40) & 0xFF]) + group.request[1:], gi)
+            self.answers.setdefault(
+                bytes([(group.sid + 0x40) & 0xFF]) + group.request[1:], gi
+            )
         self.prefix_lengths = sorted({len(k) for k in self.answers}, reverse=True)
         self.names = self._names(where)
         self.dtc_texts = load_dtc_texts(spec.dtc) if spec.dtc is not None else {}
@@ -190,16 +213,26 @@ class UdsEcu:
                     did = int(service, 16)
                     groups = [i for i, g in enumerate(self.ecu.groups) if g.did == did]
                     if not groups:
-                        raise UdsConfigError(f"{where}: names: {key!r}: no group with DID {service} in ECU {self.source}")
+                        raise UdsConfigError(
+                            f"{where}: names: {key!r}: no group with DID {service} in ECU {self.source}"
+                        )
                     gi = groups[0]
                 else:
                     resolution = self.catalog.resolve(service, "group")
                     if resolution.ecu is not self.ecu:
-                        raise UdsConfigError(f"{where}: names: {key!r}: group {service!r} is not in ECU {self.source}")
+                        raise UdsConfigError(
+                            f"{where}: names: {key!r}: group {service!r} is not in ECU {self.source}"
+                        )
                     gi = self._group_index(resolution.obj)
-                fields = [i for i, f in enumerate(self.ecu.groups[gi].fields) if f.name == field_name]
+                fields = [
+                    i
+                    for i, f in enumerate(self.ecu.groups[gi].fields)
+                    if f.name == field_name
+                ]
                 if not fields:
-                    raise UdsConfigError(f"{where}: names: {key!r}: group {self.ecu.groups[gi].name!r} has no field {field_name!r}")
+                    raise UdsConfigError(
+                        f"{where}: names: {key!r}: group {self.ecu.groups[gi].name!r} has no field {field_name!r}"
+                    )
                 return gi, fields[0]
             hits = [
                 (gi, fi)
@@ -208,12 +241,18 @@ class UdsEcu:
                 if f.name == field_name
             ]
             if not hits:
-                close = difflib.get_close_matches(field_name, [f.name for g in self.ecu.groups for f in g.fields], n=3)
+                close = difflib.get_close_matches(
+                    field_name, [f.name for g in self.ecu.groups for f in g.fields], n=3
+                )
                 hint = f" (close: {', '.join(close)})" if close else ""
-                raise UdsConfigError(f"{where}: names: {key!r}: no such field in ECU {self.source}{hint}")
+                raise UdsConfigError(
+                    f"{where}: names: {key!r}: no such field in ECU {self.source}{hint}"
+                )
             if len(hits) > 1:
                 groups = ", ".join(self.ecu.groups[gi].name for gi, _ in hits)
-                raise UdsConfigError(f"{where}: names: {key!r} is ambiguous, write <service>/<field> (groups: {groups})")
+                raise UdsConfigError(
+                    f"{where}: names: {key!r} is ambiguous, write <service>/<field> (groups: {groups})"
+                )
             return hits[0]
         except lib.CatalogError as err:
             raise UdsConfigError(f"{where}: names: {key!r}: {err}") from None
@@ -225,34 +264,58 @@ class UdsEcu:
             try:
                 raw = tomllib.loads(self.spec.names.read_text(encoding="utf-8"))
             except (OSError, tomllib.TOMLDecodeError) as err:
-                raise UdsConfigError(f"{where}: names: {self.spec.names}: {err}") from None
+                raise UdsConfigError(
+                    f"{where}: names: {self.spec.names}: {err}"
+                ) from None
             unknown = set(raw) - {"fields"}
             if unknown:
-                raise UdsConfigError(f"{where}: names: unknown key(s): {', '.join(sorted(unknown))}")
+                raise UdsConfigError(
+                    f"{where}: names: unknown key(s): {', '.join(sorted(unknown))}"
+                )
             fields = raw.get("fields", {})
             if not isinstance(fields, dict):
-                raise UdsConfigError(f"{where}: names: [fields] must be a table of field = name")
+                raise UdsConfigError(
+                    f"{where}: names: [fields] must be a table of field = name"
+                )
             taken: dict[str, str] = {}
             for key, alias in fields.items():
                 if not isinstance(alias, str) or not _NAME.match(alias):
-                    raise UdsConfigError(f"{where}: names: {key!r}: {alias!r} is not a name ([A-Za-z][A-Za-z0-9_]*)")
+                    raise UdsConfigError(
+                        f"{where}: names: {key!r}: {alias!r} is not a name ([A-Za-z][A-Za-z0-9_]*)"
+                    )
                 if alias in taken:
-                    raise UdsConfigError(f"{where}: names: {alias!r} is given to both {taken[alias]!r} and {key!r}")
+                    raise UdsConfigError(
+                        f"{where}: names: {alias!r} is given to both {taken[alias]!r} and {key!r}"
+                    )
                 taken[alias] = key
                 target = self._resolve_field(key, where)
                 if target in aliases:
-                    raise UdsConfigError(f"{where}: names: {key!r} names a field that already has a name")
+                    raise UdsConfigError(
+                        f"{where}: names: {key!r} names a field that already has a name"
+                    )
                 aliases[target] = alias
         names: dict[tuple[int, int], str] = {}
         seen: dict[str, tuple[int, int]] = {}
         for gi, group in enumerate(self.ecu.groups):
             for fi, field in enumerate(group.fields):
-                base = f"{self.source}.{aliases[(gi, fi)]}" if (gi, fi) in aliases else f"{self.source}.{group.name}.{field.name}"
+                base = (
+                    f"{self.source}.{aliases[(gi, fi)]}"
+                    if (gi, fi) in aliases
+                    else f"{self.source}.{group.name}.{field.name}"
+                )
                 width = len(str(field.repeat_count))
-                full = [base] if field.repeat_count == 1 else [f"{base}.{k + 1:0{width}d}" for k in range(field.repeat_count)]
+                full = (
+                    [base]
+                    if field.repeat_count == 1
+                    else [
+                        f"{base}.{k + 1:0{width}d}" for k in range(field.repeat_count)
+                    ]
+                )
                 for name in full:
                     if name in seen:
-                        raise UdsConfigError(f"{where}: two fields end up as signal {name!r}; give one a name")
+                        raise UdsConfigError(
+                            f"{where}: two fields end up as signal {name!r}; give one a name"
+                        )
                     seen[name] = (gi, fi)
                 names[(gi, fi)] = base
         return names
@@ -270,7 +333,9 @@ class _Rx:
     need: int = 0
     sn: int = 0
     utc: int | None = None
-    quiet: bool = False  # an isotp event was raised for the frames that follow; do not repeat it
+    quiet: bool = (
+        False  # an isotp event was raised for the frames that follow; do not repeat it
+    )
     request: bytes | None = None  # the last logged single-frame request (log_tap_tx)
 
 
@@ -295,7 +360,9 @@ class UdsChunk:
             self.routes[(e.label, e.ecu.request_id, e.ecu.extended_id)] = (e, "tx")
         self.rx = {id(e): _Rx() for e in ecus}
         self.states: dict[int, dict[str, tuple]] = {id(e): {} for e in ecus}
-        self.dtcs: dict[int, dict[bytes | None, dict[str, int]]] = {id(e): {} for e in ecus}
+        self.dtcs: dict[int, dict[bytes | None, dict[str, int]]] = {
+            id(e): {} for e in ecus
+        }
         self.signal = signal  # (name, utc, value, text)
         self.event = event  # (utc, source, kind, name, value, text, detail)
         self.counts: Counter[str] = Counter()
@@ -309,15 +376,28 @@ class UdsChunk:
             for can_id in (e.ecu.request_id, e.ecu.response_id):
                 key = (e.label, can_id, e.ecu.extended_id)
                 if key in out:
-                    raise UdsConfigError(f"uds: {e.source} and {out[key]} both use id 0x{can_id:X} on {e.label!r}")
+                    raise UdsConfigError(
+                        f"uds: {e.source} and {out[key]} both use id 0x{can_id:X} on {e.label!r}"
+                    )
                 out[key] = e.source
         return out
 
-    def _event(self, e: UdsEcu, utc, kind: str, name: str, value: float, text: str = "", detail: str = "") -> None:
+    def _event(
+        self,
+        e: UdsEcu,
+        utc,
+        kind: str,
+        name: str,
+        value: float,
+        text: str = "",
+        detail: str = "",
+    ) -> None:
         self.events += 1
         self.event(utc, e.source, kind, name, value, text, detail)
 
-    def feed(self, label: str, can_id: int, extended: bool, data_hex: str, utc: int | None) -> bool:
+    def feed(
+        self, label: str, can_id: int, extended: bool, data_hex: str, utc: int | None
+    ) -> bool:
         """One CAN frame. True when it is an ECU's request or answer (counts as matched, U12)."""
         route = self.routes.get((label, can_id, extended))
         if route is None:
@@ -331,7 +411,7 @@ class UdsChunk:
         pci = data[0] >> 4
         if role == "tx":
             if pci == 0 and 1 <= (data[0] & 0xF) <= len(data) - 1:
-                rx.request = bytes(data[1:1 + (data[0] & 0xF)])
+                rx.request = bytes(data[1 : 1 + (data[0] & 0xF)])
             elif pci == 1:
                 rx.request = None  # a multi-frame request: not followed
             return True
@@ -342,7 +422,7 @@ class UdsChunk:
                 return True
             self._abandon(e, rx, utc)
             rx.started, rx.quiet = True, False
-            self._message(e, rx, bytes(data[1:1 + length]), utc)
+            self._message(e, rx, bytes(data[1 : 1 + length]), utc)
         elif pci == 1:
             length = ((data[0] & 0xF) << 8) | data[1] if len(data) >= 2 else 0
             if length < 8 or len(data) < 8:
@@ -357,18 +437,34 @@ class UdsChunk:
                     self.counts["frames cut at the start"] += 1
                 elif not rx.quiet:
                     rx.quiet = True
-                    self._event(e, utc, "isotp", "orphan", float(len(data) - 1), "", "consecutive frame without a first frame")
+                    self._event(
+                        e,
+                        utc,
+                        "isotp",
+                        "orphan",
+                        float(len(data) - 1),
+                        "",
+                        "consecutive frame without a first frame",
+                    )
                 return True
             sn = data[0] & 0xF
             if sn != rx.sn:
                 got = len(rx.buf)
                 rx.buf, rx.quiet = None, True
-                self._event(e, utc, "isotp", "sequence", float(got), "", f"expected SN {rx.sn:X}, got {sn:X}")
+                self._event(
+                    e,
+                    utc,
+                    "isotp",
+                    "sequence",
+                    float(got),
+                    "",
+                    f"expected SN {rx.sn:X}, got {sn:X}",
+                )
                 return True
             rx.buf += data[1:]
             rx.sn = (rx.sn + 1) & 0xF
             if len(rx.buf) >= rx.need:
-                message = bytes(rx.buf[:rx.need])
+                message = bytes(rx.buf[: rx.need])
                 rx.buf = None
                 self._message(e, rx, message, utc)
         elif pci == 3:
@@ -381,7 +477,15 @@ class UdsChunk:
         if rx.buf is not None:
             got = len(rx.buf)
             rx.buf = None
-            self._event(e, utc, "isotp", "incomplete", float(got), "", f"{got} of {rx.need} bytes, then a new message")
+            self._event(
+                e,
+                utc,
+                "isotp",
+                "incomplete",
+                float(got),
+                "",
+                f"{got} of {rx.need} bytes, then a new message",
+            )
 
     def finish(self) -> None:
         for rx in self.rx.values():
@@ -407,7 +511,9 @@ class UdsChunk:
             rx.request = None
             return
         if len(msg) >= 3 and msg[0] == 0x59 and msg[1] == 0x02:
-            request = rx.request if rx.request and rx.request[:2] == b"\x19\x02" else None
+            request = (
+                rx.request if rx.request and rx.request[:2] == b"\x19\x02" else None
+            )
             self._dtcs(e, msg, utc, request)
             rx.request = None
             return
@@ -440,10 +546,16 @@ class UdsChunk:
                 name = base if f.repeat_count == 1 else f"{base}.{k + 1:0{width}d}"
                 if f.ascii or f.hexdump:
                     if start % 8 or f.bit_size % 8:
-                        self.counts["misaligned text fields"] += 1  # the device refuses these too
+                        self.counts["misaligned text fields"] += (
+                            1  # the device refuses these too
+                        )
                         continue
-                    raw = msg[start // 8:(start + f.bit_size) // 8]
-                    text = raw.split(b"\0", 1)[0].decode("latin-1") if f.ascii else raw.hex().upper()
+                    raw = msg[start // 8 : (start + f.bit_size) // 8]
+                    text = (
+                        raw.split(b"\0", 1)[0].decode("latin-1")
+                        if f.ascii
+                        else raw.hex().upper()
+                    )
                     self.signal(name, utc, math.nan, text)
                     continue
                 value, text = lib.evaluate(f, lib.extract(f, msg, k))
@@ -469,7 +581,11 @@ class UdsChunk:
         if old == key:
             return
         states[name] = key
-        detail = "initial" if old is None else f"from {_fmt(math.nan if old[0] is None else old[0], old[1])}"
+        detail = (
+            "initial"
+            if old is None
+            else f"from {_fmt(math.nan if old[0] is None else old[0], old[1])}"
+        )
         self._event(e, utc, "state", name, value, text, detail)
 
     def _dtcs(self, e: UdsEcu, msg: bytes, utc, request: bytes | None) -> None:
@@ -478,7 +594,7 @@ class UdsChunk:
             self.counts["torn fault records"] += 1
         current: dict[str, int] = {}
         for i in range(0, len(records) - len(records) % 4, 4):
-            current[dtc_code(records[i:i + 3])] = records[i + 3]
+            current[dtc_code(records[i : i + 3])] = records[i + 3]
         known = self.dtcs[id(e)]
         previous = known.get(request)
         for code, status in current.items():
@@ -490,10 +606,14 @@ class UdsChunk:
                 detail = f"status 0x{previous[code]:02X}->0x{status:02X}"
             else:
                 continue
-            self._event(e, utc, "dtc", code, float(status), e.dtc_texts.get(code, ""), detail)
+            self._event(
+                e, utc, "dtc", code, float(status), e.dtc_texts.get(code, ""), detail
+            )
         for code in previous or ():
             if code not in current:
-                self._event(e, utc, "dtc", code, 0.0, e.dtc_texts.get(code, ""), "cleared")
+                self._event(
+                    e, utc, "dtc", code, 0.0, e.dtc_texts.get(code, ""), "cleared"
+                )
         known[request] = current
 
     def summary(self) -> str:
@@ -501,9 +621,17 @@ class UdsChunk:
         if not self.counts and not self.events:
             return ""
         order = [
-            "answers", "partial answers", "unknown answers", "pending", "unavailable values",
-            "values past the answer's end", "frames cut at the start", "frames cut at the end",
-            "bad frames", "misaligned text fields", "torn fault records",
+            "answers",
+            "partial answers",
+            "unknown answers",
+            "pending",
+            "unavailable values",
+            "values past the answer's end",
+            "frames cut at the start",
+            "frames cut at the end",
+            "bad frames",
+            "misaligned text fields",
+            "torn fault records",
         ]
         parts = [f"{self.counts[k]} {k}" for k in order if self.counts[k]]
         parts.append(f"{self.events} events")

@@ -1,7 +1,8 @@
-"""Guard the report-only wiring, shared pins and byte-exact exclusions."""
+"""Guard blocking/advisory lint wiring, shared pins and byte-exact exclusions."""
 
 from pathlib import Path
 import re
+import shlex
 import subprocess
 
 import pytest
@@ -10,6 +11,15 @@ import yaml
 from script import lint_report
 
 ROOT = Path(__file__).resolve().parents[2]
+P2_HOOKS = (
+    "ruff",
+    "ruff-format",
+    "pyupgrade",
+    "yamllint",
+    "end-of-file-fixer",
+    "trailing-whitespace",
+)
+ADVISORY_HOOKS = ("hook-config", "no-commit-to-branch", "ci-custom", "clang-tidy")
 
 
 def test_hook_revisions_match_shared_pins():
@@ -53,19 +63,40 @@ def test_byte_exact_files_excluded(name):
     )
 
 
-def test_ci_job_stays_advisory():
+def test_ci_and_local_hooks_block_only_the_clean_tools():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     )
     jobs = workflow["jobs"]
     assert not jobs["upstream-lint"].get("continue-on-error", False)
-    assert "upstream-lint" not in jobs["required-checks"]["needs"]
-    assert any(
-        step.get("run") == "python script/lint_report.py --report-only"
-        for step in jobs["upstream-lint"]["steps"]
-    )
+    assert "upstream-lint" in jobs["required-checks"]["needs"]
+    assert "clang-tidy" not in jobs["required-checks"]["needs"]
+    steps = jobs["upstream-lint"]["steps"]
+    assert not any(step.get("continue-on-error", False) for step in steps)
     check_script = (ROOT / "script/check.sh").read_text(encoding="utf-8")
-    assert '"$PY" script/lint_report.py --report-only --summary\n' in check_script
+    for source in ("\n".join(step.get("run", "") for step in steps), check_script):
+        commands = [
+            shlex.split(line)
+            for line in source.splitlines()
+            if "script/lint_report.py --only" in line
+        ]
+        blocking = [command for command in commands if "ruff" in command]
+        assert len(blocking) == 1
+        assert "--report-only" not in blocking[0]
+        assert "--summary" in blocking[0]
+        assert set(blocking[0][blocking[0].index("--only") + 1 :]) - {
+            "--summary"
+        } == set(P2_HOOKS)
+        advisory = [command for command in commands if "ci-custom" in command]
+        assert len(advisory) == 1
+        assert "--report-only" in advisory[0]
+        assert "--summary" in advisory[0]
+        assert set(advisory[0][advisory[0].index("--only") + 1 :]) - {
+            "--summary",
+            "--report-only",
+        } == set(ADVISORY_HOOKS)
+    advisory_step = next(step for step in steps if "ci-custom" in step.get("run", ""))
+    assert advisory_step["if"] == "always()"
     assert (
         'echo "For details, run: .venv/bin/python script/lint_report.py"'
         in check_script
@@ -142,8 +173,9 @@ def test_report_continues_after_tool_error(report_environment, monkeypatch, caps
 @pytest.mark.parametrize("report_only", [False, True])
 @pytest.mark.parametrize("summary", [False, True])
 @pytest.mark.parametrize("findings", [0, 3, None])
+@pytest.mark.parametrize("tool", P2_HOOKS)
 def test_report_only_exit_codes(
-    report_environment, monkeypatch, report_only, summary, findings
+    report_environment, monkeypatch, capsys, report_only, summary, findings, tool
 ):
     def fake_report(tool, files, config):
         if findings is None:
@@ -151,13 +183,26 @@ def test_report_only_exit_codes(
         return findings
 
     monkeypatch.setattr(lint_report, "report", fake_report)
-    args = ["--only", "ruff"]
+    args = ["--only", tool]
     if report_only:
         args.append("--report-only")
     if summary:
         args.append("--summary")
     expected = 2 if findings is None else int(bool(findings) and not report_only)
     assert lint_report.main(args) == expected
+    mode = "report-only" if report_only else "blocking"
+    assert f"Upstream lint summary ({mode};" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failing_tool", P2_HOOKS)
+def test_combined_blocking_hooks_fail_on_each_tool(
+    report_environment, monkeypatch, failing_tool
+):
+    def fake_report(tool, files, config):
+        return int(tool == failing_tool or tool in ADVISORY_HOOKS)
+
+    monkeypatch.setattr(lint_report, "report", fake_report)
+    assert lint_report.main(["--only", *P2_HOOKS, "--summary"]) == 1
 
 
 @pytest.mark.parametrize("summary", [False, True])

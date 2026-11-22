@@ -32,9 +32,9 @@ a description of what the writer emits today.
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -60,8 +60,10 @@ HEADER = [
     "#src,L,lin,5,linbus,19200",
     "#types,C=can,L=lin,U=user,I=isotp,X=esphome-log,#=meta",
     "#flags,x=extended,r=rtr,t=tx,s=shed,~=truncated,none=absent",
-    "#layout,rec=<K><tag><flags>:t:id:data,log=X<level>:t:tag:msg"
-    ",t=@abs|step us HEX,tag/id/data HEX,dlc=len(data)/2",
+    (
+        "#layout,rec=<K><tag><flags>:t:id:data,log=X<level>:t:tag:msg"
+        ",t=@abs|step us HEX,tag/id/data HEX,dlc=len(data)/2"
+    ),
 ]
 # Capture times 412345, 412388, 412502, 412610 as v2 writes them: the first stream
 # line of the chunk anchors (`@64AB9`), the three after it step (`2B`, `72`, `6C`),
@@ -172,7 +174,9 @@ def test_each_close_reason_is_read_back(tmp_path: Path) -> None:
         assert report.close_reason == reason
 
 
-def test_a_boot_sealed_file_is_closed_and_says_it_was_cut(tmp_path: Path, capsys) -> None:
+def test_a_boot_sealed_file_is_closed_and_says_it_was_cut(
+    tmp_path: Path, capsys
+) -> None:
     """F2c R5: the boot after a power cut seals the torn file with
     `#close,@<t>,recovered`. That is a closed file — `--strict` passes it — but the
     report still names the power cut, because the run did not end in order."""
@@ -226,7 +230,9 @@ def test_drop_markers_are_reported_apart_never_summed(tmp_path: Path) -> None:
     assert report.clean  # a drop is a finding about the run, not a broken file
 
 
-def test_writer_and_emergency_tap_losses_use_the_existing_drop_schema(tmp_path: Path) -> None:
+def test_writer_and_emergency_tap_losses_use_the_existing_drop_schema(
+    tmp_path: Path,
+) -> None:
     """The new loss classes are additive marker labels, not a file-format revision."""
     report = parse(
         tmp_path,
@@ -279,13 +285,18 @@ def states_chunks(text: str, count: int) -> bool:
     """Does `text` state a chunk count of `count`? Both spellings the report already uses
     are accepted — prose (`3 chunks`) and the `DROPS` line's `what=count` form
     (`chunks=3`) — so these assertions pin the *number*, not the punctuation."""
-    return re.search(rf"(?<![\d=]){count} chunks?\b|\bchunks?={count}(?!\d)", text) is not None
+    return (
+        re.search(rf"(?<![\d=]){count} chunks?\b|\bchunks?={count}(?!\d)", text)
+        is not None
+    )
 
 
 def states_window(text: str, first: int, last: int) -> bool:
     """Does `text` show the window's two endpoints as a range? `412..414`, `412-414` and
     `412 to 414` all count."""
-    return re.search(rf"(?<!\d){first}\s*(?:\.\.|-|to )\s*{last}(?!\d)", text) is not None
+    return (
+        re.search(rf"(?<!\d){first}\s*(?:\.\.|-|to )\s*{last}(?!\d)", text) is not None
+    )
 
 
 def check_lines(tmp_path: Path, lines: list[str], capsys, *flags: str) -> list[str]:
@@ -329,7 +340,9 @@ def test_gaps_are_surfaced_apart_from_drops(tmp_path: Path) -> None:
     the same mistake the three drop counters are kept apart to avoid."""
     report = parse(
         tmp_path,
-        HEADER + RECORDS + ["#drop,@65132,ring,17,17", GAP_GOLDEN, "#close,@F3ED0,clean"],
+        HEADER
+        + RECORDS
+        + ["#drop,@65132,ring,17,17", GAP_GOLDEN, "#close,@F3ED0,clean"],
     )
     assert [(d.what, d.delta, d.total) for d in report.drops] == [("ring", 17, 17)]
     assert [(g.chunks, g.first_seq, g.last_seq) for g in report.gaps] == [(3, 412, 414)]
@@ -342,7 +355,9 @@ def test_a_punctured_window_never_claims_the_seqs_inside_it(tmp_path: Path) -> N
     """THE case. Retention sealed 10, 11 and 12, the collector took 11, then retention
     discarded 10 and 12 — so the window is 10..12 but only two chunks went away and seq
     11 is safe in the archive. `chunks` is the loss; the endpoints are only the window."""
-    report = parse(tmp_path, HEADER + RECORDS + ["#gap,@65132,2,8388608,10,12", "#close,@1,clean"])
+    report = parse(
+        tmp_path, HEADER + RECORDS + ["#gap,@65132,2,8388608,10,12", "#close,@1,clean"]
+    )
     assert report.clean
     gap = report.gaps[0]
     assert gap.chunks == 2  # what was lost
@@ -357,7 +372,9 @@ def test_a_punctured_window_prints_as_punctured(tmp_path: Path, capsys) -> None:
     that says "3 chunks missing" sends someone hunting for a chunk that is sitting in the
     archive. State the loss, state the window, and say the window is not solid."""
     lines = check_lines(
-        tmp_path, HEADER + RECORDS + ["#gap,@65132,2,8388608,10,12", "#close,@1,clean"], capsys
+        tmp_path,
+        HEADER + RECORDS + ["#gap,@65132,2,8388608,10,12", "#close,@1,clean"],
+        capsys,
     )
     findings = gap_findings(lines)
     assert len(findings) == 1, lines
@@ -371,10 +388,14 @@ def test_a_punctured_window_prints_as_punctured(tmp_path: Path, capsys) -> None:
     assert not states_chunks("\n".join(lines), 3), lines
 
 
-def test_a_contiguous_window_is_reported_as_a_plain_range(tmp_path: Path, capsys) -> None:
+def test_a_contiguous_window_is_reported_as_a_plain_range(
+    tmp_path: Path, capsys
+) -> None:
     """When `chunks` equals the span, every seq in the window really is gone — say so
     plainly, and do not decorate a solid range with a puncture the file never claimed."""
-    lines = check_lines(tmp_path, HEADER + RECORDS + [GAP_GOLDEN, "#close,@1,clean"], capsys)
+    lines = check_lines(
+        tmp_path, HEADER + RECORDS + [GAP_GOLDEN, "#close,@1,clean"], capsys
+    )
     findings = gap_findings(lines)
     assert len(findings) == 1, lines
     assert states_chunks(findings[0], 3), findings[0]
@@ -419,13 +440,17 @@ def test_multiple_gap_markers_accumulate(tmp_path: Path) -> None:
     assert report.discarded_bytes_total == 50331648 + 4194304 + 12787200000
 
 
-def test_a_window_that_straddles_the_seq_wrap_is_not_the_whole_card(tmp_path: Path) -> None:
+def test_a_window_that_straddles_the_seq_wrap_is_not_the_whole_card(
+    tmp_path: Path,
+) -> None:
     """`seq` wraps at 10 000 000 and the endpoints are emitted in the order retention
     emptied the window, never sorted — so `first > last` is a legal wrapped window of
     three chunks (collection_policy.h `take_pending_discards()`). A plain
     `last - first + 1` reads it as a negative span, and a sorted one reads it as the
     entire card."""
-    report = parse(tmp_path, HEADER + ["#gap,@1,3,3145728,9999999,1", "#close,@2,clean"])
+    report = parse(
+        tmp_path, HEADER + ["#gap,@1,3,3145728,9999999,1", "#close,@2,clean"]
+    )
     assert report.clean
     gap = report.gaps[0]
     assert gap.span == 3  # 9999999, 0, 1
@@ -495,7 +520,10 @@ def test_a_malformed_gap_line_is_a_defect(tmp_path: Path, line: str, why: str) -
     ("line", "why"),
     [
         ("C1x,2B,1A2,0011223", "an odd hex count — half a byte of payload"),
-        ("C1x,2B,1A2,001122334455667788", "nine payload bytes, above the eight a record holds"),
+        (
+            "C1x,2B,1A2,001122334455667788",
+            "nine payload bytes, above the eight a record holds",
+        ),
         ("C1q,2B,1A2,", "unknown flag letter in the token"),
         ("C1x,2B,1A2", "a field short"),
         ("C1x,2B,1A2,0011,extra", "a field too many"),
@@ -521,8 +549,13 @@ def test_a_malformed_line_is_a_defect(tmp_path: Path, line: str, why: str) -> No
     assert len(report.bad_lines) == 1
 
 
-def test_an_unknown_meta_line_is_skipped_for_forward_compatibility(tmp_path: Path) -> None:
-    report = parse(tmp_path, HEADER + ["#utc,100000003,6543210FEDCBA", "#origin,SEV Mr. Orange"] + RECORDS)
+def test_an_unknown_meta_line_is_skipped_for_forward_compatibility(
+    tmp_path: Path,
+) -> None:
+    report = parse(
+        tmp_path,
+        HEADER + ["#utc,100000003,6543210FEDCBA", "#origin,SEV Mr. Orange"] + RECORDS,
+    )
     assert report.clean
     assert report.counts == {"C": 2, "X": 1, "L": 1}
 
@@ -530,7 +563,8 @@ def test_an_unknown_meta_line_is_skipped_for_forward_compatibility(tmp_path: Pat
 def test_a_message_with_commas_is_not_a_malformed_line(tmp_path: Path) -> None:
     """The message is the last field precisely so its commas need no escaping."""
     report = parse(
-        tmp_path, HEADER + ["XW,@1,gw,route[0]: shed, again, and again", "#close,@2,clean"]
+        tmp_path,
+        HEADER + ["XW,@1,gw,route[0]: shed, again, and again", "#close,@2,clean"],
     )
     assert report.clean
     assert report.counts == {"X": 1}
@@ -606,7 +640,9 @@ def test_a_step_before_any_anchor_is_a_defect(tmp_path: Path) -> None:
     from means the anchor is gone — from a truncated head, or a splice. The times
     behind it are unrecoverable, and printing them as if they had been read would put
     confident wrong numbers in front of someone."""
-    report = parse(tmp_path, HEADER + ["C1x,2B,1A2,0011223344556677", "#close,@1,clean"])
+    report = parse(
+        tmp_path, HEADER + ["C1x,2B,1A2,0011223344556677", "#close,@1,clean"]
+    )
     assert not report.clean
     assert len(report.bad_lines) == 1
     assert "before any anchor" in report.bad_lines[0][1]
@@ -629,7 +665,9 @@ def test_a_v1_file_is_refused_by_name_and_not_read(tmp_path: Path) -> None:
     assert report.first_t_us is None
 
 
-def test_a_v1_file_exits_two_rather_than_calling_the_card_broken(tmp_path: Path) -> None:
+def test_a_v1_file_exits_two_rather_than_calling_the_card_broken(
+    tmp_path: Path,
+) -> None:
     """Without the version check this file would come back as four malformed lines,
     which reads as a card that returned garbage — and sends someone to the bench
     after a fault that is not there."""
@@ -640,12 +678,17 @@ def test_a_v1_file_exits_two_rather_than_calling_the_card_broken(tmp_path: Path)
 # -------------------------------------------------------- an unknown write format
 
 
-def test_an_unknown_format_version_is_named_not_parsed_line_by_line(tmp_path: Path) -> None:
+def test_an_unknown_format_version_is_named_not_parsed_line_by_line(
+    tmp_path: Path,
+) -> None:
     """THE gap this bump closed. Nothing rejected an unknown version before, so a
     newer file was handed to a parser that does not fit it and came back as a wall of
     malformed lines — which reads as a card that returned garbage and sends someone
     after a hardware fault that is not there."""
-    report = parse(tmp_path, ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"])
+    report = parse(
+        tmp_path,
+        ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"],
+    )
     assert report.format_version == 99
     assert report.unsupported_version
     # Nothing below the header was read, and the report says nothing it did not read.
@@ -656,12 +699,20 @@ def test_an_unknown_format_version_is_named_not_parsed_line_by_line(tmp_path: Pa
 def test_an_unknown_format_version_exits_two_not_one(tmp_path: Path) -> None:
     """2 is "could not be read", which is what happened. 1 is "this file has a
     defect" and would blame the card for the reader being behind."""
-    path = write_log(tmp_path, ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"])
+    path = write_log(
+        tmp_path,
+        ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"],
+    )
     assert sdlog.main(["check", str(path)]) == 2
 
 
-def test_an_unknown_format_version_says_so_in_the_report(tmp_path: Path, capsys) -> None:
-    path = write_log(tmp_path, ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"])
+def test_an_unknown_format_version_says_so_in_the_report(
+    tmp_path: Path, capsys
+) -> None:
+    path = write_log(
+        tmp_path,
+        ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"],
+    )
     sdlog.main(["check", str(path)])
     out = capsys.readouterr().out
     assert "v99" in out
@@ -672,7 +723,10 @@ def test_an_unknown_format_version_says_so_in_the_report(tmp_path: Path, capsys)
 def test_extract_refuses_an_unknown_format_version(tmp_path: Path, capsys) -> None:
     """A column of numbers from a format this reader does not know is worse than no
     output: it looks exactly like a successful extract."""
-    path = write_log(tmp_path, ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"])
+    path = write_log(
+        tmp_path,
+        ["#sdlog,99,7,412000,2026.7.0", *HEADER[1:], *RECORDS, "#close,@1,clean"],
+    )
     assert sdlog.main(["extract", str(path), "--type", "C"]) == 2
     assert capsys.readouterr().out.strip() == ""
 
@@ -684,7 +738,9 @@ def test_an_m1_era_file_is_named_not_rejected(tmp_path: Path) -> None:
     """A card can hold both eras — which is why the boot scan matches both
     extensions — so the reader says which era it is looking at."""
     path = tmp_path / "L0000003.CSV"
-    path.write_text("# t_us,source,id_hex,flags,dlc,data_hex\n412345,1,1A2,1,8,0011223344556677\n")
+    path.write_text(
+        "# t_us,source,id_hex,flags,dlc,data_hex\n412345,1,1A2,1,8,0011223344556677\n"
+    )
     report = sdlog.parse_file(path)
     assert report.legacy
     assert report.format_version is None
@@ -717,7 +773,9 @@ def test_strict_makes_a_missing_close_and_any_drop_fail(tmp_path: Path) -> None:
     assert sdlog.main(["check", "--strict", str(cut)]) == 1
 
     dropped = tmp_path / "L0000009.LOG"
-    dropped.write_text("\n".join(HEADER + RECORDS + ["#drop,@1,ring,5,5", "#close,@2,clean"]) + "\n")
+    dropped.write_text(
+        "\n".join(HEADER + RECORDS + ["#drop,@1,ring,5,5", "#close,@2,clean"]) + "\n"
+    )
     assert sdlog.main(["check", "--strict", str(dropped)]) == 1
 
 
@@ -770,14 +828,18 @@ def test_extract_yields_a_single_schema_csv(tmp_path: Path, capsys) -> None:
 def test_extract_can_select_one_segment(tmp_path: Path, capsys) -> None:
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "C", "--label", "C1", "--no-header"])
-    assert capsys.readouterr().out.splitlines() == ["412345,C1,1A2,x,8,0011223344556677,"]
+    assert capsys.readouterr().out.splitlines() == [
+        "412345,C1,1A2,x,8,0011223344556677,"
+    ]
 
 
 def test_extract_can_select_shed_frames(tmp_path: Path, capsys) -> None:
     """The Issue #1 hunt: a frame that was on the wire and was not forwarded."""
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "C", "--shed", "--no-header"])
-    assert capsys.readouterr().out.splitlines() == ["412388,C2,1A2,xs,8,0011223344556677,"]
+    assert capsys.readouterr().out.splitlines() == [
+        "412388,C2,1A2,xs,8,0011223344556677,"
+    ]
 
 
 def test_extract_skips_a_torn_trailing_record(tmp_path: Path, capsys) -> None:
@@ -789,16 +851,22 @@ def test_extract_skips_a_torn_trailing_record(tmp_path: Path, capsys) -> None:
 def test_extract_text_lines(tmp_path: Path, capsys) -> None:
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "X", "--no-header"])
-    assert capsys.readouterr().out.splitlines() == ["412502,I,sd_logger,records=4120 dropped=0 bytes=198112,"]
+    assert capsys.readouterr().out.splitlines() == [
+        "412502,I,sd_logger,records=4120 dropped=0 bytes=198112,"
+    ]
 
 
-def test_extract_resolves_the_chain_across_the_types_it_is_not_asked_for(tmp_path: Path, capsys) -> None:
+def test_extract_resolves_the_chain_across_the_types_it_is_not_asked_for(
+    tmp_path: Path, capsys
+) -> None:
     """`--type L` still has to read the `C` and `X` lines above it, because their
     steps are part of the number it prints. Filtering by prefix first — which is what
     a v1 extract could afford to do — would print 108 µs instead of 412610."""
     path = write_log(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     sdlog.main(["extract", str(path), "--type", "L", "--no-header"])
-    assert capsys.readouterr().out.splitlines() == ["412610,lin,3C,-,8,55AA0000000000FF,"]
+    assert capsys.readouterr().out.splitlines() == [
+        "412610,lin,3C,-,8,55AA0000000000FF,"
+    ]
 
 
 def test_extract_puts_back_every_column_the_card_stopped_paying_for(
@@ -817,7 +885,9 @@ def test_extract_puts_back_every_column_the_card_stopped_paying_for(
     ]
 
 
-def test_extract_appends_resolved_utc_and_uses_each_new_anchor(tmp_path: Path, capsys) -> None:
+def test_extract_appends_resolved_utc_and_uses_each_new_anchor(
+    tmp_path: Path, capsys
+) -> None:
     """UTC is a second axis: before its first anchor it is blank, then every new
     correspondence supersedes the preceding one without moving the boot-time chain."""
     path = write_log(
@@ -843,7 +913,9 @@ def test_extract_appends_resolved_utc_and_uses_each_new_anchor(tmp_path: Path, c
     ]
 
 
-def test_check_adds_utc_span_and_origin_only_when_anchored(tmp_path: Path, capsys) -> None:
+def test_check_adds_utc_span_and_origin_only_when_anchored(
+    tmp_path: Path, capsys
+) -> None:
     anchored = HEADER + [
         "#origin,bench-orange",
         "C1x,@100,1A2,00",
@@ -901,7 +973,13 @@ def clock_lines(lines: list[str]) -> list[str]:
 
 def test_clock_lines_parse_and_refuse_like_the_writer() -> None:
     point = sdlog.parse_clock_line("#clock,@0,ABC,est,card,41")
-    assert (point.t_us, point.utc_us, point.basis, point.src, point.detail) == (0, 0xABC, "est", "card", 41)
+    assert (point.t_us, point.utc_us, point.basis, point.src, point.detail) == (
+        0,
+        0xABC,
+        "est",
+        "card",
+        41,
+    )
     assert sdlog.parse_clock_line("#clock,@1F4,ABC,drift,sleep,600").detail == 600
     assert sdlog.parse_clock_line("#clock,@64960,65E2B1A3C4000,utc,sync").detail is None
     for bad in (
@@ -916,7 +994,9 @@ def test_clock_lines_parse_and_refuse_like_the_writer() -> None:
             sdlog.parse_clock_line(bad)
 
 
-def test_check_reports_an_estimate_and_what_the_first_reading_corrected(tmp_path: Path, capsys) -> None:
+def test_check_reports_an_estimate_and_what_the_first_reading_corrected(
+    tmp_path: Path, capsys
+) -> None:
     """A cold boot states the card floor; the sync at home says how much time the floor
     could not see. 3 s here — on a car, the time it stood with the battery off."""
     lines = check_lines(
@@ -937,7 +1017,9 @@ def test_check_reports_an_estimate_and_what_the_first_reading_corrected(tmp_path
     ]
 
 
-def test_check_turns_a_sleep_correction_into_a_drift_rate(tmp_path: Path, capsys) -> None:
+def test_check_turns_a_sleep_correction_into_a_drift_rate(
+    tmp_path: Path, capsys
+) -> None:
     """The number §3 of the clock spec has no datasheet figure for: what the RC slow
     clock gained or lost per day of deep sleep, measured by the next real sync."""
     lines = check_lines(
@@ -950,20 +1032,33 @@ def test_check_turns_a_sleep_correction_into_a_drift_rate(tmp_path: Path, capsys
         ],
         capsys,
     )
-    assert clock_lines(lines)[1] == "correction -25.000 s against drift/sleep:600 (-3600.0 s per day slept)"
+    assert (
+        clock_lines(lines)[1]
+        == "correction -25.000 s against drift/sleep:600 (-3600.0 s per day slept)"
+    )
 
 
-def test_check_shouts_when_a_reading_lands_below_the_floor(tmp_path: Path, capsys) -> None:
+def test_check_shouts_when_a_reading_lands_below_the_floor(
+    tmp_path: Path, capsys
+) -> None:
     """C8: accepted (the reading wins), but never silent — and not a parse defect."""
     path = write_log(
         tmp_path,
         # floor 10 s at boot 0; the reading at boot 500 µs says 500 µs: 10 s below it, far past the
         # 2 s slack. One second below would be inside the slack and not a finding.
-        HEADER + ["#clock,@0,989680,est,build", "#clock,@1F4,1F4,utc,sync", "#close,@200,clean"],
+        HEADER
+        + [
+            "#clock,@0,989680,est,build",
+            "#clock,@1F4,1F4,utc,sync",
+            "#close,@200,clean",
+        ],
     )
     assert sdlog.main(["check", str(path)]) == 0
     lines = [" ".join(line.split()) for line in capsys.readouterr().out.splitlines()]
-    assert any(line.startswith("CLOCK a reading landed +10.000 s before the lower bound") for line in lines)
+    assert any(
+        line.startswith("CLOCK a reading landed +10.000 s before the lower bound")
+        for line in lines
+    )
 
 
 def test_a_worse_statement_never_overrides_a_reading() -> None:
@@ -974,14 +1069,25 @@ def test_a_worse_statement_never_overrides_a_reading() -> None:
     assert clock.corrections == []
 
 
-def test_check_prints_a_plain_reading_without_an_opening_bound(tmp_path: Path, capsys) -> None:
+def test_check_prints_a_plain_reading_without_an_opening_bound(
+    tmp_path: Path, capsys
+) -> None:
     lines = check_lines(
-        tmp_path, HEADER + ["#utc,64960,65E2B1A3C4000", "#clock,@64960,65E2B1A3C4000,utc,sync", "#close,@1,clean"], capsys
+        tmp_path,
+        HEADER
+        + [
+            "#utc,64960,65E2B1A3C4000",
+            "#clock,@64960,65E2B1A3C4000,utc,sync",
+            "#close,@1,clean",
+        ],
+        capsys,
     )
     assert clock_lines(lines) == ["clock utc/sync"]
 
 
-def test_extract_estimates_is_opt_in_and_keeps_utc_us_for_readings(tmp_path: Path, capsys) -> None:
+def test_extract_estimates_is_opt_in_and_keeps_utc_us_for_readings(
+    tmp_path: Path, capsys
+) -> None:
     path = write_log(
         tmp_path,
         HEADER
@@ -1023,7 +1129,9 @@ def ident_lines(lines: list[str]) -> list[str]:
 
 
 def test_ident_is_parsed_into_its_keys(tmp_path: Path) -> None:
-    report = parse(tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@F3ED0,clean"])
+    report = parse(
+        tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@F3ED0,clean"]
+    )
     assert report.clean
     assert len(report.idents) == 1
     ident = report.idents[0]
@@ -1042,11 +1150,17 @@ def test_ident_is_parsed_into_its_keys(tmp_path: Path) -> None:
     assert report.counts == {"C": 2, "X": 1, "L": 1}
 
 
-def test_check_prints_the_identity_and_the_date_with_its_basis(tmp_path: Path, capsys) -> None:
-    lines = check_lines(tmp_path, [HEADER[0], IDENT, *HEADER[1:], "#close,@1,clean"], capsys)
+def test_check_prints_the_identity_and_the_date_with_its_basis(
+    tmp_path: Path, capsys
+) -> None:
+    lines = check_lines(
+        tmp_path, [HEADER[0], IDENT, *HEADER[1:], "#close,@1,clean"], capsys
+    )
     assert ident_lines(lines) == [
-        "ident logger-bench mac=02:00:5e:10:20:30 build=2026-10-04T09:12:33Z elf=1a2b3c4d5e6f7a8b"
-        " cfg=5eed1234 project=acme.logger@1.2.0 card=03-5344-0badcafe",
+        (
+            "ident logger-bench mac=02:00:5e:10:20:30 build=2026-10-04T09:12:33Z elf=1a2b3c4d5e6f7a8b"
+            " cfg=5eed1234 project=acme.logger@1.2.0 card=03-5344-0badcafe"
+        ),
         "date 2026-10-11T12:00:03Z (utc/sync)",
     ]
 
@@ -1077,7 +1191,9 @@ def test_an_estimated_date_never_reads_as_a_reading(
     tmp_path: Path, capsys, date: str, clock: str, shown: str
 ) -> None:
     line = f"#ident,id=n,mac=-,date={date},clock={clock},build=-,elf=-,cfg=-"
-    lines = check_lines(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys)
+    lines = check_lines(
+        tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys
+    )
     assert ident_lines(lines) == ["ident n mac=- build=- elf=- cfg=-", shown]
 
 
@@ -1086,7 +1202,12 @@ def test_a_file_without_ident_reads_exactly_as_before(tmp_path: Path, capsys) ->
     report = parse(tmp_path, HEADER + RECORDS + ["#close,@1,clean"])
     assert report.clean
     assert report.idents == []
-    assert ident_lines(check_lines(tmp_path, HEADER + RECORDS + ["#close,@1,clean"], capsys)) == []
+    assert (
+        ident_lines(
+            check_lines(tmp_path, HEADER + RECORDS + ["#close,@1,clean"], capsys)
+        )
+        == []
+    )
 
 
 def test_an_unknown_ident_key_is_kept_not_refused(tmp_path: Path, capsys) -> None:
@@ -1095,14 +1216,23 @@ def test_an_unknown_ident_key_is_kept_not_refused(tmp_path: Path, capsys) -> Non
     assert report.clean
     assert report.idents[0].get("boot") == "deadbeef"
     assert report.idents[0].get("note") == "a=b"  # a value may itself contain `=`
-    lines = check_lines(tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys)
-    assert ident_lines(lines)[0].endswith(" card=03-5344-0badcafe boot=deadbeef note=a=b")
+    lines = check_lines(
+        tmp_path, [HEADER[0], line, *HEADER[1:], "#close,@1,clean"], capsys
+    )
+    assert ident_lines(lines)[0].endswith(
+        " card=03-5344-0badcafe boot=deadbeef note=a=b"
+    )
 
 
 def test_each_header_of_an_appended_file_keeps_its_own_ident(tmp_path: Path) -> None:
     second = IDENT.replace("elf=1a2b3c4d5e6f7a8b", "elf=8b7a6f5e4d3c2b1a")
-    report = parse(tmp_path, [HEADER[0], IDENT, *HEADER[1:], HEADER[0], second, "#close,@1,clean"])
-    assert [ident.get("elf") for ident in report.idents] == ["1a2b3c4d5e6f7a8b", "8b7a6f5e4d3c2b1a"]
+    report = parse(
+        tmp_path, [HEADER[0], IDENT, *HEADER[1:], HEADER[0], second, "#close,@1,clean"]
+    )
+    assert [ident.get("elf") for ident in report.idents] == [
+        "1a2b3c4d5e6f7a8b",
+        "8b7a6f5e4d3c2b1a",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1121,7 +1251,9 @@ def test_a_malformed_ident_line_is_a_defect(tmp_path: Path, line: str) -> None:
 
 
 def test_extract_and_head_pass_ident_through_untouched(tmp_path: Path, capsys) -> None:
-    path = write_log(tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@1,clean"])
+    path = write_log(
+        tmp_path, [HEADER[0], IDENT, *HEADER[1:], *RECORDS, "#close,@1,clean"]
+    )
     assert sdlog.main(["extract", str(path), "--type", "C", "--no-header"]) == 0
     assert capsys.readouterr().out.splitlines() == [
         "412345,C1,1A2,x,8,0011223344556677,",

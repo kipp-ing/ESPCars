@@ -134,7 +134,11 @@ ACTION_ENTITY = {
 
 
 def action_entry(control: str = "switch", **overrides: Any) -> dict[str, Any]:
-    entry: dict[str, Any] = {"key": f"act_{control}", "label": control.title(), control: ACTION_ENTITY[control]}
+    entry: dict[str, Any] = {
+        "key": f"act_{control}",
+        "label": control.title(),
+        control: ACTION_ENTITY[control],
+    }
     entry.update(overrides)
     return _finalize(entry)
 
@@ -159,7 +163,9 @@ external_components:
 
 
 def full_yaml(body: str, *, extra_components: str = "") -> str:
-    head = YAML_PREAMBLE.format(components=(REPO / "components").as_posix(), extra_components=extra_components)
+    head = YAML_PREAMBLE.format(
+        components=(REPO / "components").as_posix(), extra_components=extra_components
+    )
     return head + textwrap.dedent(body)
 
 
@@ -179,7 +185,9 @@ def config_errors(fixture: str) -> list[str]:
 
 def load_config(fixture: str) -> dict[str, Any]:
     result = _loaded(FIXTURES / fixture)
-    assert not result.errors, f"{fixture} failed to load: {[str(e) for e in result.errors]}"
+    assert not result.errors, (
+        f"{fixture} failed to load: {[str(e) for e in result.errors]}"
+    )
     return result["portal"]
 
 
@@ -227,6 +235,7 @@ def generate(tmp_path: Path, yaml_text: str, name: str = "portal-test") -> Gener
         cwd=tmp_path,
         env=env,
         timeout=300,
+        check=False,
     )
     return Generated(tmp_path, name, proc.returncode, proc.stdout + proc.stderr)
 
@@ -282,14 +291,18 @@ def snapshot_registry():
 
 
 def restore_registry(saved) -> None:
-    for _name, (obj, copy_) in saved.items():
+    for obj, copy_ in saved.values():
         obj.clear()
         obj.update(copy_)
 
 
-
-
-def portal_yaml(cfg: dict[str, Any] | None = None, *, extra: str = "", with_entities: bool = True, extra_components: str = "") -> str:
+def portal_yaml(
+    cfg: dict[str, Any] | None = None,
+    *,
+    extra: str = "",
+    with_entities: bool = True,
+    extra_components: str = "",
+) -> str:
     """A complete loadable config: preamble, logger, wifi (STA only), template entities, extra
     top-level YAML, and ``portal:`` dumped from ``cfg`` (default ``portal()``)."""
     import yaml
@@ -300,7 +313,9 @@ def portal_yaml(cfg: dict[str, Any] | None = None, *, extra: str = "", with_enti
         body += ENTITIES_YAML
     body += extra
     text = full_yaml(body, extra_components=extra_components)
-    return text + "portal:\n" + textwrap.indent(yaml.safe_dump(cfg, sort_keys=False), "  ")
+    return (
+        text + "portal:\n" + textwrap.indent(yaml.safe_dump(cfg, sort_keys=False), "  ")
+    )
 
 
 def errors_of(tmp_path: Path, text: str) -> list[str]:

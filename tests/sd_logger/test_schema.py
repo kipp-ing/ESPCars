@@ -45,14 +45,7 @@ import pytest
 from esphome import config_validation as cv
 from esphome.core import ID
 
-from .common import (
-    logger_config,
-    recovery,
-    sd_logger,
-    setup_c6,
-    validate,
-    vcc_monitor,
-)
+from .common import logger_config, recovery, sd_logger, setup_c6, validate, vcc_monitor
 
 # --------------------------------------------------------------------- defaults
 
@@ -189,7 +182,10 @@ def test_v5_buffer_depth_out_of_range_rejected(set_core_config, depth: int) -> N
 
 def test_v6_sync_interval_overridable(set_core_config) -> None:
     setup_c6(set_core_config)
-    assert validate(sd_logger(sync_interval="5s"))["sync_interval"].total_milliseconds == 5000
+    assert (
+        validate(sd_logger(sync_interval="5s"))["sync_interval"].total_milliseconds
+        == 5000
+    )
 
 
 # ------------------------------------------------------------------- size parse
@@ -222,22 +218,26 @@ def test_max_file_size_too_small_rejected(set_core_config) -> None:
         (4 * 1024 * 1024, 4 * 1024 * 1024),
     ],
 )
-def test_v29_confine_bytes_accepts_data_sizes(set_core_config, value, expected: int) -> None:
+def test_v29_confine_bytes_accepts_data_sizes(
+    set_core_config, value, expected: int
+) -> None:
     setup_c6(set_core_config)
     assert validate(sd_logger(confine_bytes=value))["confine_bytes"] == expected
 
 
-@pytest.mark.parametrize(
-    "value", [0, "0B", "-1MB", "5TB", 0xFFFFFFFF * 512 + 512]
-)
-def test_v29_confine_bytes_rejects_zero_negative_and_absurd_sizes(set_core_config, value) -> None:
+@pytest.mark.parametrize("value", [0, "0B", "-1MB", "5TB", 0xFFFFFFFF * 512 + 512])
+def test_v29_confine_bytes_rejects_zero_negative_and_absurd_sizes(
+    set_core_config, value
+) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="confine_bytes"):
         validate(sd_logger(confine_bytes=value))
 
 
 @pytest.mark.parametrize("value", [64 * 1000**3 // 512 * 512, 0xFFFFFFFF * 512])
-def test_v29_confine_bytes_accepts_cards_above_32_gib(set_core_config, value: int) -> None:
+def test_v29_confine_bytes_accepts_cards_above_32_gib(
+    set_core_config, value: int
+) -> None:
     setup_c6(set_core_config)
     assert validate(sd_logger(confine_bytes=value))["confine_bytes"] == value
 
@@ -281,9 +281,7 @@ def test_v7_can_ports_bare_ids_get_sequential_source_tags(set_core_config) -> No
 
 def test_v7_can_ports_explicit_source(set_core_config) -> None:
     setup_c6(set_core_config)
-    validated = validate(
-        sd_logger(can_ports=[{"port": "seg1", "source": 7}, "seg2"])
-    )
+    validated = validate(sd_logger(can_ports=[{"port": "seg1", "source": 7}, "seg2"]))
     assert [entry["source"] for entry in validated["can_ports"]] == [7, 2]
 
 
@@ -376,8 +374,8 @@ def _run_final_validate(
     web_server: dict | None = None,
     ethernet: dict | None = None,
 ):
-    import esphome.final_validate as fv
     from esphome.components.sd_logger import _final_validate
+    import esphome.final_validate as fv
 
     token = fv.full_config.set(
         _gateway_full_config(
@@ -452,7 +450,9 @@ def test_final_validate_requires_vfs_dir(set_core_config, can_ports) -> None:
 # ------------------------------------------------------------ FATFS sdkconfig
 
 
-def test_wl_sector_size_absent_warns_about_ff_max_ss_4096(set_core_config, caplog) -> None:
+def test_wl_sector_size_absent_warns_about_ff_max_ss_4096(
+    set_core_config, caplog
+) -> None:
     setup_c6(set_core_config)
     config = validate(sd_logger())
     _run_final_validate(config)
@@ -460,7 +460,9 @@ def test_wl_sector_size_absent_warns_about_ff_max_ss_4096(set_core_config, caplo
     assert "CONFIG_WL_SECTOR_SIZE_512" in caplog.text
 
 
-def test_wl_sector_size_4096_warns_about_ff_max_ss_4096(set_core_config, caplog) -> None:
+def test_wl_sector_size_4096_warns_about_ff_max_ss_4096(
+    set_core_config, caplog
+) -> None:
     setup_c6(set_core_config)
     config = validate(sd_logger())
     _run_final_validate(config, sdkconfig_options={"CONFIG_WL_SECTOR_SIZE_4096": "y"})
@@ -474,7 +476,9 @@ def test_wl_sector_size_4096_warns_about_ff_max_ss_4096(set_core_config, caplog)
         {"CONFIG_WL_SECTOR_SIZE": "512"},
     ],
 )
-def test_wl_sector_size_512_is_quiet(set_core_config, caplog, sdkconfig_options) -> None:
+def test_wl_sector_size_512_is_quiet(
+    set_core_config, caplog, sdkconfig_options
+) -> None:
     setup_c6(set_core_config)
     config = validate(sd_logger())
     _run_final_validate(config, sdkconfig_options=sdkconfig_options)
@@ -535,9 +539,7 @@ def test_v13_an_explicit_label_that_collides_with_a_default_is_rejected(
 @pytest.mark.parametrize("label", ["a", "seg1", "A-b_9", "abcdefgh"])
 def test_v13_label_accepted(set_core_config, label: str) -> None:
     setup_c6(set_core_config)
-    validated = validate(
-        sd_logger(sources=[{"tag": 5, "kind": "lin", "label": label}])
-    )
+    validated = validate(sd_logger(sources=[{"tag": 5, "kind": "lin", "label": label}]))
     assert validated["sources"][0]["label"] == label
 
 
@@ -619,7 +621,9 @@ def test_v14_tag_zero_is_allowed_for_a_declared_source(set_core_config) -> None:
     """0 is the action's own tag; declaring it is how the action's records stop
     reading `U,0` and start reading by name."""
     setup_c6(set_core_config)
-    validated = validate(sd_logger(sources=[{"tag": 0, "kind": "user", "label": "act"}]))
+    validated = validate(
+        sd_logger(sources=[{"tag": 0, "kind": "user", "label": "act"}])
+    )
     assert validated["sources"][0]["tag"] == 0
 
 
@@ -772,7 +776,9 @@ def test_v18_buffer_depth_accepted(set_core_config, depth: int) -> None:
 
 
 @pytest.mark.parametrize("depth", [24, 100])
-def test_v18_buffer_depth_not_power_of_two_rejected(set_core_config, depth: int) -> None:
+def test_v18_buffer_depth_not_power_of_two_rejected(
+    set_core_config, depth: int
+) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="power of two"):
         validate(sd_logger(esphome_logs={"buffer_depth": depth}))
@@ -845,9 +851,7 @@ def test_v20_max_delay_below_initial_rejected(set_core_config) -> None:
     """The ladder doubles from initial up to max, so a lower max steps backwards."""
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="ladder step backwards"):
-        validate(
-            sd_logger(recovery=recovery(initial_delay="10s", max_delay="1s"))
-        )
+        validate(sd_logger(recovery=recovery(initial_delay="10s", max_delay="1s")))
 
 
 def test_v20_max_delay_equal_to_initial_accepted(set_core_config) -> None:
@@ -1323,9 +1327,7 @@ def test_v25_noop_without_web_server(set_core_config) -> None:
 def test_v25_noop_without_collection(set_core_config) -> None:
     setup_c6(set_core_config)
     config = validate(sd_logger())
-    assert (
-        _run_final_validate(config, web_server=web_server_config(port=80)) is config
-    )
+    assert _run_final_validate(config, web_server=web_server_config(port=80)) is config
 
 
 def test_v25_disabled_collection_may_name_the_web_server_port(set_core_config) -> None:
@@ -1430,7 +1432,9 @@ def test_v26_max_chunks_defaults_to_256(set_core_config) -> None:
     25 s, so 64 entries was ~27 minutes of cumulative logging and 256 is ~1.8
     hours. A `collection:` block that says nothing still gets a usable index."""
     setup_c6(set_core_config)
-    assert validate(sd_logger(collection=collection()))["collection"]["max_chunks"] == 256
+    assert (
+        validate(sd_logger(collection=collection()))["collection"]["max_chunks"] == 256
+    )
 
 
 def test_v26_the_schema_default_matches_the_headers_own_fallback(
@@ -1450,14 +1454,14 @@ def test_v26_the_schema_default_matches_the_headers_own_fallback(
     The schema range must also fit inside what the data structure can represent:
     `count_` is a uint16_t, and the header's static_assert bounds it at 65535.
     """
-    import re
     from pathlib import Path
+    import re
 
     from esphome.components import sd_logger as module
 
     setup_c6(set_core_config)
     header = (Path(module.__file__).parent / "collection_policy.h").read_text()
-    match = re.search(r"^#define\s+SD_LOG_MAX_CHUNKS\s+(\d+)\s*$", header, re.M)
+    match = re.search(r"^#define\s+SD_LOG_MAX_CHUNKS\s+(\d+)\s*$", header, re.MULTILINE)
     assert match is not None, "collection_policy.h no longer defines SD_LOG_MAX_CHUNKS"
     schema_default = validate(sd_logger(collection=collection()))["collection"][
         "max_chunks"

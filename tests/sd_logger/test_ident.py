@@ -9,7 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-SOURCE = Path(__file__).resolve().parents[2] / "components" / "sd_logger" / "sd_logger.cpp"
+SOURCE = (
+    Path(__file__).resolve().parents[2] / "components" / "sd_logger" / "sd_logger.cpp"
+)
 
 
 def _body(name: str) -> str:
@@ -40,7 +42,12 @@ def test_i4_identity_is_captured_once_and_the_card_per_mount() -> None:
     assert "this->capture_card_ident_();" in _body("mount_card_")
     # Nothing per file but the line: no lookups on the header path.
     header = _body("write_file_header_")
-    for call in ("esp_efuse_mac_get_default", "esp_app_get_elf_sha256", "get_config_hash", "snprintf"):
+    for call in (
+        "esp_efuse_mac_get_default",
+        "esp_app_get_elf_sha256",
+        "get_config_hash",
+        "snprintf",
+    ):
         assert call not in header, call
 
 

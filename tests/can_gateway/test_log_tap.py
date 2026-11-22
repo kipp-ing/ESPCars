@@ -30,6 +30,7 @@ from pathlib import Path
 import textwrap
 
 import pytest
+
 from esphome import config_validation as cv
 
 from .common import PORT_A, PORT_B, gateway, port, setup_c6, validate
@@ -106,14 +107,18 @@ def test_log_tap_tx_rejected_without_log_tap(set_core_config) -> None:
         validate(gateway(ports=[port(PORT_A, log_tap_tx=True)], routes=[]))
 
 
-def test_log_tap_tx_queue_depth_defaults_and_accepts_a_small_ring(set_core_config) -> None:
+def test_log_tap_tx_queue_depth_defaults_and_accepts_a_small_ring(
+    set_core_config,
+) -> None:
     setup_c6(set_core_config)
     assert validate(gateway())["log_tap_tx_queue_depth"] == 128
     assert validate(gateway(log_tap_tx_queue_depth=16))["log_tap_tx_queue_depth"] == 16
 
 
 @pytest.mark.parametrize("depth", [0, 15, 8193])
-def test_log_tap_tx_queue_depth_rejects_an_unsafe_or_unbounded_size(set_core_config, depth: int) -> None:
+def test_log_tap_tx_queue_depth_rejects_an_unsafe_or_unbounded_size(
+    set_core_config, depth: int
+) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid):
         validate(gateway(log_tap_tx_queue_depth=depth))

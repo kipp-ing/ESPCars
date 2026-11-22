@@ -95,10 +95,13 @@ def test_sensor_kind_order_matches_cpp_enum() -> None:
 
     drift = next(
         (
-            f"index {i}: C++ KIND_{a.upper() if a else '<missing>'} vs "
-            f"Python {b!r}"
+            f"index {i}: C++ KIND_{a.upper() if a else '<missing>'} vs Python {b!r}"
             for i, (a, b) in enumerate(
-                zip(cpp + ("",) * len(ALL_KINDS), ALL_KINDS + ("",) * len(cpp))
+                zip(
+                    cpp + ("",) * len(ALL_KINDS),
+                    ALL_KINDS + ("",) * len(cpp),
+                    strict=False,
+                )
             )
             if a != b
         ),

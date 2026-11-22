@@ -15,8 +15,8 @@ opposite: they import `esphome.components.uds` through the path hook in
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
+import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -106,8 +106,13 @@ def tiny_catalog(catalog):
         request=bytes([0x22, 0x02, 0x08]),
         fields=(
             catalog.Field(
-                "PRES_Cell_2Byte", 24, 16, unit="V", scales=volt,
-                repeat_count=4, repeat_stride=16,
+                "PRES_Cell_2Byte",
+                24,
+                16,
+                unit="V",
+                scales=volt,
+                repeat_count=4,
+                repeat_stride=16,
             ),
             catalog.Field("PRES_Volt_2Byte", 88, 16, unit="V", scales=volt),
         ),
