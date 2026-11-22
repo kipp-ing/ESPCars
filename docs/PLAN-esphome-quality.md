@@ -384,6 +384,7 @@ the same YAML on the same boards.
 
 | PR | Phase | What could differ | P9 check | Result |
 |---|---|---|---|---|
+| P3b-sd_logger | P3 step 2 | Five `new (std::nothrow)` allocations → RAMAllocator PREFER_INTERNAL (record ring, text ring, writer block, clock-tail scanner, collection serve block); same sizes and lifetimes, same region on the C6 (no PSRAM). On exhaustion the existing nullptr path now runs instead of an abort. | Compare heap free and largest block after setup and under load vs reference; decoded files identical; one rotation + collection run clean. Allocation failure is outside the design envelope (F-069): no allocation-failure checks or fault injection. | |
 
 **Done:** every row is checked off, with no regression against the reference
 outside what the rows allow.

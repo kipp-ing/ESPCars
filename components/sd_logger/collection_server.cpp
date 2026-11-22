@@ -9,6 +9,7 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
 
 #include <cerrno>
 #include <cinttypes>
@@ -37,7 +38,7 @@
 namespace esphome {
 namespace sd_logger {
 
-static const char *const TAG = "sd_logger.collect";
+ESPHOME_LOG_TAG(TAG, "sd_logger.collect");
 
 static const char *const ROUTE_INDEX = "/sdlog/index";
 static const char *const ROUTE_STATUS = "/sdlog/status";
@@ -210,7 +211,9 @@ bool CollectionServer::start(uint16_t port) {
   if (this->handle_.load(std::memory_order_acquire) != nullptr)
     return true;
 
-  this->block_ = new (std::nothrow) char[SD_LOG_SERVE_BLOCK];
+  this->block_ = RAMAllocator<char>(RAMAllocator<char>::PREFER_INTERNAL)
+                     .make_unique_array_for_overwrite(SD_LOG_SERVE_BLOCK)
+                     .release();
   if (this->block_ == nullptr) {
     ESP_LOGE(TAG, "serve buffer alloc (%u B) failed — collection server not started",
              static_cast<unsigned>(SD_LOG_SERVE_BLOCK));
@@ -316,7 +319,7 @@ bool CollectionServer::start(uint16_t port) {
   httpd_handle_t handle = nullptr;
   const esp_err_t err = httpd_start(&handle, &config);
   if (err != ESP_OK) {
-    delete[] this->block_;
+    RAMAllocator<char>().deallocate(this->block_, SD_LOG_SERVE_BLOCK);
     this->block_ = nullptr;
     ESP_LOGE(TAG, "httpd_start on port %u failed (%s) — chunks can only be collected by hand", port,
              esp_err_to_name(err));
@@ -357,7 +360,7 @@ bool CollectionServer::start(uint16_t port) {
 void CollectionServer::stop() {
   // Claim the handle: whoever exchanges the non-null value owns the teardown. `on_shutdown()` (main
   // loop) and `emergency_close_()` (writer task) can both arrive here, and a plain null check would
-  // let both call `httpd_stop()` on the same handle and both `delete[]` the same block.
+  // let both call `httpd_stop()` on the same handle and both free the same block.
   httpd_handle_t handle = this->handle_.exchange(nullptr, std::memory_order_acq_rel);
   if (handle == nullptr)
     return;
@@ -367,7 +370,7 @@ void CollectionServer::stop() {
   // Only now, and only on this path: a handler may have been mid-`::read()` into it until
   // `httpd_stop()` returned, and freeing it from the losing caller would be a use-after-free in the
   // one case this whole function is about.
-  delete[] this->block_;
+  RAMAllocator<char>().deallocate(this->block_, SD_LOG_SERVE_BLOCK);
   this->block_ = nullptr;
 }
 

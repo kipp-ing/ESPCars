@@ -332,7 +332,7 @@ TEST(collection_full_flips_exactly_at_the_capacity) {
   // itself is worth a case — one entry either way is 25 s of card at the bench's bounds.
   //
   // The *number* 256 is not spelled out here on purpose. `tests/sd_logger/test_schema.py` V26
-  // greps the `#define` out of the header and asserts it equals the schema's `max_chunks` default,
+  // reads the constexpr fallback from the header and asserts it equals the schema's `max_chunks` default,
   // which is the one place that comparison means something; a second literal here would only be a
   // copy to forget. What this case owns is the behaviour at whatever that number is.
   CollectionPolicy policy = make_policy();

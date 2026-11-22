@@ -25,6 +25,13 @@
 
 #include "log_record.h"
 
+/// Source-table capacity: tapped CAN ports plus declared `sources:` entries. Overridable from the
+/// build if a config ever needs more; a tag that does not fit degrades to a `U<tag>` token rather
+/// than being lost (D1).
+#ifndef SD_LOG_MAX_SOURCES
+static constexpr int SD_LOG_MAX_SOURCES = 16;
+#endif
+
 namespace esphome {
 namespace sd_logger {
 
@@ -71,13 +78,6 @@ static const char KIND_LIN = 'L';
 static const char KIND_USER = 'U';
 static const char KIND_ISOTP = 'I';
 static const char KIND_LOG = 'X';
-
-/// Source-table capacity: tapped CAN ports plus declared `sources:` entries. Overridable from the
-/// build if a config ever needs more; a tag that does not fit degrades to a `U<tag>` token rather
-/// than being lost (D1).
-#ifndef SD_LOG_MAX_SOURCES
-#define SD_LOG_MAX_SOURCES 16
-#endif
 
 // ---------------------------------------------------------------------------------------------
 // Timestamps (D8)

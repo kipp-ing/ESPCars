@@ -76,7 +76,7 @@ sd_logger:
     #
     # 512 rather than the default 256 on purpose. This is the only config that
     # compiles the key, and the value reaches the firmware as a `cg.add_define`
-    # over collection_policy.h's own `#ifndef SD_LOG_MAX_CHUNKS 256` fallback —
+    # over collection_policy.h's own guarded `SD_LOG_MAX_CHUNKS = 256` constexpr fallback —
     # so a build that writes the default would produce byte-identical firmware
     # whether the define is emitted or silently dropped. common_cantap.yaml has
     # no `collection:` block at all and keeps compiling the fallback branch;

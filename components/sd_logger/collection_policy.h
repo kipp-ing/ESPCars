@@ -61,6 +61,15 @@
 
 #include "log_format.h"
 
+/// How many chunks the in-RAM index holds. Static, like every other allocation in this component.
+/// Overridable from the build — `collection: max_chunks:` emits this define from the component's
+/// Python, the same way `SD_LOG_MAX_SOURCES` is sized. `add()` still refuses when it is reached; the
+/// writer may first delete a collected CONFIRMED chunk to make room, but this class never silently
+/// forgets a file that may still exist.
+#ifndef SD_LOG_MAX_CHUNKS
+static constexpr int SD_LOG_MAX_CHUNKS = 256;
+#endif
+
 namespace esphome {
 namespace sd_logger {
 
@@ -69,15 +78,6 @@ namespace sd_logger {
 /// ordering that silently inverts for one boot somewhere in the far future.
 static const uint32_t SD_LOG_SEQ_MODULUS = 10000000u;
 static const uint32_t SD_LOG_SEQ_MAX = SD_LOG_SEQ_MODULUS - 1u;
-
-/// How many chunks the in-RAM index holds. Static, like every other allocation in this component.
-/// Overridable from the build — `collection: max_chunks:` emits this define from the component's
-/// Python, the same way `SD_LOG_MAX_SOURCES` is sized. `add()` still refuses when it is reached; the
-/// writer may first delete a collected CONFIRMED chunk to make room, but this class never silently
-/// forgets a file that may still exist.
-#ifndef SD_LOG_MAX_CHUNKS
-#define SD_LOG_MAX_CHUNKS 256
-#endif
 
 /// `count_` is a uint16_t and the victim folds are linear, so the index can be grown by a couple of
 /// orders of magnitude from the build but not beyond a 16-bit count. The *config-time* range is much
