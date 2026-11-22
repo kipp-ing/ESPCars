@@ -131,11 +131,11 @@ what the design asks of it, and the file it left behind is intact.
 from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import sys
 
 # Type letters and their field counts, from spec §6 F1a/F1c. A record line is one
 # layout for every bus, which is the whole point of the type letter: one parser
@@ -276,7 +276,13 @@ class UtcAnchor:
 CLOCK_BASES = {"utc": 3, "drift": 2, "est": 1}
 # The pairing is part of the format (clock_basis.h, parse_clock_line): a source only ever
 # comes with one basis, and only `card` and `sleep` carry a detail.
-CLOCK_SOURCES = {"sync": "utc", "warm": "utc", "sleep": "drift", "card": "est", "build": "est"}
+CLOCK_SOURCES = {
+    "sync": "utc",
+    "warm": "utc",
+    "sleep": "drift",
+    "card": "est",
+    "build": "est",
+}
 # Two clocks sampled a moment apart, one possibly whole-second: the writer's own slack.
 CLOCK_SLACK_US = 2_000_000
 
@@ -327,7 +333,9 @@ def parse_clock_line(line: str) -> ClockPoint:
     utc_us = _parse_u64_x(fields[2])
     basis, src = fields[3], fields[4]
     if basis not in CLOCK_BASES or CLOCK_SOURCES.get(src) != basis:
-        raise ValueError(f"#clock basis/src {basis}/{src} is not a pairing the writer emits")
+        raise ValueError(
+            f"#clock basis/src {basis}/{src} is not a pairing the writer emits"
+        )
     detail = None
     if len(fields) == 6:
         if src not in ("card", "sleep"):
@@ -355,10 +363,17 @@ class ClockState:
             if self.first is None:
                 self.first = point
         current = self.current
-        if current is not None and CLOCK_BASES[point.basis] < CLOCK_BASES[current.basis]:
+        if (
+            current is not None
+            and CLOCK_BASES[point.basis] < CLOCK_BASES[current.basis]
+        ):
             return
         if current is not None and point.basis == "utc" and current.basis != "utc":
-            self.corrections.append(ClockCorrection(point.t_us, current, point.utc_us - current.resolve(point.t_us)))
+            self.corrections.append(
+                ClockCorrection(
+                    point.t_us, current, point.utc_us - current.resolve(point.t_us)
+                )
+            )
         self.current = point
 
     def resolve(self, boot_us: int) -> tuple[int, str] | None:
@@ -461,7 +476,10 @@ class Report:
         """A `#sdlog` header naming a write format this reader does not have. The
         file is not broken and this reader is not the one to say anything else
         about it — nothing below the header was parsed."""
-        return self.format_version is not None and self.format_version not in SUPPORTED_FORMAT_VERSIONS
+        return (
+            self.format_version is not None
+            and self.format_version not in SUPPORTED_FORMAT_VERSIONS
+        )
 
     @property
     def clean(self) -> bool:
@@ -584,7 +602,9 @@ def _check_text(fields: list[str]) -> None:
         raise ValueError(f"expected at least {TEXT_FIELDS} fields, got {len(fields)}")
     # The level letter rides in the token, `X<level>`, so the token is two characters.
     if len(fields[0]) != 2:
-        raise ValueError(f"a log line's token is X plus one level letter, got {fields[0]!r}")
+        raise ValueError(
+            f"a log line's token is X plus one level letter, got {fields[0]!r}"
+        )
 
 
 def parse_file(path: Path) -> Report:
@@ -758,7 +778,10 @@ def _parse_meta(report: Report, line: str, utc_anchor: UtcAnchor) -> None:
         # `_parse_abs_stamp()`: `@` belongs exclusively to the stamp column.
         utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
         report.utc_anchor_count += 1
-        report.clock.offer(ClockPoint(utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"), from_clock_line=False)
+        report.clock.offer(
+            ClockPoint(utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"),
+            from_clock_line=False,
+        )
     elif head == "#clock":
         report.clock.offer(parse_clock_line(line), from_clock_line=True)
     elif head == "#ident":
@@ -813,7 +836,7 @@ def _duration(report: Report) -> str:
 def _utc_iso8601(utc_us: int) -> str:
     """An operator-facing UTC value; retain microsecond precision when present."""
     try:
-        value = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=utc_us)
+        value = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=utc_us)
     except OverflowError:
         # Saturation is intentional in the correspondence arithmetic. This is not
         # a realistic wall-clock date, but retain the exact evidence if it occurs.
@@ -844,7 +867,9 @@ def _print_clock(clock: ClockState) -> None:
             per_day = corr.delta_us / 1e6 / corr.was.detail * 86400
             detail += f" ({per_day:+.1f} s per day slept)"
         elif corr.was.basis == "est" and not corr.backwards:
-            detail += " (time the floor could not see: power off, or a clock not yet synced)"
+            detail += (
+                " (time the floor could not see: power off, or a clock not yet synced)"
+            )
         print(detail)
         if corr.backwards:
             print(
@@ -864,9 +889,15 @@ def _print_idents(idents: list[Ident]) -> None:
     per header, and each is shown — they may name different builds."""
     for ident in idents:
         shown = [ident.get("id") or "-"]
-        shown += [f"{key}={ident.get(key)}" for key in _IDENT_SHOWN if ident.get(key) is not None]
+        shown += [
+            f"{key}={ident.get(key)}"
+            for key in _IDENT_SHOWN
+            if ident.get(key) is not None
+        ]
         known = (*_IDENT_SHOWN, "id", "date", "clock")
-        shown += [f"{key}={value}" for key, value in ident.fields.items() if key not in known]
+        shown += [
+            f"{key}={value}" for key, value in ident.fields.items() if key not in known
+        ]
         print(f"  ident  {' '.join(shown)}")
         print(f"  date   {ident.date_label}")
 
@@ -886,7 +917,9 @@ def print_report(report: Report, verbose: bool) -> None:
             " Update script/sdlog.py rather than reading the numbers off this file."
         )
         return
-    kinds = " ".join(f"{k}={v}" for k, v in sorted(report.counts.items())) or "no records"
+    kinds = (
+        " ".join(f"{k}={v}" for k, v in sorted(report.counts.items())) or "no records"
+    )
     summary = f"{name}: v{report.format_version} seq={report.seq} {kinds} span={_duration(report)}"
     if report.utc_anchor_count:
         utc_span = "-"
@@ -907,9 +940,14 @@ def print_report(report: Report, verbose: bool) -> None:
 
     if verbose and report.sources:
         for src in report.sources:
-            print(f"  src  {src.kind},{src.label} tag={src.tag} {src.origin} {src.detail}")
+            print(
+                f"  src  {src.kind},{src.label} tag={src.tag} {src.origin} {src.detail}"
+            )
     if verbose and report.labels:
-        print("  by label: " + " ".join(f"{k}={v}" for k, v in sorted(report.labels.items())))
+        print(
+            "  by label: "
+            + " ".join(f"{k}={v}" for k, v in sorted(report.labels.items()))
+        )
 
     # Never summed: three counters, three bottlenecks, three different fixes.
     if report.drops:
@@ -920,7 +958,9 @@ def print_report(report: Report, verbose: bool) -> None:
         print(f"  DROPS  {len(report.drops)} marker(s): {detail}")
         if verbose:
             for drop in report.drops:
-                print(f"    t={drop.t_us} {drop.what} +{drop.delta} (total {drop.total})")
+                print(
+                    f"    t={drop.t_us} {drop.what} +{drop.delta} (total {drop.total})"
+                )
     else:
         print("  drops  none")
 
@@ -959,7 +999,9 @@ def print_report(report: Report, verbose: bool) -> None:
         # The one finding this whole file format gained a line for.
         print("  close  MISSING — the file was cut, i.e. power loss (or still open)")
     if report.torn_tail:
-        print("  tail   torn (one partial trailing line, discarded — expected after a cut)")
+        print(
+            "  tail   torn (one partial trailing line, discarded — expected after a cut)"
+        )
     if report.bad_lines:
         print(f"  BAD    {len(report.bad_lines)} malformed line(s):")
         for number, why in report.bad_lines[:10]:
@@ -1066,7 +1108,11 @@ class StreamReader:
                 if line.startswith("#"):
                     if line.startswith("#sdlog,"):
                         fields = line.split(",")
-                        version = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+                        version = (
+                            int(fields[1])
+                            if len(fields) > 1 and fields[1].isdigit()
+                            else None
+                        )
                         if version not in SUPPORTED_FORMAT_VERSIONS:
                             raise ReadError(
                                 f"{path.name}: write format v{version}, which this reader does not know"
@@ -1079,17 +1125,30 @@ class StreamReader:
                     elif line.startswith("#utc,") or line == "#utc":
                         fields = line.split(",")
                         if len(fields) != 3:
-                            raise ReadError(f"{path.name}: unreadable #utc line, extract stops here")
+                            raise ReadError(
+                                f"{path.name}: unreadable #utc line, extract stops here"
+                            )
                         try:
-                            utc_anchor.set(_parse_u64_x(fields[1]), _parse_u64_x(fields[2]))
+                            utc_anchor.set(
+                                _parse_u64_x(fields[1]), _parse_u64_x(fields[2])
+                            )
                         except ValueError:
-                            raise ReadError(f"{path.name}: unreadable #utc line, extract stops here") from None
-                        clock.offer(ClockPoint(utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"), False)
+                            raise ReadError(
+                                f"{path.name}: unreadable #utc line, extract stops here"
+                            ) from None
+                        clock.offer(
+                            ClockPoint(
+                                utc_anchor.boot_us, utc_anchor.utc_us, "utc", "sync"
+                            ),
+                            False,
+                        )
                     elif line.startswith("#clock,") and self.estimates:
                         try:
                             clock.offer(parse_clock_line(line), True)
                         except ValueError:
-                            raise ReadError(f"{path.name}: unreadable #clock line, extract stops here") from None
+                            raise ReadError(
+                                f"{path.name}: unreadable #clock line, extract stops here"
+                            ) from None
                     continue
                 fields = line.split(",")
                 kind = fields[0][0] if fields[0] else ""
@@ -1103,11 +1162,15 @@ class StreamReader:
                     # chain could not take its step and every timestamp after this line
                     # is adrift by an unknown amount. Printing those is the one thing
                     # worse than printing nothing.
-                    raise ReadError(f"{path.name}: unreadable stamp column, extract stops here") from None
+                    raise ReadError(
+                        f"{path.name}: unreadable stamp column, extract stops here"
+                    ) from None
                 if t_us is None:
                     continue
                 best = clock.resolve(t_us) if self.estimates else None
-                yield StreamLine(kind, t_us, utc_anchor.resolve(t_us), fields, line, best)
+                yield StreamLine(
+                    kind, t_us, utc_anchor.resolve(t_us), fields, line, best
+                )
 
 
 def cmd_extract(args) -> int:
@@ -1176,7 +1239,9 @@ def cmd_extract(args) -> int:
                 # lines a second on the card and nothing at all in a CSV, and a
                 # spreadsheet wants them as columns.
                 data = fields[3]
-                print(f"{stream.t_us},{label},{fields[2]},{flags or '-'},{len(data) // 2},{data},{utc_column}")
+                print(
+                    f"{stream.t_us},{label},{fields[2]},{flags or '-'},{len(data) // 2},{data},{utc_column}"
+                )
                 continue
             # An `X` line goes out as the level letter off the token, then everything
             # after the stamp verbatim: the message is the last field and may hold
@@ -1212,9 +1277,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    check = sub.add_parser("check", help="parse-check, report drops and gaps, flag a missing #close")
+    check = sub.add_parser(
+        "check", help="parse-check, report drops and gaps, flag a missing #close"
+    )
     check.add_argument("files", nargs="+")
-    check.add_argument("-v", "--verbose", action="store_true", help="per-source and per-marker detail")
+    check.add_argument(
+        "-v", "--verbose", action="store_true", help="per-source and per-marker detail"
+    )
     check.add_argument(
         "--strict",
         action="store_true",
@@ -1224,9 +1293,13 @@ def main(argv: list[str] | None = None) -> int:
 
     extract = sub.add_parser("extract", help="one type as a plain CSV")
     extract.add_argument("file")
-    extract.add_argument("--type", default="C", help="type letter: C, L, U, I or X (default C)")
+    extract.add_argument(
+        "--type", default="C", help="type letter: C, L, U, I or X (default C)"
+    )
     extract.add_argument("--label", help="only this source label")
-    extract.add_argument("--shed", action="store_true", help="only frames carrying the shed flag")
+    extract.add_argument(
+        "--shed", action="store_true", help="only frames carrying the shed flag"
+    )
     extract.add_argument("--no-header", action="store_true")
     extract.add_argument(
         "--estimates",

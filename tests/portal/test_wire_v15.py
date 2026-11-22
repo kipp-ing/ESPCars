@@ -22,7 +22,11 @@ def _limited(env, level="bad", state="degraded", evidence=None):
     n = ecu(env)
     n["values"][0]["level"] = level
     n["state"] = state
-    n["why"] = None if state == "ok" else why("limit", evidence=evidence or _limit_evidence(level=level))
+    n["why"] = (
+        None
+        if state == "ok"
+        else why("limit", evidence=evidence or _limit_evidence(level=level))
+    )
     env["tree"]["state"] = "degraded"
     env["tree"]["why"] = why("child_degraded", evidence={"children": {"ecu": state}})
 
@@ -57,11 +61,20 @@ def test_unknown_level_is_rejected(bad) -> None:
 def test_level_on_a_value_without_a_reading_is_rejected() -> None:
     def fn(env):
         v = ecu(env)["values"][0]
-        v.update(value=None, raw=None, classification="sna", state="absent", why=why("value_not_available"), level="ok")
+        v.update(
+            value=None,
+            raw=None,
+            classification="sna",
+            state="absent",
+            why=why("value_not_available"),
+            level="ok",
+        )
         ecu(env)["state"] = "degraded"
         ecu(env)["why"] = why("entities_unavailable")
         env["tree"]["state"] = "degraded"
-        env["tree"]["why"] = why("child_degraded", evidence={"children": {"ecu": "degraded"}})
+        env["tree"]["why"] = why(
+            "child_degraded", evidence={"children": {"ecu": "degraded"}}
+        )
 
     assert "level_without_reading" in codes(mutate(fn))
 
@@ -101,7 +114,13 @@ def test_limit_evidence_naming_a_value_at_another_level_is_rejected() -> None:
 def _not_requested(env, state="unknown", reading=False):
     n = node("ecu.a", values=[value(key="dtc")], w=why("not_requested"), state=state)
     if not reading:
-        n["values"][0].update(value=None, raw=None, classification="sna", state="absent", why=why("value_not_available"))
+        n["values"][0].update(
+            value=None,
+            raw=None,
+            classification="sna",
+            state="absent",
+            why=why("value_not_available"),
+        )
     ecu(env)["children"].append(n)
 
 
@@ -110,22 +129,34 @@ def test_not_requested_unknown_without_reading_passes() -> None:
 
 
 def test_not_requested_on_another_state_is_rejected() -> None:
-    assert "not_requested_inconsistent" in codes(mutate(lambda env: _not_requested(env, state="degraded")))
+    assert "not_requested_inconsistent" in codes(
+        mutate(lambda env: _not_requested(env, state="degraded"))
+    )
 
 
 def test_not_requested_with_a_reading_is_rejected() -> None:
-    assert "not_requested_inconsistent" in codes(mutate(lambda env: _not_requested(env, reading=True)))
+    assert "not_requested_inconsistent" in codes(
+        mutate(lambda env: _not_requested(env, reading=True))
+    )
 
 
 def _switched_off(env, state="absent"):
-    n = node("ecu.bat", values=[value(key="soc")], w=why("switched_off", evidence={"action": "ecu/act_switch"}),
-             state=state)
+    n = node(
+        "ecu.bat",
+        values=[value(key="soc")],
+        w=why("switched_off", evidence={"action": "ecu/act_switch"}),
+        state=state,
+    )
     ecu(env)["children"].append(n)
     if state != "ok":
         ecu(env)["state"] = "degraded"
-        ecu(env)["why"] = why("child_degraded", evidence={"children": {"ecu.bat": state}})
+        ecu(env)["why"] = why(
+            "child_degraded", evidence={"children": {"ecu.bat": state}}
+        )
         env["tree"]["state"] = "degraded"
-        env["tree"]["why"] = why("child_degraded", evidence={"children": {"ecu": "degraded"}})
+        env["tree"]["why"] = why(
+            "child_degraded", evidence={"children": {"ecu": "degraded"}}
+        )
 
 
 def test_switched_off_absent_with_values_passes() -> None:
@@ -133,4 +164,6 @@ def test_switched_off_absent_with_values_passes() -> None:
 
 
 def test_switched_off_on_another_state_is_rejected() -> None:
-    assert "switched_off_inconsistent" in codes(mutate(lambda env: _switched_off(env, state="degraded")))
+    assert "switched_off_inconsistent" in codes(
+        mutate(lambda env: _switched_off(env, state="degraded"))
+    )

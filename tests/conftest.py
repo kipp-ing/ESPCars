@@ -38,7 +38,7 @@ if _COMPONENTS_DIR.as_posix() not in esphome.components.__path__:
 class SetCoreConfigCallable(Protocol):
     """Protocol for the set_core_config fixture setter function."""
 
-    def __call__(  # noqa: E704
+    def __call__(  # noqa: E704 -- Protocol method intentionally has only an ellipsis body.
         self,
         platform_framework: PlatformFramework,
         /,

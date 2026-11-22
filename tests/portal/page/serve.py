@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Local dev harness for the built-in portal page (components/portal/index.html).
 
     .venv/bin/python tests/portal/page/serve.py [--port 8765]
@@ -57,7 +58,9 @@ def page(query: dict) -> bytes:
     if ui is not None and query.get("lang"):
         ui["lang"] = query["lang"][0]
     text = PAGE.read_text()
-    return text.replace(TOKEN, json.dumps(ui, ensure_ascii=False, separators=(",", ":")), 1).encode()
+    return text.replace(
+        TOKEN, json.dumps(ui, ensure_ascii=False, separators=(",", ":")), 1
+    ).encode()
 
 
 def check(action, body):
@@ -84,8 +87,13 @@ def check(action, body):
 
 
 def result(state, code, value):
-    return {"state": state, "why": {"code": code, "detail": None, "since_ms": None, "evidence": {}},
-            "age_ms": 0, "value": value, "_t": time.monotonic()}
+    return {
+        "state": state,
+        "why": {"code": code, "detail": None, "since_ms": None, "evidence": {}},
+        "age_ms": 0,
+        "value": value,
+        "_t": time.monotonic(),
+    }
 
 
 def apply(scen, node_id, key, value):
@@ -99,15 +107,20 @@ def apply(scen, node_id, key, value):
         action["result"] = result("accepted", "applied", value)
         ref = f"{node_id}/{key}"
         if action.get("control") == "switch":
-            for scenario in SCENARIOS:          # a switched_off node follows its switch
+            for scenario in SCENARIOS:  # a switched_off node follows its switch
                 for n in list(walk(env["tree"])):
                     other = find_node(PRISTINE[scenario]["tree"], n["id"])
                     off = (other or {}).get("why") or {}
-                    if off.get("code") == "switched_off" and off.get("evidence", {}).get("action") == ref:
+                    if (
+                        off.get("code") == "switched_off"
+                        and off.get("evidence", {}).get("action") == ref
+                    ):
                         src = PRISTINE["healthy" if value else "problem"]["tree"]
                         repl = copy.deepcopy(find_node(src, n["id"]))
                         for a in repl["actions"]:
-                            mine = next((b for b in n["actions"] if b["key"] == a["key"]), None)
+                            mine = next(
+                                (b for b in n["actions"] if b["key"] == a["key"]), None
+                            )
                             if mine:
                                 a.update(value=mine["value"], result=mine["result"])
                         n.clear()
@@ -133,7 +146,11 @@ class Handler(BaseHTTPRequestHandler):
         if query.get("s") and query["s"][0] in SCENARIOS:
             return query["s"][0]
         c = SimpleCookie(self.headers.get("Cookie", ""))
-        return c["scen"].value if "scen" in c and c["scen"].value in SCENARIOS else "healthy"
+        return (
+            c["scen"].value
+            if "scen" in c and c["scen"].value in SCENARIOS
+            else "healthy"
+        )
 
     def send(self, code, body=b"", ctype="application/json", extra=()):
         self.send_response(code)
@@ -147,12 +164,17 @@ class Handler(BaseHTTPRequestHandler):
         if body:
             self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         scen = self.scenario(q)
         if u.path in ("/", "/index.html"):
-            return self.send(200, page(q), "text/html; charset=utf-8", [("Set-Cookie", f"scen={scen}; Path=/")])
+            return self.send(
+                200,
+                page(q),
+                "text/html; charset=utf-8",
+                [("Set-Cookie", f"scen={scen}; Path=/")],
+            )
         if u.path == "/api/v1/state":
             env = snapshot(scen)
             if q.get("after") and q["after"][0] == str(env["seq"]):
@@ -162,7 +184,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, b"<p>WiFi setup (harness stub)</p>", "text/html")
         return self.send(404)
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         u = urlparse(self.path)
         scen = self.scenario({})
         length = int(self.headers.get("Content-Length") or 0)
@@ -173,7 +195,9 @@ class Handler(BaseHTTPRequestHandler):
         node_id, key = parts[4], parts[5]
         with LOCK:
             node = find_node(STATES[scen]["tree"], node_id)
-            action = next((a for a in (node or {}).get("actions") or [] if a["key"] == key), None)
+            action = next(
+                (a for a in (node or {}).get("actions") or [] if a["key"] == key), None
+            )
             if action is None:
                 return self.send(404)
             if (action.get("result") or {}).get("state") == "running":
@@ -184,10 +208,14 @@ class Handler(BaseHTTPRequestHandler):
                 body = None
             why, status = check(action, body)
             value = body.get("value") if isinstance(body, dict) else None
-            action["result"] = result("refused" if why else "running", why or "queued", value)
+            action["result"] = result(
+                "refused" if why else "running", why or "queued", value
+            )
             STATES[scen]["seq"] += 1
             res = {k: v for k, v in action["result"].items() if k != "_t"}
-            out = json.dumps({"seq": STATES[scen]["seq"], "node": node_id, "key": key, "result": res}).encode()
+            out = json.dumps(
+                {"seq": STATES[scen]["seq"], "node": node_id, "key": key, "result": res}
+            ).encode()
         if not why:
             threading.Timer(0.3, apply, (scen, node_id, key, value)).start()
         return self.send(status or 202, out)
@@ -202,7 +230,9 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f"portal page harness on http://{a.host}:{a.port}/?s=healthy  (?s=problem, &lang=en, ?ui=none)")
+    print(
+        f"portal page harness on http://{a.host}:{a.port}/?s=healthy  (?s=problem, &lang=en, ?ui=none)"
+    )
     srv.serve_forever()
 
 

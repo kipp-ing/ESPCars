@@ -126,9 +126,7 @@ def test_array_roundtrip_and_element_extraction():
     resp = bytes([0x62, 0x02, 0x08]) + b"".join(
         (1000 + k).to_bytes(2, "big") for k in range(4)
     )
-    assert [catalog.extract(arr, resp, k) for k in range(4)] == [
-        1000, 1001, 1002, 1003
-    ]
+    assert [catalog.extract(arr, resp, k) for k in range(4)] == [1000, 1001, 1002, 1003]
     # and the group's short-response guard covers the whole array
     assert got.ecus[0].groups[3].resp_min_len == 13
 
@@ -148,16 +146,16 @@ def test_extract_byteswap():
 
 def test_invalid_without_text_is_authoritative():
     # Spec §6: INVALID alone means not-available; TEXT only adds a string.
-    f = catalog.Field(
-        "x", 24, 8, scales=(catalog.Scale(255, 255, invalid=True),)
-    )
+    f = catalog.Field("x", 24, 8, scales=(catalog.Scale(255, 255, invalid=True),))
     assert catalog.evaluate(f, 255) == (None, None)
     got = catalog.read_catalog(
         catalog.write_catalog(
             catalog.Catalog(
                 ecus=(
                     catalog.Ecu(
-                        "E", 1, 2,
+                        "E",
+                        1,
+                        2,
                         groups=(catalog.Group("G", b"\x22\x00\x01", fields=(f,)),),
                     ),
                 )

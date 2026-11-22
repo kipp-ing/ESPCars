@@ -9,7 +9,11 @@ from esphome.const import KEY_FRAMEWORK_VERSION, PlatformFramework
 
 
 def setup_c6(set_core_config) -> None:
-    set_core_config(PlatformFramework.ESP32_IDF, core_data={KEY_FRAMEWORK_VERSION: cv.Version(5, 5, 4)}, platform_data={KEY_BOARD: "esp32-c6-devkitc-1", KEY_VARIANT: VARIANT_ESP32C6})
+    set_core_config(
+        PlatformFramework.ESP32_IDF,
+        core_data={KEY_FRAMEWORK_VERSION: cv.Version(5, 5, 4)},
+        platform_data={KEY_BOARD: "esp32-c6-devkitc-1", KEY_VARIANT: VARIANT_ESP32C6},
+    )
 
 
 def hub(**overrides: Any) -> dict[str, Any]:
@@ -19,4 +23,5 @@ def hub(**overrides: Any) -> dict[str, Any]:
 
 def validate(value: dict[str, Any]):
     from esphome.components.ccp import CONFIG_SCHEMA
+
     return CONFIG_SCHEMA(value)

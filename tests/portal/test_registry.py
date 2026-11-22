@@ -17,7 +17,6 @@ from esphome.components import sensor
 
 from .common import (
     FIXTURES,
-    NULL,
     generate,
     portal,
     portal_yaml,
@@ -52,20 +51,38 @@ def _absent(extra=None, **args):
 
 
 def _register(**kw):
-    from esphome.components.portal import register_absent_provider, register_series_provider
+    from esphome.components.portal import (
+        register_absent_provider,
+        register_series_provider,
+    )
 
     register_absent_provider(
-        "p_abs", args={"n": cv.int_range(min=0, max=3)}, source_type=sensor.Sensor, body="return {n} > 1;"
+        "p_abs",
+        args={"n": cv.int_range(min=0, max=3)},
+        source_type=sensor.Sensor,
+        body="return {n} > 1;",
     )
     register_series_provider(
-        "p_ser", args={"n": cv.int_range(min=0, max=5)}, source_type=sensor.Sensor, body="return false;"
+        "p_ser",
+        args={"n": cv.int_range(min=0, max=5)},
+        source_type=sensor.Sensor,
+        body="return false;",
     )
 
 
 def test_registry_ships_empty() -> None:
     """PS-M1-04: the portal ships no providers (an unknown provider is rejected, naming it)."""
     with pytest.raises(cv.Invalid) as e:
-        validate(portal(tree=[tree_node(absent="x", absent_when={"provider": "csc_sim_slot_silent", "source": "s"})]))
+        validate(
+            portal(
+                tree=[
+                    tree_node(
+                        absent="x",
+                        absent_when={"provider": "csc_sim_slot_silent", "source": "s"},
+                    )
+                ]
+            )
+        )
     assert "csc_sim_slot_silent" in str(e.value)
 
 
@@ -78,8 +95,14 @@ def test_registry_functions_exist_with_the_spec_signature() -> None:
     a = inspect.signature(mod.register_absent_provider)
     s = inspect.signature(mod.register_series_provider)
     for name in ("args", "source_type", "body"):
-        assert name in a.parameters and a.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
-        assert name in s.parameters and s.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert (
+            name in a.parameters
+            and a.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        )
+        assert (
+            name in s.parameters
+            and s.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        )
     for name in ("evidence", "for_why"):
         assert name in a.parameters
     assert next(iter(a.parameters)) == "name" and next(iter(s.parameters)) == "name"
@@ -95,7 +118,17 @@ def test_registered_absent_provider_validates(registry) -> None:
 def test_registered_series_provider_validates(registry) -> None:
     """PS-M1-04 accept."""
     _register()
-    node = validate(portal(tree=[tree_node(series=series_entry(source="vcc_measured_sensor", provider="p_ser", n=1))]))
+    node = validate(
+        portal(
+            tree=[
+                tree_node(
+                    series=series_entry(
+                        source="vcc_measured_sensor", provider="p_ser", n=1
+                    )
+                )
+            ]
+        )
+    )
     assert node["tree"][0]["series"]["provider"] == "p_ser"
 
 
@@ -103,7 +136,11 @@ def test_unknown_provider_error_lists_registered_names(registry) -> None:
     """PS-M1-04 reject: the error lists the registered names."""
     _register()
     with pytest.raises(cv.Invalid) as e:
-        validate(portal(tree=[tree_node(series=series_entry(source="s", provider="nope", n=1))]))
+        validate(
+            portal(
+                tree=[tree_node(series=series_entry(source="s", provider="nope", n=1))]
+            )
+        )
     msg = str(e.value)
     assert "nope" in msg and "p_ser" in msg
 
@@ -133,7 +170,7 @@ def test_absent_provider_arg_out_of_range_is_rejected(registry, n: int) -> None:
 def test_series_provider_missing_and_extra_args_are_rejected(registry) -> None:
     """PS-M1-04 reject."""
     _register()
-    base = dict(source="vcc_measured_sensor", provider="p_ser")
+    base = {"source": "vcc_measured_sensor", "provider": "p_ser"}
     with pytest.raises(cv.Invalid):
         validate(portal(tree=[tree_node(series=series_entry(**base))]))
     with pytest.raises(cv.Invalid):
@@ -150,7 +187,9 @@ def test_series_args_without_provider_are_rejected(registry) -> None:
 def test_absent_when_without_source_is_rejected(registry) -> None:
     """PS-M1-04 reject."""
     _register()
-    node = tree_node(absent="entities_unavailable", absent_when={"provider": "p_abs", "n": 1})
+    node = tree_node(
+        absent="entities_unavailable", absent_when={"provider": "p_abs", "n": 1}
+    )
     with pytest.raises(cv.Invalid):
         validate(portal(tree=[node]))
 
@@ -160,7 +199,11 @@ def test_absent_when_lifts_values_and_children_exclusivity(registry) -> None:
     _register()
     node = _absent(
         n=1,
-        extra={"values": [value_entry()], "children": [tree_node(segment="kid")], "series": series_entry()},
+        extra={
+            "values": [value_entry()],
+            "children": [tree_node(segment="kid")],
+            "series": series_entry(),
+        },
     )
     validate(portal(tree=[node]))
 
@@ -186,17 +229,26 @@ def test_evidence_gated_code_needs_a_provider_with_matching_evidence(registry) -
         for_why=("never_announced",),
     )
     ok = tree_node(
-        absent="never_announced", absent_when={"provider": "p_ev", "source": "vcc_measured_sensor"}
+        absent="never_announced",
+        absent_when={"provider": "p_ev", "source": "vcc_measured_sensor"},
     )
     validate(portal(tree=[ok]))
     # another gated code with the same provider: refused
-    bad = tree_node(absent="crc_fail", absent_when={"provider": "p_ev", "source": "vcc_measured_sensor"})
+    bad = tree_node(
+        absent="crc_fail",
+        absent_when={"provider": "p_ev", "source": "vcc_measured_sensor"},
+    )
     with pytest.raises(cv.Invalid):
         validate(portal(tree=[bad]))
     # a provider that declares no evidence at all: refused
-    register = __import__("esphome.components.portal", fromlist=["x"]).register_absent_provider
+    register = __import__(
+        "esphome.components.portal", fromlist=["x"]
+    ).register_absent_provider
     register("p_noev", args={}, source_type=sensor.Sensor, body="return false;")
-    noev = tree_node(absent="never_announced", absent_when={"provider": "p_noev", "source": "vcc_measured_sensor"})
+    noev = tree_node(
+        absent="never_announced",
+        absent_when={"provider": "p_noev", "source": "vcc_measured_sensor"},
+    )
     with pytest.raises(cv.Invalid):
         validate(portal(tree=[noev]))
 
@@ -211,11 +263,15 @@ def _prov_tree():
 
     def a(seg, n):
         return tree_node(
-            segment=seg, absent="entities_unavailable", absent_when={"provider": "demo_absent", "source": src, "n": n}
+            segment=seg,
+            absent="entities_unavailable",
+            absent_when={"provider": "demo_absent", "source": src, "n": n},
         )
 
     def s(seg, n):
-        return tree_node(segment=seg, series=series_entry(source=src, provider="demo_series", n=n))
+        return tree_node(
+            segment=seg, series=series_entry(source=src, provider="demo_series", n=n)
+        )
 
     return [
         a("a1", 2),
@@ -226,16 +282,26 @@ def _prov_tree():
             absent="never_announced",
             absent_when={"provider": "demo_absent", "source": src, "n": 1},
         ),
-        tree_node(segment="p", absent="entities_unavailable", absent_when={"provider": "demo_absent_plain", "source": src}),
+        tree_node(
+            segment="p",
+            absent="entities_unavailable",
+            absent_when={"provider": "demo_absent_plain", "source": src},
+        ),
         s("s1", 1),
         s("s2", 1),
         s("s3", 4),
     ]
 
 
-def test_codegen_emits_one_deduplicated_named_thunk_per_provider_and_args(tmp_path: Path) -> None:
+def test_codegen_emits_one_deduplicated_named_thunk_per_provider_and_args(
+    tmp_path: Path,
+) -> None:
     """PS-M1-04: portal_prov_<provider>_<argletter><value>..., once per distinct (provider, args)."""
-    text = portal_yaml(portal(tree=_prov_tree()), extra="portal_demo_providers:\n", extra_components=EXT)
+    text = portal_yaml(
+        portal(tree=_prov_tree()),
+        extra="portal_demo_providers:\n",
+        extra_components=EXT,
+    )
     gen = generate(tmp_path, text)
     assert gen.returncode == 0, gen.output
     cpp = gen.main_cpp
@@ -258,23 +324,32 @@ def test_codegen_emits_one_deduplicated_named_thunk_per_provider_and_args(tmp_pa
     assert "source == nullptr" in cpp
     # the thunk signatures of 4.6
     assert re.search(r"bool portal_prov_demo_absent_n2\(void \*ctx\)", cpp)
-    assert re.search(r"bool portal_prov_demo_series_n1\(void \*ctx, uint16_t index,\s*(?:esphome::portal::core::)?SeriesElement \*out\)", cpp)
+    assert re.search(
+        r"bool portal_prov_demo_series_n1\(void \*ctx, uint16_t index,\s*(?:esphome::portal::core::)?SeriesElement \*out\)",
+        cpp,
+    )
 
 
 def test_codegen_is_deterministic(tmp_path: Path) -> None:
     """PS-M1-04: thunk names never depend on a counter or iteration order."""
-    text = portal_yaml(portal(tree=_prov_tree()), extra="portal_demo_providers:\n", extra_components=EXT)
+    text = portal_yaml(
+        portal(tree=_prov_tree()),
+        extra="portal_demo_providers:\n",
+        extra_components=EXT,
+    )
     a = tmp_path / "a"
     b = tmp_path / "b"
     a.mkdir()
     b.mkdir()
     ga, gb = generate(a, text), generate(b, text)
     assert ga.returncode == 0 and gb.returncode == 0, ga.output + gb.output
-    names = lambda g: sorted(set(re.findall(r"\bportal_prov_\w+", g.main_cpp)))  # noqa: E731
+    names = lambda g: sorted(set(re.findall(r"\bportal_prov_\w+", g.main_cpp)))  # noqa: E731 -- Local helper extracts provider names from each generated variant.
     assert names(ga) == names(gb)
 
 
-def test_registry_leaves_no_provider_behind_without_the_ext_component(tmp_path: Path) -> None:
+def test_registry_leaves_no_provider_behind_without_the_ext_component(
+    tmp_path: Path,
+) -> None:
     """PS-M1-04: without the test ext component in the config the same tree is rejected (registry empty by default)."""
     text = portal_yaml(portal(tree=_prov_tree()))
     gen = generate(tmp_path, text)
@@ -284,20 +359,31 @@ def test_registry_leaves_no_provider_behind_without_the_ext_component(tmp_path: 
 
 def test_unknown_body_placeholder_fails_codegen(tmp_path: Path) -> None:
     """PS-M1-04 (4.6): no placeholder other than the declared args exists; an unknown one is an error at codegen."""
-    node = tree_node(segment="x", absent="entities_unavailable",
-                     absent_when={"provider": "demo_absent_bad", "source": "vcc_measured_sensor"})
-    text = portal_yaml(portal(tree=[node]), extra="portal_demo_providers:\n", extra_components=EXT)
+    node = tree_node(
+        segment="x",
+        absent="entities_unavailable",
+        absent_when={"provider": "demo_absent_bad", "source": "vcc_measured_sensor"},
+    )
+    text = portal_yaml(
+        portal(tree=[node]), extra="portal_demo_providers:\n", extra_components=EXT
+    )
     gen = generate(tmp_path, text)
     assert gen.returncode != 0
     assert "zzz" in gen.output
 
 
-def test_series_thunk_returns_false_before_body_when_source_is_null(tmp_path: Path) -> None:
+def test_series_thunk_returns_false_before_body_when_source_is_null(
+    tmp_path: Path,
+) -> None:
     """PS-M1-04 (4.6): the series thunk guards a null source itself; absent thunks do not (body decides)."""
-    text = portal_yaml(portal(tree=_prov_tree()), extra="portal_demo_providers:\n", extra_components=EXT)
+    text = portal_yaml(
+        portal(tree=_prov_tree()),
+        extra="portal_demo_providers:\n",
+        extra_components=EXT,
+    )
     gen = generate(tmp_path, text)
     assert gen.returncode == 0, gen.output
-    m = re.search(r"bool portal_prov_demo_series_n1\(.*?\n}\n", gen.main_cpp, re.S)
+    m = re.search(r"bool portal_prov_demo_series_n1\(.*?\n}\n", gen.main_cpp, re.DOTALL)
     assert m, "series thunk not found"
     body = m.group(0)
     assert body.index("nullptr") < body.index("index >= 1"), body

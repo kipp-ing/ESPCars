@@ -131,20 +131,21 @@ The most severe applies: 77 > 74 > 3 > 1 > 75 > 0.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable, Iterator
+from contextlib import suppress
+from dataclasses import dataclass, field
 import hashlib
 import http.client
 import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import time
 import urllib.error
-import urllib.request
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
-from pathlib import Path
 from urllib.parse import quote, urlparse
+import urllib.request
 
 
 # script/ is a tool directory, not a package, so the reader is loaded by path —
@@ -153,7 +154,9 @@ from urllib.parse import quote, urlparse
 def _load_reader():
     if "sdlog" in sys.modules:
         return sys.modules["sdlog"]
-    spec = importlib.util.spec_from_file_location("sdlog", Path(__file__).parent / "sdlog.py")
+    spec = importlib.util.spec_from_file_location(
+        "sdlog", Path(__file__).parent / "sdlog.py"
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules["sdlog"] = module
     spec.loader.exec_module(module)
@@ -240,7 +243,9 @@ class Outcome:
     confirmed: list[str] = field(default_factory=list)  # the device acknowledged
     skipped: list[str] = field(default_factory=list)  # already archived (dedup)
     failed: list[tuple[str, str]] = field(default_factory=list)  # (name, reason)
-    torn: list[tuple[str, str]] = field(default_factory=list)  # accepted as torn (C12): (name, reason)
+    torn: list[tuple[str, str]] = field(
+        default_factory=list
+    )  # accepted as torn (C12): (name, reason)
     # The subset of ``failed`` lost to the network alone (or to a race the next
     # run resolves). Everything else in ``failed`` is a defect.
     transient: list[str] = field(default_factory=list)
@@ -331,10 +336,8 @@ def _size(path: Path) -> int:
 def _unlink(path: Path) -> None:
     """Dropping bytes that were already judged useless must not be able to end
     the run — this is called from failure paths only."""
-    try:
+    with suppress(OSError):
         path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _read_head(path: Path, count: int) -> bytes:
@@ -389,7 +392,11 @@ def safe_name(name: str) -> str:
     """The device names the file; this decides whether that name may become a
     path. Traversal is the whole risk: ``../../x.LOG`` and ``/tmp/x.LOG`` are
     both perfectly good JSON strings."""
-    if not isinstance(name, str) or Path(name).name != name or not _SAFE_NAME.fullmatch(name):
+    if (
+        not isinstance(name, str)
+        or Path(name).name != name
+        or not _SAFE_NAME.fullmatch(name)
+    ):
         raise ValueError(f"unusable chunk name {name!r}")
     return name
 
@@ -403,7 +410,9 @@ def _read_report(path: Path):
         return None, f"cannot read: {err}"
     if report.bad_lines:
         number, detail = report.bad_lines[0]
-        more = f" (+{len(report.bad_lines) - 1} more)" if len(report.bad_lines) > 1 else ""
+        more = (
+            f" (+{len(report.bad_lines) - 1} more)" if len(report.bad_lines) > 1 else ""
+        )
         return report, f"malformed line {number}: {detail}{more}"
     if report.legacy:
         return report, "not an sd_logger chunk (M1-era .CSV legend, no #sdlog header)"
@@ -414,12 +423,15 @@ def _read_report(path: Path):
         # a file nothing has ever read.
         return report, (
             f"write format v{report.format_version}, which this collector cannot verify"
-            f" (it reads {', '.join('v%d' % v for v in sdlog.SUPPORTED_FORMAT_VERSIONS)})"
+            f" (it reads {', '.join(f'v{v:d}' for v in sdlog.SUPPORTED_FORMAT_VERSIONS)})"
         )
     if report.format_version is None:
         return report, "no #sdlog header — this is not an sd_logger chunk"
     if report.close_reason is None:
-        return report, "short transfer: no #close line (a sealed chunk always carries one)"
+        return (
+            report,
+            "short transfer: no #close line (a sealed chunk always carries one)",
+        )
     return report, None
 
 
@@ -485,7 +497,11 @@ class Collector:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._token = token
-        self._opener = urllib.request.build_opener(_NoRedirect) if token else urllib.request.build_opener()
+        self._opener = (
+            urllib.request.build_opener(_NoRedirect)
+            if token
+            else urllib.request.build_opener()
+        )
         self.dest = Path(dest)
         # An explicit name wins; otherwise the index says who it is; otherwise the
         # host out of the URL. The name is half the dedup key, so it has to be
@@ -523,11 +539,15 @@ class Collector:
                 self.sleeper(self.backoff * (2 ** (number - 1)))
             yield number
 
-    def _open(self, path: str, *, method: str = "GET", headers: dict | None = None, data=None):
+    def _open(
+        self, path: str, *, method: str = "GET", headers: dict | None = None, data=None
+    ):
         headers = dict(headers or {})
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
-        request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        request = urllib.request.Request(
+            self.base_url + path, data=data, headers=headers, method=method
+        )
         try:
             return self._opener.open(request, timeout=self.timeout)
         except urllib.error.HTTPError as err:
@@ -574,7 +594,9 @@ class Collector:
             try:
                 payload = json.loads(body.decode("utf-8"))
             except ValueError as err:
-                raise _Unreachable(f"index: the reply is not JSON ({err})", offline=False) from err
+                raise _Unreachable(
+                    f"index: the reply is not JSON ({err})", offline=False
+                ) from err
             if not isinstance(payload, dict):
                 raise _Unreachable(
                     f"index: the index is not a JSON object but a {type(payload).__name__}",
@@ -661,7 +683,9 @@ class Collector:
         # window; only what was asked for counts as owed.
         owed = count if promised is None else min(promised, count)
         if len(data) < owed:
-            raise _Interrupted(f"identity window ended after {len(data)} of {owed} bytes")
+            raise _Interrupted(
+                f"identity window ended after {len(data)} of {owed} bytes"
+            )
         return data
 
     def _prove_local(self, chunk: Chunk, path: Path, transfer: _Transfer) -> None:
@@ -675,7 +699,9 @@ class Collector:
         if local <= 0:
             raise _Mismatch("the local copy is empty")
         if chunk.size and local > chunk.size:
-            raise _Mismatch(f"local copy holds {local} B, the device offers {chunk.size} B")
+            raise _Mismatch(
+                f"local copy holds {local} B, the device offers {chunk.size} B"
+            )
         want = min(local, HEAD_WINDOW)
         head = self._probe_head(chunk, want, transfer)
         if len(head) < want:
@@ -683,7 +709,9 @@ class Collector:
             # locally, so the local bytes cannot be a prefix of it.
             raise _Mismatch(f"the device holds only {len(head)} B under this name")
         if head != _read_head(path, len(head)):
-            raise _Mismatch("the local copy's first bytes are not this chunk's first bytes")
+            raise _Mismatch(
+                "the local copy's first bytes are not this chunk's first bytes"
+            )
 
     def _already_have(self, chunk: Chunk, transfer: _Transfer) -> None:
         """``None`` when the archived file under this name really is this chunk.
@@ -705,7 +733,9 @@ class Collector:
         path = self.archive_path(chunk.name)
         local = _size(path)
         if chunk.size and local != chunk.size:
-            raise defect(f"archived copy is {local} B, the device offers {chunk.size} B")
+            raise defect(
+                f"archived copy is {local} B, the device offers {chunk.size} B"
+            )
         report, problem = _read_report(path)
         if problem is not None and _is_torn(report):
             # Accepted as torn on an earlier run (C12) whose confirm did not stick:
@@ -716,7 +746,9 @@ class Collector:
         if problem is not None:
             raise defect(f"archived copy does not verify ({problem})")
         if chunk.seq and report.seq is not None and report.seq != chunk.seq:
-            raise defect(f"archived copy carries seq {report.seq}, the index says {chunk.seq}")
+            raise defect(
+                f"archived copy carries seq {report.seq}, the index says {chunk.seq}"
+            )
         reason = "no attempt was made"
         for _ in self._attempts():
             try:
@@ -786,7 +818,9 @@ class Collector:
                     # above.)
                     _unlink(partial)
                     transfer.restarted = True
-                    reason = "discarded the partial: it is longer than the chunk offered"
+                    reason = (
+                        "discarded the partial: it is longer than the chunk offered"
+                    )
                     continue
                 if 400 <= err.code < 500:
                     # 409 is the open file out of a stale index and 404 is a chunk
@@ -794,7 +828,8 @@ class Collector:
                     # is done with the chunk, and the next ones still get theirs.
                     # Those two resolve by themselves; any other 4xx is a refusal.
                     raise _ChunkFailed(
-                        f"HTTP {err.code} {err.reason}", transient=err.code in _RACE_STATUS
+                        f"HTTP {err.code} {err.reason}",
+                        transient=err.code in _RACE_STATUS,
                     ) from err
                 reason = f"HTTP {err.code} {err.reason}"
             except _Interrupted as err:
@@ -818,7 +853,8 @@ class Collector:
                 # Fewer bytes than the index promised: lost on the way, not torn on
                 # the card (C14). The partial stays; the next run resumes it.
                 raise _ChunkFailed(
-                    f"short transfer: {_size(partial)} of {chunk.size or '?'} B and no #close", transient=True
+                    f"short transfer: {_size(partial)} of {chunk.size or '?'} B and no #close",
+                    transient=True,
                 )
             transfer.torn = self._torn_sighting(chunk, partial, report)
             problem = None
@@ -834,7 +870,9 @@ class Collector:
             # The archive is append-only: a file that appeared under this name
             # while we fetched (a second collector without the fleet's lock) is
             # never replaced. The bytes stay in the partial for a human.
-            raise _ChunkFailed(f"{final.name} appeared in the archive meanwhile — not replaced")
+            raise _ChunkFailed(
+                f"{final.name} appeared in the archive meanwhile — not replaced"
+            )
         try:
             if transfer.torn is not None:
                 # Sidecar first: an archived torn file without it would read as a
@@ -851,7 +889,11 @@ class Collector:
 
     def _drop_candidate(self, name: str) -> None:
         _unlink(self.candidate_path(name))
-        _unlink(self.candidate_path(name).with_name(self.candidate_path(name).name + ".json"))
+        _unlink(
+            self.candidate_path(name).with_name(
+                self.candidate_path(name).name + ".json"
+            )
+        )
 
     def _torn_sighting(self, chunk: Chunk, partial: Path, report) -> str:
         """A full fetch without `#close` (C11–C13). Returns the reason when this
@@ -873,16 +915,26 @@ class Collector:
         candidate = self.candidate_path(chunk.name)
         meta_path = candidate.with_name(candidate.name + ".json")
         before = _read_json(meta_path)
-        if before and before.get("bytes") == size and before.get("sha256") == sha and candidate.is_file():
+        if (
+            before
+            and before.get("bytes") == size
+            and before.get("sha256") == sha
+            and candidate.is_file()
+        ):
             return f"torn on the card: no #close, {size} B stable over two full fetches"
         seen = int(before.get("seen", 0)) + 1 if before else 1
         if seen >= TORN_MAX_SIGHTINGS:
             _unlink(partial)
             self._drop_candidate(chunk.name)
-            raise _ChunkFailed(f"no #close and not stable: {seen} full fetches, no two equal in a row")
+            raise _ChunkFailed(
+                f"no #close and not stable: {seen} full fetches, no two equal in a row"
+            )
         try:
             partial.replace(candidate)
-            meta_path.write_text(json.dumps({"bytes": size, "sha256": sha, "seen": seen}) + "\n", encoding="utf-8")
+            meta_path.write_text(
+                json.dumps({"bytes": size, "sha256": sha, "seen": seen}) + "\n",
+                encoding="utf-8",
+            )
         except OSError as err:
             raise _ArchiveError(f"cannot keep {candidate.name}: {err}") from err
         raise _ChunkFailed(
@@ -899,9 +951,13 @@ class Collector:
             "reason": reason,
             "accepted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        self.torn_path(chunk.name).write_text(json.dumps(sidecar, indent=2) + "\n", encoding="utf-8")
+        self.torn_path(chunk.name).write_text(
+            json.dumps(sidecar, indent=2) + "\n", encoding="utf-8"
+        )
 
-    def _download(self, chunk: Chunk, partial: Path, offset: int, transfer: _Transfer) -> None:
+    def _download(
+        self, chunk: Chunk, partial: Path, offset: int, transfer: _Transfer
+    ) -> None:
         """One attempt. Appends to ``partial`` and raises if the body ran short.
 
         A resume asks from ``offset - SEAM_WINDOW`` and compares that window with
@@ -960,7 +1016,9 @@ class Collector:
                             handle = partial.open(mode)
                         handle.write(block)
                     except OSError as err:
-                        raise _ArchiveError(f"cannot write {partial.name}: {err}") from err
+                        raise _ArchiveError(
+                            f"cannot write {partial.name}: {err}"
+                        ) from err
                     transfer.stored += len(block)
             finally:
                 if handle is not None:
@@ -968,14 +1026,20 @@ class Collector:
                         handle.close()
                     except OSError as err:
                         # A buffered write that only fails at the flush.
-                        raise _ArchiveError(f"cannot write {partial.name}: {err}") from err
+                        raise _ArchiveError(
+                            f"cannot write {partial.name}: {err}"
+                        ) from err
         if overlap and len(seen) < overlap:
             # Cut inside the overlap window: nothing was appended and nothing was
             # proved, which is a failed attempt like any other short body.
-            raise _Interrupted(f"body ended after {got} bytes, inside the resume window")
+            raise _Interrupted(
+                f"body ended after {got} bytes, inside the resume window"
+            )
         if promised is not None and got < promised:
             # No status code says this happened. The car drove out of range.
-            raise _Interrupted(f"body ended after {start + got} of {start + promised} bytes")
+            raise _Interrupted(
+                f"body ended after {start + got} of {start + promised} bytes"
+            )
 
     def confirm(self, name: str) -> bool:
         """``POST /sdlog/done/<name>``. Idempotent; only ever called on a chunk
@@ -989,7 +1053,9 @@ class Collector:
         reason = "no attempt was made"
         for _ in self._attempts():
             try:
-                with self._open(f"/sdlog/done/{quote(name)}", method="POST", data=b"") as response:
+                with self._open(
+                    f"/sdlog/done/{quote(name)}", method="POST", data=b""
+                ) as response:
                     if response.status == 200:
                         return None
                     if _retryable(response.status):
@@ -1156,7 +1222,9 @@ def print_outcome(outcome: Outcome) -> None:
         # number that explains a slow run.
         parts.append(f"{_human(outcome.bytes_wire)} off the wire")
     if outcome.torn:
-        parts.append(f"{len(outcome.torn)} torn accepted ({', '.join(name for name, _ in outcome.torn)})")
+        parts.append(
+            f"{len(outcome.torn)} torn accepted ({', '.join(name for name, _ in outcome.torn)})"
+        )
     # TORN lines before the summary: the fleet keeps the last line as the summary.
     for name, reason in outcome.torn:
         print(f"TORN {name}: {reason}")
@@ -1178,7 +1246,10 @@ def cmd_pull(args) -> int:
     )
     outcome = pull.collect()
     if outcome.refused is not None:
-        print(f"{args.url}: REFUSED — {outcome.refused}; not asking again this pass", file=sys.stderr)
+        print(
+            f"{args.url}: REFUSED — {outcome.refused}; not asking again this pass",
+            file=sys.stderr,
+        )
         return EX_NOPERM
     if pull.unreachable:
         # Not a chunk report: nothing was listed, so counting zeroes would read
@@ -1189,14 +1260,24 @@ def cmd_pull(args) -> int:
         return exit_status(pull, outcome)
     print_outcome(outcome)
     if outcome.archive_error is not None:
-        print(f"  STOPPED: the archive cannot be written — {outcome.archive_error}", file=sys.stderr)
+        print(
+            f"  STOPPED: the archive cannot be written — {outcome.archive_error}",
+            file=sys.stderr,
+        )
     return exit_status(pull, outcome)
 
 
 def cmd_index(args) -> int:
     """What the device says it is holding. Read-only: nothing is confirmed, so
     this is the safe thing to point at a car mid-drive."""
-    pull = Collector(args.url, ".", timeout=args.timeout, retries=args.retries, backoff=0.5, token=args.token)
+    pull = Collector(
+        args.url,
+        ".",
+        timeout=args.timeout,
+        retries=args.retries,
+        backoff=0.5,
+        token=args.token,
+    )
     try:
         chunks = pull.index()
     except _Refused as err:
@@ -1229,7 +1310,9 @@ def read_token(path: Path) -> str:
     except OSError as err:
         raise ValueError(f"cannot read {path}: {err.strerror}") from None
     if mode & 0o077:
-        raise ValueError(f"{path} is readable by group or others (mode {mode & 0o777:o}); chmod 600 it")
+        raise ValueError(
+            f"{path} is readable by group or others (mode {mode & 0o777:o}); chmod 600 it"
+        )
     lines = text.splitlines()
     token = lines[0].strip() if lines else ""
     if not token:
@@ -1247,8 +1330,12 @@ def main(argv: list[str] | None = None) -> int:
 
     pull = sub.add_parser("pull", help="fetch, verify and confirm every sealed chunk")
     pull.add_argument("url", help="device base url, e.g. http://mr-orange.local:8080")
-    pull.add_argument("--into", required=True, help="archive root; chunks land in <into>/<device>/")
-    pull.add_argument("--device", help="archive under this name instead of the one the index gives")
+    pull.add_argument(
+        "--into", required=True, help="archive root; chunks land in <into>/<device>/"
+    )
+    pull.add_argument(
+        "--device", help="archive under this name instead of the one the index gives"
+    )
     pull.add_argument(
         "--expect",
         metavar="NAME",
@@ -1260,12 +1347,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_RETRIES,
         help=f"attempts per chunk per run, not retries after the first (default {DEFAULT_RETRIES})",
     )
-    pull.add_argument("--backoff", type=float, default=DEFAULT_BACKOFF, help="seconds, doubling")
+    pull.add_argument(
+        "--backoff", type=float, default=DEFAULT_BACKOFF, help="seconds, doubling"
+    )
     pull.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     pull.add_argument("--token-file", metavar="PATH", help=TOKEN_FILE_HELP)
     pull.set_defaults(func=cmd_pull)
 
-    index = sub.add_parser("index", help="list what the device is holding, confirm nothing")
+    index = sub.add_parser(
+        "index", help="list what the device is holding, confirm nothing"
+    )
     index.add_argument("url")
     index.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
     index.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)

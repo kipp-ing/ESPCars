@@ -198,7 +198,7 @@ def test_example_beacon(set_core_config) -> None:
     # The example's on_bus_off uses logger.log. Import the logger component so the
     # action is registered: the test used to pass only because some other test
     # imported it first, and esphome 2026.11 no longer does that.
-    import esphome.components.logger  # noqa: F401
+    import esphome.components.logger  # noqa: F401 -- Import registers logger.log for this example.
 
     setup_c6(set_core_config)
     _validate(EXAMPLE_BEACON)

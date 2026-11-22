@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Collect sd_logger chunks from many devices, unattended (docs/sdlog-fleet-spec.md).
 
 ``sdlog_collect.py`` is one pass against one device, run by hand. This is what
@@ -47,21 +48,22 @@ an error), 1 at least one did or is locked, 2 a usage or config error.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import fcntl
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import time
-import urllib.request
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+import urllib.request
 
 try:
     import tomllib
@@ -127,7 +129,9 @@ class PassResult:
     exit: int | None = None
     reason: str | None = None
     summary: str | None = None
-    torn: list[tuple[str, str]] = field(default_factory=list)  # (name, reason), collector C12
+    torn: list[tuple[str, str]] = field(
+        default_factory=list
+    )  # (name, reason), collector C12
     refused: bool = False  # collector exit 77 (F18)
 
 
@@ -142,7 +146,9 @@ class DeviceStatus:
 # ------------------------------------------------------------------------ config
 
 
-def _number(raw: dict, key: str, default: float, *, minimum: float, strict: bool) -> float:
+def _number(
+    raw: dict, key: str, default: float, *, minimum: float, strict: bool
+) -> float:
     value = raw.get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{key} must be a number, not {value!r}")
@@ -207,12 +213,18 @@ def load_config(path: Path | str) -> Config:
         if push is not None:
             push = _http_url(push, "push_url", where)
         token = entry.get("token_file")
-        if token is not None and (not isinstance(token, str) or not os.path.isabs(token)):
-            raise ConfigError(f"{where}: token_file must be an absolute path, not {token!r}")
+        if token is not None and (
+            not isinstance(token, str) or not Path(token).is_absolute()
+        ):
+            raise ConfigError(
+                f"{where}: token_file must be an absolute path, not {token!r}"
+            )
         devices.append(Device(name=name, url=url, push_url=push, token_file=token))
 
     retries = raw.get("retries")
-    if retries is not None and (isinstance(retries, bool) or not isinstance(retries, int) or retries < 1):
+    if retries is not None and (
+        isinstance(retries, bool) or not isinstance(retries, int) or retries < 1
+    ):
         raise ConfigError(f"retries must be an integer >= 1, not {retries!r}")
     backoff = None
     if "backoff" in raw:
@@ -234,7 +246,7 @@ def load_config(path: Path | str) -> Config:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _parse_time(value) -> datetime | None:
@@ -284,7 +296,7 @@ def credential_of(device: Device) -> str:
     if device.token_file is None:
         return "none"
     try:
-        return f"{device.token_file}@{os.stat(device.token_file).st_mtime_ns}"
+        return f"{device.token_file}@{os.stat(device.token_file).st_mtime_ns}"  # noqa: PTH116 -- Preserve OS handling of raw token paths, including trailing slashes.
     except OSError:
         return f"{device.token_file}@missing"
 
@@ -292,7 +304,9 @@ def credential_of(device: Device) -> str:
 def run_subprocess(argv: list[str], timeout: float) -> tuple[int, str]:
     """The collector as a child: a crash or a hang in one pass cannot take the
     fleet with it, and ``timeout`` is enforced by killing the child."""
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(
+        argv, capture_output=True, text=True, timeout=timeout, check=False
+    )
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -308,8 +322,11 @@ def push_url_with(base: str, status: str, msg: str) -> str:
     already carries ``?status=up&msg=OK&ping=``; those are replaced, not
     appended a second time."""
     parsed = urlparse(base)
-    query = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True)
-             if k not in ("status", "msg", "ping")]
+    query = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if k not in ("status", "msg", "ping")
+    ]
     query += [("status", status), ("msg", msg[:PUSH_MSG_MAX])]
     return urlunparse(parsed._replace(query=urlencode(query)))
 
@@ -379,19 +396,22 @@ class Fleet:
 
     def _pass(self, device: Device, blocked: str | None) -> PassResult:
         lock_path = self.config.state / f"{device.name}.lock"
-        with open(lock_path, "a") as lock:
+        # Keep the original interpreter-selected codec; the lock file contains no text.
+        with Path(lock_path).open("a", encoding=None) as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 # Another pass for this device is still running (a long transfer,
                 # a manual run). It will write the heartbeat and push; we don't.
-                return PassResult(device.name, "busy", reason="another pass holds the lock")
+                return PassResult(
+                    device.name, "busy", reason="another pass holds the lock"
+                )
             # The lock is released when the file closes — and by the kernel if
             # this process dies, so a crash never leaves a device locked out.
             at = self.now()
             # Keyed before the pass: a token replaced while it runs unlocks the next one.
             credential = credential_of(device)
-            locked = ((self._load(device.name) or {}).get("auth_locked") or {})
+            locked = (self._load(device.name) or {}).get("auth_locked") or {}
             if blocked is not None:
                 result = PassResult(device.name, "error", reason=blocked)
             elif locked.get("credential") == credential:
@@ -435,15 +455,27 @@ class Fleet:
             # Killed. A partial it left resumes next run, but a pass that never
             # ends is not the car driving away: somebody should look.
             return PassResult(
-                device.name, "error", reason=f"timeout: pass exceeded {timeout:g} s and was killed"
+                device.name,
+                "error",
+                reason=f"timeout: pass exceeded {timeout:g} s and was killed",
             )
         except Exception as err:  # noqa: BLE001 - any failure to run is an error, never "offline"
-            return PassResult(device.name, "error", reason=f"collector could not run: {err}")
+            return PassResult(
+                device.name, "error", reason=f"collector could not run: {err}"
+            )
         if code == 0:
             # A torn chunk the collector accepted is a warning: the pass stays ok (F17).
-            return PassResult(device.name, "ok", exit=0, summary=_last_line(output), torn=_torn_lines(output))
+            return PassResult(
+                device.name,
+                "ok",
+                exit=0,
+                summary=_last_line(output),
+                torn=_torn_lines(output),
+            )
         if code == EX_TEMPFAIL:
-            return PassResult(device.name, "offline", exit=code, reason=_last_line(output))
+            return PassResult(
+                device.name, "offline", exit=code, reason=_last_line(output)
+            )
         if code == EX_NOPERM:
             return PassResult(
                 device.name,
@@ -453,7 +485,10 @@ class Fleet:
                 refused=True,
             )
         return PassResult(
-            device.name, "error", exit=code, reason=f"exit {code}: {_compact(output) or 'no output'}"
+            device.name,
+            "error",
+            exit=code,
+            reason=f"exit {code}: {_compact(output) or 'no output'}",
         )
 
     # ---------------------------------------------------------------- heartbeat
@@ -468,7 +503,9 @@ class Fleet:
             return None
         return state if isinstance(state, dict) else None
 
-    def _record(self, device: Device, result: PassResult, at: datetime, credential: str) -> dict:
+    def _record(
+        self, device: Device, result: PassResult, at: datetime, credential: str
+    ) -> dict:
         state = self._load(device.name) or {
             "device": device.name,
             "created": at.isoformat(),
@@ -489,12 +526,18 @@ class Fleet:
         if result.refused:
             state["auth_locked"] = {"at": at.isoformat(), "credential": credential}
         if result.torn:
-            state["torn_accepted"] = int(state.get("torn_accepted") or 0) + len(result.torn)
+            state["torn_accepted"] = int(state.get("torn_accepted") or 0) + len(
+                result.torn
+            )
             name, reason = result.torn[-1]
             state["last_torn"] = {"at": at.isoformat(), "name": name, "reason": reason}
         elif result.result == "error":
             state["verdict"] = "error"
-            state["last_error"] = {"at": at.isoformat(), "exit": result.exit, "reason": result.reason}
+            state["last_error"] = {
+                "at": at.isoformat(),
+                "exit": result.exit,
+                "reason": result.reason,
+            }
         # "offline" changes nothing else: the car being away says nothing about
         # whether a defect seen earlier is gone.
         self._write(device.name, state)
@@ -506,25 +549,29 @@ class Fleet:
         temp = final.with_name(f".{final.name}.tmp")
         try:
             temp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-            os.replace(temp, final)
+            os.replace(temp, final)  # noqa: PTH105 -- Preserve the atomic-write failure injection exercised by the host tests.
         except OSError as err:
             print(f"{name}: cannot write heartbeat {final}: {err}", file=sys.stderr)
-            try:
+            with suppress(OSError):
                 temp.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def _status_of(self, name: str, state: dict | None, at: datetime) -> DeviceStatus:
         if state is None:
             return DeviceStatus(name, None, alarm=False, age_days=None)
-        since = _parse_time(state.get("last_success")) or _parse_time(state.get("created")) or at
+        since = (
+            _parse_time(state.get("last_success"))
+            or _parse_time(state.get("created"))
+            or at
+        )
         age = (at - since).total_seconds() / 86400
         alarm = state.get("verdict") == "error" or age > self.config.stale_after_days
         return DeviceStatus(name, state, alarm=alarm, age_days=age)
 
     def statuses(self) -> list[DeviceStatus]:
         at = self.now()
-        return [self._status_of(d.name, self._load(d.name), at) for d in self.config.devices]
+        return [
+            self._status_of(d.name, self._load(d.name), at) for d in self.config.devices
+        ]
 
     # --------------------------------------------------------------------- push
 
@@ -532,7 +579,9 @@ class Fleet:
         parts = []
         limit = self.config.stale_after_days
         if status.age_days is not None and status.age_days > limit:
-            parts.append(f"no collection for {status.age_days:.1f} d (limit {limit:g} d)")
+            parts.append(
+                f"no collection for {status.age_days:.1f} d (limit {limit:g} d)"
+            )
         if result.result == "ok":
             parts.append(f"ok: {result.summary or 'collected'}")
         elif result.result == "error":
@@ -540,18 +589,24 @@ class Fleet:
         elif result.result == "locked":
             parts.append(f"locked: {result.reason}")
         else:
-            parts.append(f"offline; last collection {_human_age(status.age_days or 0)} ago")
+            parts.append(
+                f"offline; last collection {_human_age(status.age_days or 0)} ago"
+            )
             last_error = (status.state or {}).get("last_error") or {}
             if status.state and status.state.get("verdict") == "error":
                 parts.append(f"unresolved error: {last_error.get('reason')}")
         return _compact("; ".join(parts), PUSH_MSG_MAX)
 
-    def _push(self, device: Device, state: dict, result: PassResult, at: datetime) -> None:
+    def _push(
+        self, device: Device, state: dict, result: PassResult, at: datetime
+    ) -> None:
         if device.push_url is None:
             return
         status = self._status_of(device.name, state, at)
         url = push_url_with(
-            device.push_url, "down" if status.alarm else "up", self._message(status, result)
+            device.push_url,
+            "down" if status.alarm else "up",
+            self._message(status, result),
         )
         try:
             self.pusher(url)
@@ -571,7 +626,9 @@ def print_results(results: dict[str, PassResult]) -> None:
         print(f"{name}: {result.result}" + (f" — {detail}" if detail else ""))
 
 
-def run_forever(fleet: Fleet, every: float, sleeper: Callable[[float], None] = time.sleep) -> None:
+def run_forever(
+    fleet: Fleet, every: float, sleeper: Callable[[float], None] = time.sleep
+) -> None:
     """Pass, sleep, pass — for a container without a timer. A pass that raises
     is reported and the loop goes on; only an interrupt ends it."""
     while True:
@@ -596,7 +653,9 @@ def print_status(fleet: Fleet) -> int:
             continue
         alarm |= status.alarm
         state = status.state
-        since = "never collected" if state.get("last_success") is None else "last success"
+        since = (
+            "never collected" if state.get("last_success") is None else "last success"
+        )
         line = (
             f"{status.name}: {'ALARM' if status.alarm else 'ok'}"
             f" — last pass {state.get('last_result')} at {state.get('last_run')},"
@@ -619,8 +678,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="one pass over every device")
     run.add_argument("--config", required=True, type=Path)
-    run.add_argument("--every", type=float, metavar="SECONDS", help="repeat until interrupted")
-    status = sub.add_parser("status", help="heartbeat table; exit 1 if any device is in alarm")
+    run.add_argument(
+        "--every", type=float, metavar="SECONDS", help="repeat until interrupted"
+    )
+    status = sub.add_parser(
+        "status", help="heartbeat table; exit 1 if any device is in alarm"
+    )
     status.add_argument("--config", required=True, type=Path)
     args = parser.parse_args(argv)
 

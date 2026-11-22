@@ -35,8 +35,14 @@ from ports import enumerate_boards  # noqa: E402  — sibling script, not a pack
 
 CRITERIA = {
     "mr-green": {"need": ["RING lap"], "forbid": ["TOKEN LOST", "bus-off"]},
-    "mr-blue": {"need": ["RING relay", "RING ack"], "forbid": ["BLUE degraded", "bus-off"]},
-    "mr-orange": {"need": ["RING gw", "LIN sniff 48"], "forbid": ["ORANGE degraded", "bus-off"]},
+    "mr-blue": {
+        "need": ["RING relay", "RING ack"],
+        "forbid": ["BLUE degraded", "bus-off"],
+    },
+    "mr-orange": {
+        "need": ["RING gw", "LIN sniff 48"],
+        "forbid": ["ORANGE degraded", "bus-off"],
+    },
 }
 
 
@@ -63,7 +69,7 @@ def capture(port: str, seconds: float, out: dict, key: str) -> None:
             buf += s.read(4096)
         s.close()
         out[key] = re.sub(r"\x1b\[[0-9;]*m", "", buf.decode("utf-8", "replace"))
-    except Exception as e:  # port busy/missing — report as empty capture
+    except Exception as e:  # noqa: BLE001 -- Port failures remain capture errors, not worker crashes.
         out[key] = f"__CAPTURE_ERROR__ {e}"
 
 
@@ -82,8 +88,14 @@ def main() -> int:
     live = {b["name"]: b["port"] for b in enumerate_boards() if b["name"]}
     missing = [b["name"] for b in bench if b["name"].removeprefix("mr-") not in live]
     if missing:
-        print(f"NOT ATTACHED: {', '.join(missing)} — the ring needs all three", file=sys.stderr)
-        print(f"attached and identified: {', '.join(sorted(live)) or 'none'}", file=sys.stderr)
+        print(
+            f"NOT ATTACHED: {', '.join(missing)} — the ring needs all three",
+            file=sys.stderr,
+        )
+        print(
+            f"attached and identified: {', '.join(sorted(live)) or 'none'}",
+            file=sys.stderr,
+        )
         print("run script/hil/ports.py to see everything on the hub", file=sys.stderr)
         return 2
     for b in bench:
@@ -91,7 +103,9 @@ def main() -> int:
 
     logs: dict[str, str] = {}
     threads = [
-        threading.Thread(target=capture, args=(b["port"], args.seconds, logs, b["name"]))
+        threading.Thread(
+            target=capture, args=(b["port"], args.seconds, logs, b["name"])
+        )
         for b in bench
     ]
     print(f"Capturing {args.seconds:.0f}s from {len(bench)} boards in parallel...")

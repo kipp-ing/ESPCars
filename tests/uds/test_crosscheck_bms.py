@@ -108,8 +108,10 @@ def check_entry(cat, entry):
             (
                 "position",
                 False,
-                f"no {entry['size_bits']}-bit field at rd[{entry['byte']}] "
-                f"(bit {bit_pos}); nearby: {near or 'none'}",
+                (
+                    f"no {entry['size_bits']}-bit field at rd[{entry['byte']}] "
+                    f"(bit {bit_pos}); nearby: {near or 'none'}"
+                ),
             )
         ]
     where = field.name if element is None else f"{field.name}[{element}]"
@@ -162,9 +164,7 @@ def check_entry(cat, entry):
             for s in field.scales
         )
         texts = {s.text for s in field.scales if s.low <= int(raw) <= s.high}
-        results.append(
-            ("enum", hit, f"curated raw {raw} = {label!r}; factory {texts}")
-        )
+        results.append(("enum", hit, f"curated raw {raw} = {label!r}; factory {texts}"))
     return results
 
 

@@ -1,11 +1,13 @@
 # CCP schema, action-registration, and externally-emitted define coverage.
 """CCP hub schema, action registration, and externally-emitted observe/write defines."""
+
 from __future__ import annotations
 
 import ast
 import inspect
 
 import pytest
+
 from esphome import automation, config_validation as cv
 
 from .common import hub, setup_c6, validate
@@ -45,16 +47,45 @@ def test_invalid_byte_order_rejected(set_core_config, value) -> None:
 
 
 def test_actions_are_registered() -> None:
-    expected = {"ccp.connect", "ccp.disconnect", "ccp.get_version", "ccp.exchange_id", "ccp.set_mta", "ccp.upload", "ccp.short_upload", "ccp.download", "ccp.select_cal_page", "ccp.read_memory", "ccp.write_memory", "ccp.start_daq", "ccp.stop_daq", "ccp.daq_read", "ccp.raw", "ccp.set_enabled"}
+    expected = {
+        "ccp.connect",
+        "ccp.disconnect",
+        "ccp.get_version",
+        "ccp.exchange_id",
+        "ccp.set_mta",
+        "ccp.upload",
+        "ccp.short_upload",
+        "ccp.download",
+        "ccp.select_cal_page",
+        "ccp.read_memory",
+        "ccp.write_memory",
+        "ccp.start_daq",
+        "ccp.stop_daq",
+        "ccp.daq_read",
+        "ccp.raw",
+        "ccp.set_enabled",
+    }
     assert expected <= set(automation.ACTION_REGISTRY)
 
 
 def test_codegen_emits_observe_and_configured_write_defines() -> None:
-    import esphome.components.ccp as ccp
+    from esphome.components import ccp
 
     tree = ast.parse(inspect.getsource(ccp))
-    fn = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "to_code")
-    defines = [node.args[0].value for node in ast.walk(fn) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_define" and node.args and isinstance(node.args[0], ast.Constant)]
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "to_code"
+    )
+    defines = [
+        node.args[0].value
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_define"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    ]
     assert "USE_CAN_GATEWAY_OBSERVE" in defines
     assert "USE_CCP_WRITE" in defines
 

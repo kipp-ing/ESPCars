@@ -6,11 +6,11 @@ Against a FakeSink-backed source and a fake MQTT client: no broker, no database.
 from __future__ import annotations
 
 import ast
+from datetime import UTC, datetime
 import importlib.util
 import json
-import sys
-from datetime import datetime, timezone
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -49,7 +49,7 @@ CHUNK = [
     "C1,A,7FF,",
     "#close,@2000,rotate",
 ]
-NOW = datetime(1970, 1, 3, tzinfo=timezone.utc)  # gaps window: everything in 1970-01-01 counts
+NOW = datetime(1970, 1, 3, tzinfo=UTC)  # gaps window: everything in 1970-01-01 counts
 
 
 class FakeClient:
@@ -68,7 +68,9 @@ class FakeClient:
 def env(tmp_path: Path):
     archive = tmp_path / "archive"
     (archive / "mr-orange").mkdir(parents=True)
-    (archive / "mr-orange" / "L0000007.LOG").write_bytes(("\n".join(CHUNK) + "\n").encode("latin-1"))
+    (archive / "mr-orange" / "L0000007.LOG").write_bytes(
+        ("\n".join(CHUNK) + "\n").encode("latin-1")
+    )
     dbc = tmp_path / "mini.dbc"
     dbc.write_bytes(MINI_DBC.read_bytes())
     decode_toml = tmp_path / "decode.toml"
@@ -106,11 +108,24 @@ def beat(fleet: Path, device: str, **fields) -> None:
 @pytest.mark.parametrize(
     "edit, why",
     [
-        (lambda t: t + '\nbogus = 1\n', "unknown key"),
-        (lambda t: t.replace('password_file = ', 'password = "x"\npassword_file = '), "never inline"),
+        (lambda t: t + "\nbogus = 1\n", "unknown key"),
+        (
+            lambda t: t.replace("password_file = ", 'password = "x"\npassword_file = '),
+            "never inline",
+        ),
         (lambda t: t.replace('mqtt.pass"', 'nope.pass"'), "password_file not found"),
-        (lambda t: t.replace('name = "demo-car"\n[[vehicle.sensor]]', 'name = "other-car"\n[[vehicle.sensor]]', 1), "not in the decode config"),
-        (lambda t: t.replace('key = "cell_b"', 'key = "speed"'), "duplicate sensor key"),
+        (
+            lambda t: t.replace(
+                'name = "demo-car"\n[[vehicle.sensor]]',
+                'name = "other-car"\n[[vehicle.sensor]]',
+                1,
+            ),
+            "not in the decode config",
+        ),
+        (
+            lambda t: t.replace('key = "cell_b"', 'key = "speed"'),
+            "duplicate sensor key",
+        ),
     ],
 )
 def test_config_rejects(env, capsys, edit, why) -> None:
@@ -126,7 +141,13 @@ def test_config_rejects(env, capsys, edit, why) -> None:
 
 def test_chain_state_per_device(env) -> None:
     config, sink, fleet, _ = env
-    beat(fleet, "mr-orange", last_success="2026-10-11T12:05:28.5+00:00", last_result="offline", verdict="ok")
+    beat(
+        fleet,
+        "mr-orange",
+        last_success="2026-10-11T12:05:28.5+00:00",
+        last_result="offline",
+        verdict="ok",
+    )
     state = pub.collect(config, pub.FakeSinkDb(config.decode, sink), now=NOW)
     d = state["devices"]["mr-orange"]
     assert d["last_pull"] == "2026-10-11T12:05:28+00:00"
@@ -178,7 +199,13 @@ def test_problem_table(env, case, reasons) -> None:
     config, sink, fleet, _ = env
     beat(fleet, "mr-orange", last_result="ok", verdict="ok")
     if case == "away":
-        beat(fleet, "mr-orange", last_result="offline", verdict="ok", last_success="2026-01-01T00:00:00+00:00")
+        beat(
+            fleet,
+            "mr-orange",
+            last_result="offline",
+            verdict="ok",
+            last_success="2026-01-01T00:00:00+00:00",
+        )
     if case == "collect_error":
         beat(fleet, "mr-orange", last_result="error", verdict="error")
     if case == "defect":
@@ -196,7 +223,13 @@ def test_problem_table(env, case, reasons) -> None:
 
 def test_clickhouse_down_still_publishes_the_rest(env) -> None:
     config, sink, fleet, _ = env
-    beat(fleet, "mr-orange", last_result="ok", verdict="ok", last_success="2026-10-11T12:00:00+00:00")
+    beat(
+        fleet,
+        "mr-orange",
+        last_result="ok",
+        verdict="ok",
+        last_success="2026-10-11T12:00:00+00:00",
+    )
     sink.unavailable = True
     state = pub.collect(config, pub.FakeSinkDb(config.decode, sink), now=NOW)
     assert state["reasons"] == ["clickhouse"]
@@ -225,7 +258,9 @@ def test_discovery_payloads(env) -> None:
             assert body["expire_after"] == 1800 and body["state_topic"] == "sdlog/state"
     cell = entities["homeassistant/sensor/sdlog/sdlog_demo_car_cell_b/config"]
     assert cell["unit_of_measurement"] == "V" and cell["device_class"] == "voltage"
-    assert cell["value_template"] == "{{ value_json.vehicles['demo-car'].cell_b.value }}"
+    assert (
+        cell["value_template"] == "{{ value_json.vehicles['demo-car'].cell_b.value }}"
+    )
 
 
 def test_last_will_and_online(env) -> None:
@@ -265,7 +300,11 @@ def test_collect_writes_nothing(env) -> None:
     beat(fleet, "mr-orange", last_result="ok", verdict="ok")
 
     def snapshot():
-        return {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in tmp.rglob("*") if p.is_file()}
+        return {
+            p: (p.stat().st_mtime_ns, p.read_bytes())
+            for p in tmp.rglob("*")
+            if p.is_file()
+        }
 
     before, tables = snapshot(), {t: list(r) for t, r in sink.tables.items()}
     pub.collect(config, pub.FakeSinkDb(config.decode, sink), now=NOW)
@@ -275,19 +314,25 @@ def test_collect_writes_nothing(env) -> None:
 def test_once_needs_no_mqtt() -> None:
     tree = ast.parse((_SCRIPT / "sdlog_publish.py").read_text())
     top_level = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    names = {a.name for n in top_level for a in getattr(n, "names", [])} | {getattr(n, "module", None) for n in top_level}
+    names = {a.name for n in top_level for a in getattr(n, "names", [])} | {
+        getattr(n, "module", None) for n in top_level
+    }
     assert not any(name and name.startswith("paho") for name in names)
 
 
 def test_the_example_config_loads(tmp_path: Path) -> None:
     deploy = _SCRIPT.parent / "deploy"
     decode = (deploy / "sdlog-decode" / "decode.example.toml").read_text()
-    decode = decode.replace("/path/to/consuming-project/vehicles/demo/dbc/ev.dbc", str(MINI_DBC))
     decode = decode.replace(
-        "/path/to/consuming-project/vehicles/demo/uds/mini.dcat", str(_SCRIPT.parent / "tests" / "uds" / "fixtures" / "mini.dcat")
+        "/path/to/consuming-project/vehicles/demo/dbc/ev.dbc", str(MINI_DBC)
     )
     decode = decode.replace(
-        "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml", str(deploy / "sdlog-decode" / "names.example.toml")
+        "/path/to/consuming-project/vehicles/demo/uds/mini.dcat",
+        str(_SCRIPT.parent / "tests" / "uds" / "fixtures" / "mini.dcat"),
+    )
+    decode = decode.replace(
+        "/path/to/consuming-project/vehicles/demo/uds/mini.names.toml",
+        str(deploy / "sdlog-decode" / "names.example.toml"),
     )
     (tmp_path / "decode.toml").write_text(decode)
     (tmp_path / "mqtt.pass").write_text("x")

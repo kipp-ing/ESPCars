@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Turn DBC signal definitions into `can_gateway` sensor YAML.
 
 Hand-transcribing bit offsets out of a DBC is how a decode goes quietly wrong:
@@ -33,19 +34,21 @@ import sys
 
 # SG_ <name> : <start>|<len>@<order><sign> (<factor>,<offset>) [<min>|<max>] "<unit>" <receivers>
 SG_RE = re.compile(
-    r'^\s*SG_\s+(?P<name>\w+)\s*:\s*'
-    r'(?P<start>\d+)\|(?P<len>\d+)@(?P<order>[01])(?P<sign>[+-])\s*'
-    r'\((?P<factor>[^,]+),(?P<offset>[^)]+)\)\s*'
+    r"^\s*SG_\s+(?P<name>\w+)\s*:\s*"
+    r"(?P<start>\d+)\|(?P<len>\d+)@(?P<order>[01])(?P<sign>[+-])\s*"
+    r"\((?P<factor>[^,]+),(?P<offset>[^)]+)\)\s*"
     r'\[(?P<min>[^|]*)\|(?P<max>[^\]]*)\]\s*"(?P<unit>[^"]*)"'
 )
-BO_RE = re.compile(r'^BO_\s+(?P<id>\d+)\s+(?P<name>\w+)\s*:\s*(?P<dlc>\d+)')
+BO_RE = re.compile(r"^BO_\s+(?P<id>\d+)\s+(?P<name>\w+)\s*:\s*(?P<dlc>\d+)")
 # BA_ "GenSigSNA" SG_ <msg id> <signal> "7h";  -- the per-signal not-available raw
 SNA_RE = re.compile(
     r'^BA_\s+"GenSigSNA"\s+SG_\s+(?P<id>\d+)\s+(?P<sig>\w+)\s+"(?P<val>[0-9A-Fa-f]+)h"',
-    re.M,
+    re.MULTILINE,
 )
 # VAL_ <msg id> <signal> <raw> "<label>" ... ;
-VAL_RE = re.compile(r'^VAL_\s+(?P<id>\d+)\s+(?P<sig>\w+)\s+(?P<body>.*?);', re.M)
+VAL_RE = re.compile(
+    r"^VAL_\s+(?P<id>\d+)\s+(?P<sig>\w+)\s+(?P<body>.*?);", re.MULTILINE
+)
 VAL_PAIR_RE = re.compile(r'(\d+)\s+"([^"]*)"')
 
 
@@ -144,7 +147,11 @@ def position(sig):
             return None, {}, "Motorola field runs past byte 7"
         return (
             "bit",
-            {"bit_offset": sig["start"], "bit_length": sig["length"], "byte_order": "big"},
+            {
+                "bit_offset": sig["start"],
+                "bit_length": sig["length"],
+                "byte_order": "big",
+            },
             "",
         )
     byte_offset = sig["start"] // 8
@@ -194,7 +201,7 @@ def emit(msg, sig, port, sna, throttle):
     lines = [
         f"  # {msg['name']} :: {sig['name']}",
         "  - platform: can_gateway",
-        f"    name: \"{msg['name']} {sig['name']}\"",
+        f'    name: "{msg["name"]} {sig["name"]}"',
         f"    port_id: {port}",
         f"    can_id: 0x{msg['id']:03X}",
     ]
@@ -231,17 +238,32 @@ def emit(msg, sig, port, sna, throttle):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("dbc")
-    ap.add_argument("--id", action="append", default=[], metavar="0x100",
-                    help="message id to emit; repeatable. Default: all.")
-    ap.add_argument("--signal", action="append", default=[], metavar="NAME",
-                    help="emit only these signal names; repeatable.")
+    ap.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        metavar="0x100",
+        help="message id to emit; repeatable. Default: all.",
+    )
+    ap.add_argument(
+        "--signal",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="emit only these signal names; repeatable.",
+    )
     ap.add_argument("--port", default="seg2", help="can_gateway port id")
-    ap.add_argument("--no-sna", action="store_true",
-                    help="omit the sna key even where the DBC declares one")
+    ap.add_argument(
+        "--no-sna",
+        action="store_true",
+        help="omit the sna key even where the DBC declares one",
+    )
     ap.add_argument("--throttle", default="", help="e.g. 1s")
     args = ap.parse_args(argv)
 
-    text = open(args.dbc, encoding="latin-1").read()
+    # Keep the supplied path spelling in file errors.
+    with open(args.dbc, encoding="latin-1") as handle:  # noqa: PTH123 -- Path normalizes paths shown in CLI errors.
+        text = handle.read()
     messages = parse(text)
     sna_map = parse_sna(text)
     val_map = parse_val(text)

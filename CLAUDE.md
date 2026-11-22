@@ -32,7 +32,7 @@ Do not say done, if things left to do. Do another round until task done, or the 
 
 ## Working principles
 
-**Plan before acting.** Plan what you want to do. Without a proper plan this will 
+**Plan before acting.** Plan what you want to do. Without a proper plan this will
 end in iterative fixing, which very costly
 
 **No speculative fixes.** Reproduce the bug first, then fix it, or things can get worse.
@@ -43,8 +43,7 @@ which lie in the task, do a loop, fix it. This is what a succesful task produces
 
 **Worktrees live inside the repo.** Parallel work goes into a worktree under `.claude/worktrees/<branch>` (gitignored; for subagents `isolation: "worktree"`), never into sibling directories like `../ESPCars-<feature>`. One worktree per branch; after the PR is merged, remove it at once (`git worktree remove <path> && git branch -d <branch>`). Throwaway work (merges, scrub experiments) goes to the scratchpad/`$TMPDIR`. Check `git worktree list` at the start and end of a task.
 
-**Branch and PR** Do the work on a branch and open a PR. Commiting is always a good 
+**Branch and PR** Do the work on a branch and open a PR. Commiting is always a good
 thing and allowed.
 
 **Do not assume HW fails and stop** Although they can and did happen, most times it was misconfigured SW. If in doubt reflash a working verfy copy check HW and resume. This did cost us a lot of time to circle around assumed HW issues.
-

@@ -14,21 +14,25 @@ names the one it proves. Two kinds of case live here:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 import fcntl
 import importlib.util
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from sd_logger.test_collect import FakeDevice, devices, sealed_chunk  # noqa: F401 - devices is a fixture
+from sd_logger.test_collect import (
+    FakeDevice,
+    devices as devices,  # noqa: PLC0414 -- Explicit re-export registers the pytest fixture without F811 shadowing.
+    sealed_chunk,
+)
 
 _ROOT = Path(__file__).parent.parent.parent
 _SCRIPT = _ROOT / "script"
@@ -47,7 +51,7 @@ def _load(name: str):
 
 sdlog_fleet = _load("sdlog_fleet")
 
-T0 = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 
 
 # ----------------------------------------------------------------- helpers
@@ -125,28 +129,40 @@ def write_config(tmp_path: Path, devices_toml: str, **top) -> Path:
     return path
 
 
-def device_toml(name: str, url: str = "http://192.0.2.10:8080", push: str | None = None) -> str:
+def device_toml(
+    name: str, url: str = "http://192.0.2.10:8080", push: str | None = None
+) -> str:
     text = f'[[device]]\nname = "{name}"\nurl = "{url}"\n'
     if push is not None:
         text += f'push_url = "{push}"\n'
     return text + "\n"
 
 
-def make_fleet(tmp_path: Path, names=("mr-orange",), *, runner=None, clock=None, pusher=None,
-               free_mb: float = 10_000, push: bool = True, **top):
+def make_fleet(
+    tmp_path: Path,
+    names=("mr-orange",),
+    *,
+    runner=None,
+    clock=None,
+    pusher=None,
+    free_mb: float = 10_000,
+    push: bool = True,
+    **top,
+):
     toml = "".join(
-        device_toml(name, push=f"http://kuma.example:3001/api/push/{name}" if push else None)
+        device_toml(
+            name, push=f"http://kuma.example:3001/api/push/{name}" if push else None
+        )
         for name in names
     )
     config = sdlog_fleet.load_config(write_config(tmp_path, toml, **top))
-    fleet = sdlog_fleet.Fleet(
+    return sdlog_fleet.Fleet(
         config,
         runner=runner or Runner(),
         now=clock or Clock(),
         pusher=pusher or Pusher(),
         disk_free=lambda _path: int(free_mb * 1024 * 1024),
     )
-    return fleet
 
 
 def heartbeat(tmp_path: Path, name: str = "mr-orange") -> dict:
@@ -176,7 +192,11 @@ def test_config_loads_the_example() -> None:
         ({"timeout_s": -1}, device_toml("a"), "timeout_s"),
         ({"min_free_mb": -5}, device_toml("a"), "min_free_mb"),
         ({}, "", "device"),
-        ({}, '[[device]]\nname = "a"\nurl = "http://192.0.2.1"\npushurl = "x"\n', "pushurl"),
+        (
+            {},
+            '[[device]]\nname = "a"\nurl = "http://192.0.2.1"\npushurl = "x"\n',
+            "pushurl",
+        ),
         ({}, '[[device]]\nname = "a"\n', "url"),
         ({"archive": None}, device_toml("a"), "archive"),
         ({}, device_toml("a", push="not a url"), "push_url"),
@@ -184,7 +204,9 @@ def test_config_loads_the_example() -> None:
         ({}, device_toml("a") + "token_file = 5\n", "token_file"),
     ],
 )
-def test_config_rejects(tmp_path: Path, top: dict, devices_toml: str, needle: str) -> None:
+def test_config_rejects(
+    tmp_path: Path, top: dict, devices_toml: str, needle: str
+) -> None:
     """F1. A typo must not quietly disable an alarm."""
     path = write_config(tmp_path, devices_toml, **top)
     with pytest.raises(sdlog_fleet.ConfigError, match=needle):
@@ -247,15 +269,29 @@ def test_exit_status_mapping(tmp_path: Path, code: int, result: str) -> None:
 # ------------------------------------------------------ F18-F20 refusal, lock
 
 
-def token_fleet(tmp_path: Path, token: Path | None, runner: Runner, pusher: Pusher | None = None, clock=None):
+def token_fleet(
+    tmp_path: Path,
+    token: Path | None,
+    runner: Runner,
+    pusher: Pusher | None = None,
+    clock=None,
+):
     """One device behind a relay, with or without a token_file."""
-    toml = device_toml("mr-green", url="http://192.0.2.20:8123/api/sdlog_relay/mr-green",
-                       push="http://kuma.example:3001/api/push/mr-green")
+    toml = device_toml(
+        "mr-green",
+        url="http://192.0.2.20:8123/api/sdlog_relay/mr-green",
+        push="http://kuma.example:3001/api/push/mr-green",
+    )
     if token is not None:
         toml = toml.rstrip("\n") + f'\ntoken_file = "{token}"\n\n'
     config = sdlog_fleet.load_config(write_config(tmp_path, toml))
-    return sdlog_fleet.Fleet(config, runner=runner, now=clock or Clock(), pusher=pusher or Pusher(),
-                             disk_free=lambda _path: 10**12)
+    return sdlog_fleet.Fleet(
+        config,
+        runner=runner,
+        now=clock or Clock(),
+        pusher=pusher or Pusher(),
+        disk_free=lambda _path: 10**12,
+    )
 
 
 def write_token(tmp_path: Path, text: str = "s3cret\n") -> Path:
@@ -293,7 +329,10 @@ def test_a_refusal_locks_the_device(tmp_path: Path) -> None:
     assert results["mr-green"].result == "error"
     beat = heartbeat(tmp_path, "mr-green")
     assert beat["verdict"] == "error"
-    assert beat["auth_locked"] == {"at": T0.isoformat(), "credential": f"{token}@{token.stat().st_mtime_ns}"}
+    assert beat["auth_locked"] == {
+        "at": T0.isoformat(),
+        "credential": f"{token}@{token.stat().st_mtime_ns}",
+    }
     assert pusher.last()["status"] == "down"
 
 
@@ -327,7 +366,9 @@ def test_a_locked_device_is_not_asked_until_the_token_changes(tmp_path: Path) ->
     assert beat["verdict"] == "ok" and "auth_locked" not in beat
 
 
-def test_a_refusal_without_a_token_file_locks_until_one_is_configured(tmp_path: Path) -> None:
+def test_a_refusal_without_a_token_file_locks_until_one_is_configured(
+    tmp_path: Path,
+) -> None:
     """F19. No token_file is a credential too ("none"): a relay URL without one
     must not cost a failed login every pass."""
     runner = Runner(default=77)
@@ -347,8 +388,13 @@ def test_end_to_end_a_wrong_token_costs_one_refusal(devices, tmp_path: Path) -> 
     fake.token = "right"
     name = fake.add(431)
     token = write_token(tmp_path, "wrong\n")
-    toml = device_toml("mr-green", url=fake.url).rstrip("\n") + f'\ntoken_file = "{token}"\n\n'
-    fleet = sdlog_fleet.Fleet(sdlog_fleet.load_config(write_config(tmp_path, toml)), pusher=Pusher())
+    toml = (
+        device_toml("mr-green", url=fake.url).rstrip("\n")
+        + f'\ntoken_file = "{token}"\n\n'
+    )
+    fleet = sdlog_fleet.Fleet(
+        sdlog_fleet.load_config(write_config(tmp_path, toml)), pusher=Pusher()
+    )
 
     first = fleet.run_once()
     second = fleet.run_once()
@@ -374,8 +420,13 @@ def test_a_hung_pass_is_killed_and_is_an_error(tmp_path: Path) -> None:
     config = sdlog_fleet.load_config(
         write_config(tmp_path, device_toml("mr-orange"), timeout_s=0.5)
     )
-    fleet = sdlog_fleet.Fleet(config, collector=hang, now=Clock(), pusher=Pusher(),
-                              disk_free=lambda _p: 1 << 40)
+    fleet = sdlog_fleet.Fleet(
+        config,
+        collector=hang,
+        now=Clock(),
+        pusher=Pusher(),
+        disk_free=lambda _p: 1 << 40,
+    )
 
     started = time.monotonic()
     results = fleet.run_once()
@@ -389,8 +440,13 @@ def test_a_missing_collector_is_an_error_not_offline(tmp_path: Path) -> None:
     """F3. ``python missing.py`` exits 2. Under the old contract that was
     'unreachable', and a broken deploy would have been silent forever."""
     config = sdlog_fleet.load_config(write_config(tmp_path, device_toml("mr-orange")))
-    fleet = sdlog_fleet.Fleet(config, collector=tmp_path / "nope.py", now=Clock(),
-                              pusher=Pusher(), disk_free=lambda _p: 1 << 40)
+    fleet = sdlog_fleet.Fleet(
+        config,
+        collector=tmp_path / "nope.py",
+        now=Clock(),
+        pusher=Pusher(),
+        disk_free=lambda _p: 1 << 40,
+    )
     assert fleet.run_once()["mr-orange"].result == "error"
 
 
@@ -456,7 +512,9 @@ def test_a_torn_chunk_is_a_warning_not_an_alarm(tmp_path: Path) -> None:
     )
     clock = Clock()
     pusher = Pusher()
-    fleet = make_fleet(tmp_path, runner=lambda argv, timeout: (0, output), clock=clock, pusher=pusher)
+    fleet = make_fleet(
+        tmp_path, runner=lambda argv, timeout: (0, output), clock=clock, pusher=pusher
+    )
 
     results = fleet.run_once()
 
@@ -491,9 +549,9 @@ def test_the_heartbeat_file_is_replaced_atomically(tmp_path: Path, monkeypatch) 
     fleet.run_once()
 
     assert (tmp_path / "state" / "mr-orange.json").read_text() == before
-    assert sorted(p.name for p in (tmp_path / "state").iterdir() if p.suffix != ".lock") == [
-        "mr-orange.json"
-    ]
+    assert sorted(
+        p.name for p in (tmp_path / "state").iterdir() if p.suffix != ".lock"
+    ) == ["mr-orange.json"]
 
 
 def test_staleness_raises_the_alarm(tmp_path: Path) -> None:
@@ -565,8 +623,14 @@ def test_a_nearly_full_disk_is_an_error_and_pulls_nothing(tmp_path: Path) -> Non
     """F7."""
     runner = Runner()
     pusher = Pusher()
-    fleet = make_fleet(tmp_path, ("mr-orange", "mr-blue"), runner=runner, pusher=pusher,
-                       free_mb=10, min_free_mb=100)
+    fleet = make_fleet(
+        tmp_path,
+        ("mr-orange", "mr-blue"),
+        runner=runner,
+        pusher=pusher,
+        free_mb=10,
+        min_free_mb=100,
+    )
 
     results = fleet.run_once()
 
@@ -622,7 +686,8 @@ def test_push_message_is_bounded_and_encoded(tmp_path: Path) -> None:
     """F10. Kuma's copy-paste URL already carries ``?status=up&msg=OK&ping=``;
     those are replaced, not duplicated, and a long collector report is cut."""
     toml = device_toml(
-        "mr-orange", push="http://kuma.example:3001/api/push/TOKEN?status=up&msg=OK&ping="
+        "mr-orange",
+        push="http://kuma.example:3001/api/push/TOKEN?status=up&msg=OK&ping=",
     )
     config = sdlog_fleet.load_config(write_config(tmp_path, toml))
 
@@ -632,8 +697,13 @@ def test_push_message_is_bounded_and_encoded(tmp_path: Path) -> None:
             return 1, "LEFT  " + "x & y = z " * 100
 
     pusher = Pusher()
-    fleet = sdlog_fleet.Fleet(config, runner=Chatty(), now=Clock(), pusher=pusher,
-                              disk_free=lambda _p: 1 << 40)
+    fleet = sdlog_fleet.Fleet(
+        config,
+        runner=Chatty(),
+        now=Clock(),
+        pusher=pusher,
+        disk_free=lambda _p: 1 << 40,
+    )
     fleet.run_once()
 
     query = parse_qs(urlparse(pusher.urls[-1]).query, keep_blank_values=True)
@@ -655,7 +725,7 @@ def test_the_default_pusher_speaks_http(tmp_path: Path) -> None:
         def log_message(self, *_args):
             pass
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             seen.append(self.path)
             ok = self.path.startswith("/api/push/good")
             body = b'{"ok": true}' if ok else b'{"ok": false}'
@@ -691,7 +761,7 @@ def test_a_held_lock_skips_the_device_quietly(tmp_path: Path) -> None:
     fleet = make_fleet(tmp_path, ("mr-orange", "mr-blue"), runner=runner, pusher=pusher)
     state = tmp_path / "state"
     state.mkdir(parents=True, exist_ok=True)
-    with open(state / "mr-orange.lock", "a") as held:
+    with Path(state / "mr-orange.lock").open("a", encoding=None) as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         results = fleet.run_once()
 
@@ -708,7 +778,7 @@ def test_the_lock_is_released_after_a_pass(tmp_path: Path) -> None:
     fleet = make_fleet(tmp_path, runner=runner)
     assert fleet.run_once()["mr-orange"].result == "error"
 
-    with open(tmp_path / "state" / "mr-orange.lock", "a") as handle:
+    with Path(tmp_path / "state" / "mr-orange.lock").open("a", encoding=None) as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # would raise if still held
 
 
@@ -793,9 +863,14 @@ def test_status_reports_alarm_and_exits_one(tmp_path: Path, capsys) -> None:
     """F14. Reads the heartbeat files only; contacts no device."""
     path = write_config(tmp_path, device_toml("mr-orange") + device_toml("mr-blue"))
     config = sdlog_fleet.load_config(path)
-    clock = Clock(datetime.now(timezone.utc))
-    fleet = sdlog_fleet.Fleet(config, runner=Runner({"mr-orange": 0, "mr-blue": 1}),
-                              now=clock, pusher=Pusher(), disk_free=lambda _p: 1 << 40)
+    clock = Clock(datetime.now(UTC))
+    fleet = sdlog_fleet.Fleet(
+        config,
+        runner=Runner({"mr-orange": 0, "mr-blue": 1}),
+        now=clock,
+        pusher=Pusher(),
+        disk_free=lambda _p: 1 << 40,
+    )
     fleet.run_once()
 
     assert sdlog_fleet.main(["status", "--config", str(path)]) == 1
@@ -816,9 +891,15 @@ def test_status_of_a_device_never_run_is_not_an_alarm(tmp_path: Path, capsys) ->
 # ----------------------------------------------- end to end, real collector
 
 
-def e2e_fleet(tmp_path: Path, fakes: list[FakeDevice], pusher: Pusher | None = None, **top):
+def e2e_fleet(
+    tmp_path: Path, fakes: list[FakeDevice], pusher: Pusher | None = None, **top
+):
     toml = "".join(
-        device_toml(fake.device, url=fake.url, push=f"http://kuma.example/api/push/{fake.device}")
+        device_toml(
+            fake.device,
+            url=fake.url,
+            push=f"http://kuma.example/api/push/{fake.device}",
+        )
         for fake in fakes
     )
     config = sdlog_fleet.load_config(write_config(tmp_path, toml, **top))
@@ -830,7 +911,9 @@ def archived(tmp_path: Path, name: str) -> list[str]:
     return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
 
 
-def test_end_to_end_two_devices_are_archived_and_confirmed(devices, tmp_path: Path) -> None:
+def test_end_to_end_two_devices_are_archived_and_confirmed(
+    devices, tmp_path: Path
+) -> None:
     """F2, end to end."""
     orange = devices("mr-orange")
     blue = devices("mr-blue")
@@ -840,7 +923,10 @@ def test_end_to_end_two_devices_are_archived_and_confirmed(devices, tmp_path: Pa
 
     results = e2e_fleet(tmp_path, [orange, blue]).run_once()
 
-    assert {name: r.result for name, r in results.items()} == {"mr-orange": "ok", "mr-blue": "ok"}
+    assert {name: r.result for name, r in results.items()} == {
+        "mr-orange": "ok",
+        "mr-blue": "ok",
+    }
     assert archived(tmp_path, "mr-orange") == ["L0000431.LOG", "L0000432.LOG"]
     assert archived(tmp_path, "mr-blue") == ["L0000431.LOG"]
     assert sorted(orange.confirmed) == ["L0000431.LOG", "L0000432.LOG"]
@@ -862,13 +948,16 @@ def test_end_to_end_an_absent_device_is_quiet(devices, tmp_path: Path) -> None:
     assert sdlog_fleet.exit_code(results) == 0
 
 
-def test_end_to_end_the_wrong_device_at_the_url_is_an_error(devices, tmp_path: Path) -> None:
+def test_end_to_end_the_wrong_device_at_the_url_is_an_error(
+    devices, tmp_path: Path
+) -> None:
     """F2/C4. A DHCP lease moved: mr-blue answers where mr-orange is configured."""
     blue = devices("mr-blue")
     blue.add(431)
     toml = device_toml("mr-orange", url=blue.url)
-    fleet = sdlog_fleet.Fleet(sdlog_fleet.load_config(write_config(tmp_path, toml)),
-                              pusher=Pusher())
+    fleet = sdlog_fleet.Fleet(
+        sdlog_fleet.load_config(write_config(tmp_path, toml)), pusher=Pusher()
+    )
 
     results = fleet.run_once()
 
@@ -878,7 +967,9 @@ def test_end_to_end_the_wrong_device_at_the_url_is_an_error(devices, tmp_path: P
     assert archived(tmp_path, "mr-blue") == []
 
 
-def test_end_to_end_a_cut_transfer_resumes_on_the_next_run(devices, tmp_path: Path) -> None:
+def test_end_to_end_a_cut_transfer_resumes_on_the_next_run(
+    devices, tmp_path: Path
+) -> None:
     """F5 — E3. WiFi gone mid-transfer: silent, partial kept; the next run
     resumes, stores the chunk once and confirms it once."""
     fake = devices("mr-orange")
@@ -918,7 +1009,9 @@ def test_end_to_end_the_archive_is_append_only(devices, tmp_path: Path) -> None:
     fleet = e2e_fleet(tmp_path, [fake])
 
     first = fleet.run_once()
-    snapshot = {p.name: (p.read_bytes(), p.stat().st_mtime) for p in directory.iterdir()}
+    snapshot = {
+        p.name: (p.read_bytes(), p.stat().st_mtime) for p in directory.iterdir()
+    }
     second = fleet.run_once()
 
     assert first["mr-orange"].result == "error"
@@ -950,8 +1043,17 @@ def test_the_fleet_runs_as_a_script(tmp_path: Path) -> None:
     """The shebang path a systemd unit uses, not just the import."""
     path = write_config(tmp_path, device_toml("mr-orange"))
     proc = subprocess.run(
-        [sys.executable, str(_SCRIPT / "sdlog_fleet.py"), "status", "--config", str(path)],
-        capture_output=True, text=True, timeout=30,
+        [
+            sys.executable,
+            str(_SCRIPT / "sdlog_fleet.py"),
+            "status",
+            "--config",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert "mr-orange" in proc.stdout

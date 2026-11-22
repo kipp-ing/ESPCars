@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001 -- Invoked with Python; retain the existing non-executable mode.
 """Load archived sd_logger chunks into a column store (docs/sdlog-decode-spec.md).
 
 ``sdlog_fleet.py`` leaves sealed, verified chunks in ``<archive>/<device>/``. This
@@ -42,19 +43,19 @@ the collector and the fleet stay stdlib-only.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import fcntl
 import hashlib
 import importlib.util
 import json
+from pathlib import Path
 import re
 import sys
 import time
 import urllib.error
-import urllib.request
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlencode
+import urllib.request
 
 try:
     import tomllib
@@ -78,24 +79,74 @@ else:
 if "sdlog_uds" in sys.modules:
     sdlog_uds = sys.modules["sdlog_uds"]
 else:
-    _spec = importlib.util.spec_from_file_location("sdlog_uds", _SDLOG_PATH.with_name("sdlog_uds.py"))
+    _spec = importlib.util.spec_from_file_location(
+        "sdlog_uds", _SDLOG_PATH.with_name("sdlog_uds.py")
+    )
     sdlog_uds = importlib.util.module_from_spec(_spec)
     sys.modules["sdlog_uds"] = sdlog_uds
     _spec.loader.exec_module(sdlog_uds)
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-_TOP_KEYS = {"archive", "sink", "clickhouse_url", "database", "lock", "batch_rows", "device"}
+_TOP_KEYS = {
+    "archive",
+    "sink",
+    "clickhouse_url",
+    "database",
+    "lock",
+    "batch_rows",
+    "device",
+}
 _DEVICE_KEYS = {"name", "vehicle", "dbc", "uds"}
 _SINKS = {"clickhouse", "fake"}
 
-FRAME_COLUMNS = ("device", "chunk", "kind", "label", "utc", "id", "flags", "dlc", "data")
-SIGNAL_COLUMNS = ("vehicle", "device", "chunk", "signal", "utc", "value", "text")
-EVENT_COLUMNS = ("vehicle", "device", "chunk", "utc", "source", "kind", "name", "value", "text", "detail")
-CHUNK_COLUMNS = (
-    "device", "chunk", "file", "seq", "sha256", "bytes", "frames", "can_frames", "matched", "signals",
-    "utc_min", "utc_max", "gaps", "catalog", "result", "detail", "decoded_at",
+FRAME_COLUMNS = (
+    "device",
+    "chunk",
+    "kind",
+    "label",
+    "utc",
+    "id",
+    "flags",
+    "dlc",
+    "data",
 )
-ROW_TABLES = ("frames", "signals", "events")  # the tables a chunk's rows live in; `chunks` is the marker
+SIGNAL_COLUMNS = ("vehicle", "device", "chunk", "signal", "utc", "value", "text")
+EVENT_COLUMNS = (
+    "vehicle",
+    "device",
+    "chunk",
+    "utc",
+    "source",
+    "kind",
+    "name",
+    "value",
+    "text",
+    "detail",
+)
+CHUNK_COLUMNS = (
+    "device",
+    "chunk",
+    "file",
+    "seq",
+    "sha256",
+    "bytes",
+    "frames",
+    "can_frames",
+    "matched",
+    "signals",
+    "utc_min",
+    "utc_max",
+    "gaps",
+    "catalog",
+    "result",
+    "detail",
+    "decoded_at",
+)
+ROW_TABLES = (
+    "frames",
+    "signals",
+    "events",
+)  # the tables a chunk's rows live in; `chunks` is the marker
 
 
 class ConfigError(Exception):
@@ -134,7 +185,8 @@ class Config:
 
 def load_config(path: Path) -> Config:
     try:
-        raw = tomllib.loads(path.read_text())
+        # Preserve the interpreter default codec, including UTF-8 mode.
+        raw = tomllib.loads(path.read_text(encoding=None))
     except (OSError, tomllib.TOMLDecodeError) as err:
         raise ConfigError(f"{path}: {err}") from None
     unknown = set(raw) - _TOP_KEYS
@@ -146,10 +198,16 @@ def load_config(path: Path) -> Config:
     if sink not in _SINKS:
         raise ConfigError(f"unknown sink {sink!r} (use {' or '.join(sorted(_SINKS))})")
     database = raw.get("database", "sdlog")
-    if not isinstance(database, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", database):
+    if not isinstance(database, str) or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]{0,63}", database
+    ):
         raise ConfigError(f"database must be a plain identifier, not {database!r}")
     batch_rows = raw.get("batch_rows", 200_000)
-    if isinstance(batch_rows, bool) or not isinstance(batch_rows, int) or batch_rows < 1:
+    if (
+        isinstance(batch_rows, bool)
+        or not isinstance(batch_rows, int)
+        or batch_rows < 1
+    ):
         raise ConfigError(f"batch_rows must be a positive integer, not {batch_rows!r}")
     devices_raw = raw.get("device", [])
     if not devices_raw:
@@ -176,13 +234,17 @@ def load_config(path: Path) -> Config:
         for label, file in sorted(dbc_raw.items()):
             dbc_path = Path(file)
             if not dbc_path.is_file():
-                raise ConfigError(f"device {name!r}: DBC for {label!r} not found: {dbc_path}")
+                raise ConfigError(
+                    f"device {name!r}: DBC for {label!r} not found: {dbc_path}"
+                )
             dbc.append((label, dbc_path))
         uds_raw = entry.get("uds", [])
         if not isinstance(uds_raw, list):
             raise ConfigError(f"device {name!r}: uds must be [[device.uds]] tables")
         try:
-            uds = tuple(sdlog_uds.parse_spec(item, f"device {name!r}") for item in uds_raw)
+            uds = tuple(
+                sdlog_uds.parse_spec(item, f"device {name!r}") for item in uds_raw
+            )
         except sdlog_uds.UdsConfigError as err:
             raise ConfigError(str(err)) from None
         devices.append(Device(name=name, vehicle=vehicle, dbc=tuple(dbc), uds=uds))
@@ -223,7 +285,9 @@ def load_uds(device: Device, decoder: Decoder | None) -> list:
     messages = decoder.message_names() if decoder is not None else set()
     for ecu in ecus:
         if ecu.source in messages:
-            raise ConfigError(f"{where}: ECU {ecu.source!r} is also a DBC message name; its signals would mix")
+            raise ConfigError(
+                f"{where}: ECU {ecu.source!r} is also a DBC message name; its signals would mix"
+            )
     return ecus
 
 
@@ -244,9 +308,13 @@ class Decoder:
                     str(path), database_format="dbc", encoding="latin-1", strict=False
                 )
             except Exception as err:  # noqa: BLE001 - cantools raises several types
-                raise ConfigError(f"device {device.name!r}: DBC for {label!r} does not load: {err}") from None
+                raise ConfigError(
+                    f"device {device.name!r}: DBC for {label!r} does not load: {err}"
+                ) from None
         # (matched, signals, failed): a failed decode is cached too, and counted per frame (D4a)
-        self._cache: dict[tuple[str, int, bool, str], tuple[bool, list[tuple[str, float]], bool]] = {}
+        self._cache: dict[
+            tuple[str, int, bool, str], tuple[bool, list[tuple[str, float]], bool]
+        ] = {}
         self.errors = 0
 
     def reset_cache(self) -> None:
@@ -255,7 +323,9 @@ class Decoder:
     def message_names(self) -> set[str]:
         return {m.name for db in self.dbs.values() for m in db.messages}
 
-    def decode(self, label: str, can_id: int, extended: bool, data_hex: str) -> tuple[bool, list[tuple[str, float]]]:
+    def decode(
+        self, label: str, can_id: int, extended: bool, data_hex: str
+    ) -> tuple[bool, list[tuple[str, float]]]:
         """(a DBC message matched, its signals). Matched counts toward coverage (D16)
         even when the decode itself fails."""
         db = self.dbs.get(label)
@@ -276,9 +346,15 @@ class Decoder:
         if matched:
             try:
                 values = message.decode(
-                    bytes.fromhex(data_hex), decode_choices=False, scaling=True, allow_truncated=True
+                    bytes.fromhex(data_hex),
+                    decode_choices=False,
+                    scaling=True,
+                    allow_truncated=True,
                 )
-                out = [(f"{message.name}.{name}", float(value)) for name, value in values.items()]
+                out = [
+                    (f"{message.name}.{name}", float(value))
+                    for name, value in values.items()
+                ]
             except Exception:  # noqa: BLE001 - one undecodable frame must not stop the chunk
                 failed = True
                 self.errors += 1
@@ -293,11 +369,18 @@ class FakeSink:
     """In-memory tables with the same behavior the spec asks of a real one."""
 
     def __init__(self, fail_on: str | None = None, unavailable: bool = False) -> None:
-        self.tables: dict[str, list[dict]] = {"frames": [], "signals": [], "events": [], "chunks": []}
+        self.tables: dict[str, list[dict]] = {
+            "frames": [],
+            "signals": [],
+            "events": [],
+            "chunks": [],
+        }
         self.fail_on = fail_on  # table name whose next insert raises (crash injection)
         self.unavailable = unavailable
         self.initialized = False
-        self.deletes: list[tuple[str, tuple[str, ...]]] = []  # (table, chunk keys): one entry per DELETE statement
+        self.deletes: list[
+            tuple[str, tuple[str, ...]]
+        ] = []  # (table, chunk keys): one entry per DELETE statement
         self.lookups = 0  # existence lookups, one per table and delete_chunks call
 
     def _check(self) -> None:
@@ -325,9 +408,15 @@ class FakeSink:
         latest: dict[str, dict] = {}
         for row in self.tables["chunks"]:
             prev = latest.get(row["file"])
-            if row["device"] == device and (prev is None or row["decoded_at"] >= prev["decoded_at"]):
+            if row["device"] == device and (
+                prev is None or row["decoded_at"] >= prev["decoded_at"]
+            ):
                 latest[row["file"]] = row
-        ok = [r for r in latest.values() if r["result"] == "ok" and r["catalog"] == catalog]
+        ok = [
+            r
+            for r in latest.values()
+            if r["result"] == "ok" and r["catalog"] == catalog
+        ]
         return sum(r["matched"] for r in ok), sum(r["can_frames"] for r in ok)
 
     def chunk_keys(self, device: str) -> dict[str, str]:
@@ -336,7 +425,9 @@ class FakeSink:
         latest: dict[str, dict] = {}
         for row in self.tables["chunks"]:
             prev = latest.get(row["file"])
-            if row["device"] == device and (prev is None or row["decoded_at"] >= prev["decoded_at"]):
+            if row["device"] == device and (
+                prev is None or row["decoded_at"] >= prev["decoded_at"]
+            ):
                 latest[row["file"]] = row
         return {file: row["chunk"] for file, row in latest.items()}
 
@@ -348,10 +439,18 @@ class FakeSink:
         found = {}
         for table in ROW_TABLES:
             self.lookups += 1
-            present = {r["chunk"] for r in self.tables[table] if r["device"] == device and r["chunk"] in keys}
+            present = {
+                r["chunk"]
+                for r in self.tables[table]
+                if r["device"] == device and r["chunk"] in keys
+            }
             if present:
                 self.deletes.append((table, tuple(sorted(present))))
-                self.tables[table] = [r for r in self.tables[table] if not (r["device"] == device and r["chunk"] in present)]
+                self.tables[table] = [
+                    r
+                    for r in self.tables[table]
+                    if not (r["device"] == device and r["chunk"] in present)
+                ]
             found[table] = len(present)
         return found
 
@@ -363,7 +462,7 @@ class FakeSink:
         if self.fail_on == table:
             self.fail_on = None
             raise SinkUnavailable(f"injected failure on {table}")
-        self.tables[table].extend(dict(zip(columns, row)) for row in rows)
+        self.tables[table].extend(dict(zip(columns, row, strict=False)) for row in rows)
 
 
 def _tsv_field(value) -> str:
@@ -378,7 +477,13 @@ def _tsv_field(value) -> str:
 
 def _array_literal(values: list[str]) -> str:
     """An Array(String) query parameter in ClickHouse's text form: ['a','b']."""
-    return "[" + ",".join("'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'" for v in values) + "]"
+    return (
+        "["
+        + ",".join(
+            "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'" for v in values
+        )
+        + "]"
+    )
 
 
 # Time columns travel as epoch ms in Python (FakeSink, tests) and as text over TSV: a bare
@@ -395,7 +500,9 @@ def _tsv_time(ms: int | None) -> str:
     if text is None:
         if len(_SECONDS) > 100_000:
             _SECONDS.clear()
-        text = _SECONDS[seconds] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(seconds))
+        text = _SECONDS[seconds] = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.gmtime(seconds)
+        )
     return f"{text}.{millis:03d}"
 
 
@@ -411,11 +518,19 @@ class ClickHouseSink:
         """A read query, for tools built on these tables (sdlog_publish.py)."""
         return self._query(sql, params=params)
 
-    def _query(self, sql: str, body: bytes | None = None, params: dict | None = None, settings: dict | None = None) -> str:
+    def _query(
+        self,
+        sql: str,
+        body: bytes | None = None,
+        params: dict | None = None,
+        settings: dict | None = None,
+    ) -> str:
         query = {"query": sql, **(settings or {})}
         for key, value in (params or {}).items():
             query[f"param_{key}"] = value
-        request = urllib.request.Request(f"{self.url}/?{urlencode(query)}", data=body if body is not None else b"")
+        request = urllib.request.Request(
+            f"{self.url}/?{urlencode(query)}", data=body if body is not None else b""
+        )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 return response.read().decode()
@@ -425,7 +540,9 @@ class ClickHouseSink:
                 raise SinkUnavailable(f"ClickHouse 503: {detail}") from None
             raise SinkError(f"ClickHouse {err.code}: {detail}") from None
         except (urllib.error.URLError, ConnectionError, TimeoutError) as err:
-            raise SinkUnavailable(f"ClickHouse unreachable at {self.url}: {err}") from None
+            raise SinkUnavailable(
+                f"ClickHouse unreachable at {self.url}: {err}"
+            ) from None
 
     def init(self) -> None:
         # Tables that exist without the chunk index (an older database) get it built once for
@@ -501,7 +618,12 @@ class ClickHouseSink:
             for start in range(0, len(present), self.KEYS_PER_STATEMENT):
                 self._query(
                     f"DELETE FROM {self.db}.{table} WHERE device = {{device:String}} AND chunk IN {{keys:Array(String)}}",
-                    params={"device": device, "keys": _array_literal(present[start : start + self.KEYS_PER_STATEMENT])},
+                    params={
+                        "device": device,
+                        "keys": _array_literal(
+                            present[start : start + self.KEYS_PER_STATEMENT]
+                        ),
+                    },
                     settings=self._DELETE_SYNC,
                 )
             found[table] = len(present)
@@ -515,9 +637,17 @@ class ClickHouseSink:
             return
         timed = [c in TIME_COLUMNS for c in columns]
         body = "".join(
-            "\t".join(_tsv_time(v) if t else _tsv_field(v) for v, t in zip(row, timed)) + "\n" for row in rows
+            "\t".join(
+                _tsv_time(v) if t else _tsv_field(v)
+                for v, t in zip(row, timed, strict=False)
+            )
+            + "\n"
+            for row in rows
         ).encode()
-        self._query(f"INSERT INTO {self.db}.{table} ({', '.join(columns)}) FORMAT TSV", body=body)
+        self._query(
+            f"INSERT INTO {self.db}.{table} ({', '.join(columns)}) FORMAT TSV",
+            body=body,
+        )
 
 
 def clickhouse_ddl(db: str) -> list[str]:
@@ -622,7 +752,12 @@ def first_utc_anchor(path: Path):
                 break
             if line.startswith("#utc,"):
                 fields = line.rstrip("\n").split(",")
-                return sdlog.ClockPoint(sdlog._parse_u64_x(fields[1]), sdlog._parse_u64_x(fields[2]), "utc", "sync")
+                return sdlog.ClockPoint(
+                    sdlog._parse_u64_x(fields[1]),
+                    sdlog._parse_u64_x(fields[2]),
+                    "utc",
+                    "sync",
+                )
             if line.startswith("#clock,"):
                 point = sdlog.parse_clock_line(line.rstrip("\n"))
                 if point.basis == "utc":
@@ -634,7 +769,9 @@ def _torn_sidecar(path: Path, sha: str) -> str | None:
     """The collector accepted this chunk as torn on the card (sdlog-fleet-spec C12):
     its `<file>.torn` sidecar, if it vouches for exactly these bytes, else None."""
     try:
-        sidecar = json.loads(path.with_name(path.name + ".torn").read_text(encoding="utf-8"))
+        sidecar = json.loads(
+            path.with_name(path.name + ".torn").read_text(encoding="utf-8")
+        )
     except (OSError, ValueError):
         return None
     if not isinstance(sidecar, dict) or sidecar.get("sha256") != sha:
@@ -658,7 +795,7 @@ def _defect_reason(report, device: Device, torn: bool = False) -> str | None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def load_chunk(
@@ -683,10 +820,22 @@ def load_chunk(
     seq = report.seq
     chunk = f"{seq if seq is not None else 'x'}-{sha[:12]}"
     marker = {
-        "device": device.name, "chunk": chunk, "file": path.name, "seq": seq, "sha256": sha,
-        "bytes": len(raw), "frames": 0, "can_frames": 0, "matched": 0, "signals": 0, "utc_min": None,
-        "utc_max": None, "gaps": len(report.gaps), "catalog": catalog,
-        "result": "ok", "detail": "",
+        "device": device.name,
+        "chunk": chunk,
+        "file": path.name,
+        "seq": seq,
+        "sha256": sha,
+        "bytes": len(raw),
+        "frames": 0,
+        "can_frames": 0,
+        "matched": 0,
+        "signals": 0,
+        "utc_min": None,
+        "utc_max": None,
+        "gaps": len(report.gaps),
+        "catalog": catalog,
+        "result": "ok",
+        "detail": "",
     }
     if cleared is None or chunk not in cleared:
         sink.delete_chunk(device.name, chunk)
@@ -709,14 +858,19 @@ def load_chunk(
                 lambda name, utc, value, text: signal_rows.append(
                     (device.vehicle, device.name, chunk, name, utc, value, text)
                 ),
-                lambda utc, *rest: event_rows.append((device.vehicle, device.name, chunk, utc, *rest)),
+                lambda utc, *rest: event_rows.append(
+                    (device.vehicle, device.name, chunk, utc, *rest)
+                ),
             )
         if decoder is not None:
             decoder.reset_cache()
             errors_before = decoder.errors
         try:
             for stream in reader:
-                if stream.kind not in sdlog.RECORD_KINDS or len(stream.fields) != sdlog.RECORD_FIELDS:
+                if (
+                    stream.kind not in sdlog.RECORD_KINDS
+                    or len(stream.fields) != sdlog.RECORD_FIELDS
+                ):
                     continue
                 _, tag, flags = sdlog.split_token(stream.fields[0])
                 label = reader.label(tag, stream.fields[0])
@@ -731,19 +885,42 @@ def load_chunk(
                 if utc is not None:
                     utc_min = utc if utc_min is None else min(utc_min, utc)
                     utc_max = utc if utc_max is None else max(utc_max, utc)
-                frame_rows.append((
-                    device.name, chunk, stream.kind, label, utc, can_id,
-                    flags or "-", len(data_hex) // 2, int(data_hex, 16) if data_hex else 0,
-                ))
+                frame_rows.append(
+                    (
+                        device.name,
+                        chunk,
+                        stream.kind,
+                        label,
+                        utc,
+                        can_id,
+                        flags or "-",
+                        len(data_hex) // 2,
+                        int(data_hex, 16) if data_hex else 0,
+                    )
+                )
                 if stream.kind == "C":
                     can_frames += 1
                     hit = False
                     if decoder is not None:
-                        hit, values = decoder.decode(label, can_id, "x" in flags, data_hex)
+                        hit, values = decoder.decode(
+                            label, can_id, "x" in flags, data_hex
+                        )
                         for name, value in values:
-                            signal_rows.append((device.vehicle, device.name, chunk, name, utc, value, ""))
+                            signal_rows.append(
+                                (
+                                    device.vehicle,
+                                    device.name,
+                                    chunk,
+                                    name,
+                                    utc,
+                                    value,
+                                    "",
+                                )
+                            )
                     if diag is not None:
-                        hit = diag.feed(label, can_id, "x" in flags, data_hex, utc) or hit
+                        hit = (
+                            diag.feed(label, can_id, "x" in flags, data_hex, utc) or hit
+                        )
                     matched += hit
                 if len(frame_rows) >= batch_rows:
                     sink.insert("frames", FRAME_COLUMNS, frame_rows)
@@ -766,7 +943,9 @@ def load_chunk(
             events += len(event_rows)
             notes = [f"torn: {torn}"] if torn is not None else []
             if decoder is not None and decoder.errors > errors_before:
-                notes.append(f"{decoder.errors - errors_before} frames failed to decode")
+                notes.append(
+                    f"{decoder.errors - errors_before} frames failed to decode"
+                )
             if diag is not None and diag.summary():
                 notes.append(diag.summary())
             marker["detail"] = "; ".join(notes)
@@ -786,10 +965,14 @@ def load_chunk(
     sink.insert("chunks", CHUNK_COLUMNS, [tuple(marker[c] for c in CHUNK_COLUMNS)])
     if cleared is not None:
         cleared.discard(chunk)
-    return ChunkResult(path.name, marker["result"], marker["detail"], frames, signals, events)
+    return ChunkResult(
+        path.name, marker["result"], marker["detail"], frames, signals, events
+    )
 
 
-def pending_files(config: Config, device: Device, state: dict[str, tuple[str, str]], catalog: str) -> list[Path]:
+def pending_files(
+    config: Config, device: Device, state: dict[str, tuple[str, str]], catalog: str
+) -> list[Path]:
     directory = config.archive / device.name
     if not directory.is_dir():
         return []
@@ -825,14 +1008,34 @@ def cmd_run(config: Config, sink) -> int:
             # D17: the files being redone lose their previous rows in one DELETE per table, not
             # one per chunk and table. Their keys come from their markers, so no file is read.
             redo = {p.name for p in todo}
-            cleared = {chunk for file, chunk in sink.chunk_keys(device.name).items() if file in redo} if todo else set()
+            cleared = (
+                {
+                    chunk
+                    for file, chunk in sink.chunk_keys(device.name).items()
+                    if file in redo
+                }
+                if todo
+                else set()
+            )
             if cleared:
                 found = sink.delete_chunks(device.name, cleared)
-                print(f"{device.name}: deleted the rows of {len(cleared)} chunk(s) to redo ("
-                      + ", ".join(f"{t} {n}" for t, n in found.items()) + ")")
+                print(
+                    f"{device.name}: deleted the rows of {len(cleared)} chunk(s) to redo ("
+                    + ", ".join(f"{t} {n}" for t, n in found.items())
+                    + ")"
+                )
             loaded = 0
             for path in todo:
-                result = load_chunk(path, device, catalog, decoder, sink, config.batch_rows, uds, cleared)
+                result = load_chunk(
+                    path,
+                    device,
+                    catalog,
+                    decoder,
+                    sink,
+                    config.batch_rows,
+                    uds,
+                    cleared,
+                )
                 if result.result == "defect":
                     defects += 1
                     print(f"{device.name}: {path.name}: defect — {result.detail}")
@@ -872,7 +1075,9 @@ def cmd_status(config: Config, sink) -> int:
         any_defect |= defect > 0
         share = device_coverage(sink, device)
         coverage = "-" if share is None else f"{100 * share:.1f} %"
-        print(f"{device.name}: {ok} ok, {defect} defect, {pending} pending, coverage {coverage}")
+        print(
+            f"{device.name}: {ok} ok, {defect} defect, {pending} pending, coverage {coverage}"
+        )
     return EX_DEFECT if any_defect else 0
 
 

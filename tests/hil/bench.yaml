@@ -10,7 +10,7 @@
 boards:
   - name: mr-green
     config: tests/hil/mr-green.yaml
-    mac: "f0:f5:bd:0e:dd:50" # replacement board, 2026-07-26 (was 20:6e:f1:0a:d5:ac)
+    mac: "f0:f5:bd:0e:dd:50"  # replacement board, 2026-07-26 (was 20:6e:f1:0a:d5:ac)
     role: "LIN master + CAN segment 1, ring owner"
   - name: mr-blue
     config: tests/hil/mr-blue.yaml

@@ -113,11 +113,7 @@ def test_name_rules_are_recorded_in_the_manifest():
     """A YAML author must be able to see why a name looks unusual."""
     _, manifest = compile_mini()
     by_group = {g["name"]: g for g in manifest["groups"]}
-    rules = {
-        f["name"]: f["name_rule"]
-        for g in manifest["groups"]
-        for f in g["fields"]
-    }
+    rules = {f["name"]: f["name_rule"] for g in manifest["groups"] for f in g["fields"]}
     assert rules["PRES_Mini_State"] == "presentation"
     assert rules["DT_Mini_Voltage_Maximum_Cell"] == "service"
     assert rules["PRES_Mini_Hex_2Byte@3.0"] == "position"
@@ -153,14 +149,24 @@ def test_a_group_that_cannot_be_made_unique_fails():
             "request_bytes": "22EEEE",
             "output_preparations": [
                 [
-                    {"qualifier": "PRES_Mini_State", "bit_position": 24,
-                     "size_in_bits": 8, "field_type": "Presentation",
-                     "pres_pool_index": 2, "info_pool_index": 0,
-                     "size_error": None},
-                    {"qualifier": "PRES_Mini_State", "bit_position": 24,
-                     "size_in_bits": 8, "field_type": "Presentation",
-                     "pres_pool_index": 2, "info_pool_index": 0,
-                     "size_error": None},
+                    {
+                        "qualifier": "PRES_Mini_State",
+                        "bit_position": 24,
+                        "size_in_bits": 8,
+                        "field_type": "Presentation",
+                        "pres_pool_index": 2,
+                        "info_pool_index": 0,
+                        "size_error": None,
+                    },
+                    {
+                        "qualifier": "PRES_Mini_State",
+                        "bit_position": 24,
+                        "size_in_bits": 8,
+                        "field_type": "Presentation",
+                        "pres_pool_index": 2,
+                        "info_pool_index": 0,
+                        "size_error": None,
+                    },
                 ]
             ],
         }

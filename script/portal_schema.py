@@ -25,10 +25,10 @@ point at arbitrary JSON, including a board's raw HTTP response.
 from __future__ import annotations
 
 import argparse
-import json
-import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+import json
+import re
 
 SCHEMA_VERSION = 2
 
@@ -142,7 +142,15 @@ SERIES_KEYS: tuple[str, ...] = (
     "class",
     "pack_index_base",
 )
-ACTION_KEYS: tuple[str, ...] = ("key", "label", "method", "path", "enabled", "why", "body")
+ACTION_KEYS: tuple[str, ...] = (
+    "key",
+    "label",
+    "method",
+    "path",
+    "enabled",
+    "why",
+    "body",
+)
 WHY_KEYS: tuple[str, ...] = ("code", "detail", "since_ms", "evidence")
 PROVENANCE_KEYS: tuple[str, ...] = (
     "origin",
@@ -231,57 +239,77 @@ def _validate_why_block(why: dict, path: str, violations: list[Violation]) -> No
     """Structural check for a non-null why block: node/value/served_by/peer share this
     shape (schema §3). Actions carry a why too, but only the null-iff-enabled rule is
     specified for it, so its interior is not checked here."""
-    for key in WHY_KEYS:
-        if key not in why:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in WHY_KEYS
+        if key not in why
+    )
     _check_key_order(why, WHY_KEYS, path, "why", violations)
 
     if "code" in why:
         code = why["code"]
         if not _is_str(code) or not _WHY_CODE_RE.match(code):
             violations.append(
-                Violation(f"{path}.code", "why_code_not_machine_readable", f"code {code!r}")
+                Violation(
+                    f"{path}.code", "why_code_not_machine_readable", f"code {code!r}"
+                )
             )
     if "detail" in why and not _is_str_or_null(why["detail"]):
-        violations.append(Violation(f"{path}.detail", "wrong_type", "detail must be str or null"))
+        violations.append(
+            Violation(f"{path}.detail", "wrong_type", "detail must be str or null")
+        )
     if "since_ms" in why and not _is_nonneg_int_or_null(why["since_ms"]):
         violations.append(
-            Violation(f"{path}.since_ms", "wrong_type", "since_ms must be int>=0 or null")
+            Violation(
+                f"{path}.since_ms", "wrong_type", "since_ms must be int>=0 or null"
+            )
         )
     if "evidence" in why and not isinstance(why["evidence"], dict):
-        violations.append(Violation(f"{path}.evidence", "wrong_type", "evidence must be an object"))
+        violations.append(
+            Violation(f"{path}.evidence", "wrong_type", "evidence must be an object")
+        )
 
     if "code" in why and "evidence" in why and _is_str(why["code"]):
         discriminators = _EVIDENCE_DISCRIMINATORS.get(why["code"])
         evidence = why["evidence"]
-        if discriminators is not None and isinstance(evidence, dict):
-            if not any(key in evidence for key in discriminators):
-                violations.append(
-                    Violation(
-                        f"{path}.evidence",
-                        "evidence_without_discriminator",
-                        f"why.code {why['code']!r} needs evidence carrying one of {discriminators}",
-                    )
+        if (
+            discriminators is not None
+            and isinstance(evidence, dict)
+            and not any(key in evidence for key in discriminators)
+        ):
+            violations.append(
+                Violation(
+                    f"{path}.evidence",
+                    "evidence_without_discriminator",
+                    f"why.code {why['code']!r} needs evidence carrying one of {discriminators}",
                 )
+            )
 
 
-def _check_why(state_is_ok: bool, why: object, path: str, violations: list[Violation]) -> None:
+def _check_why(
+    state_is_ok: bool, why: object, path: str, violations: list[Violation]
+) -> None:
     """The headline invariant: why is null iff state == 'ok' (schema §3)."""
     if state_is_ok:
         if why is not None:
-            violations.append(Violation(path, "why_state_mismatch", "why must be null when ok"))
+            violations.append(
+                Violation(path, "why_state_mismatch", "why must be null when ok")
+            )
             if isinstance(why, dict):
                 _validate_why_block(why, path, violations)
+    elif why is None:
+        violations.append(Violation(path, "why_state_mismatch", "why must not be null"))
+    elif not isinstance(why, dict):
+        violations.append(
+            Violation(path, "wrong_type", "why must be an object or null")
+        )
     else:
-        if why is None:
-            violations.append(Violation(path, "why_state_mismatch", "why must not be null"))
-        elif not isinstance(why, dict):
-            violations.append(Violation(path, "wrong_type", "why must be an object or null"))
-        else:
-            _validate_why_block(why, path, violations)
+        _validate_why_block(why, path, violations)
 
 
-def _check_frames_evidence(state: str, why: object, path: str, violations: list[Violation]) -> None:
+def _check_frames_evidence(
+    state: str, why: object, path: str, violations: list[Violation]
+) -> None:
     """silent/absent share age_ms: null and are told apart only by rx_frames (schema §3)."""
     if not isinstance(why, dict):
         return
@@ -297,7 +325,9 @@ def _check_frames_evidence(state: str, why: object, path: str, violations: list[
         violations.append(Violation(path, "absent_with_frames", f"rx_frames={rx!r}"))
 
 
-def _check_announced_evidence(state: str, why: object, path: str, violations: list[Violation]) -> None:
+def _check_announced_evidence(
+    state: str, why: object, path: str, violations: list[Violation]
+) -> None:
     """A node's own evidence must not refute the verdict it is attached to. Modelled on
     ``_check_frames_evidence`` above, the sibling invariant for the other half of the
     absent/silent discrimination (schema §3): ``announced`` is the other counter that
@@ -355,32 +385,42 @@ def _validate_provenance(
             )
         return
     if not isinstance(provenance, dict):
-        violations.append(Violation(path, "wrong_type", "provenance must be an object or null"))
+        violations.append(
+            Violation(path, "wrong_type", "provenance must be an object or null")
+        )
         return
 
-    for key in PROVENANCE_KEYS:
-        if key not in provenance:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in PROVENANCE_KEYS
+        if key not in provenance
+    )
     _check_key_order(provenance, PROVENANCE_KEYS, path, "provenance", violations)
 
     if "origin" in provenance and provenance["origin"] not in ORIGINS:
         violations.append(
-            Violation(f"{path}.origin", "wrong_type", f"unknown origin {provenance['origin']!r}")
+            Violation(
+                f"{path}.origin",
+                "wrong_type",
+                f"unknown origin {provenance['origin']!r}",
+            )
         )
     if "trust" in provenance and provenance["trust"] not in TRUSTS:
         violations.append(
-            Violation(f"{path}.trust", "wrong_type", f"unknown trust {provenance['trust']!r}")
+            Violation(
+                f"{path}.trust", "wrong_type", f"unknown trust {provenance['trust']!r}"
+            )
         )
-    for key in ("board", "node_id"):
-        if key in provenance and not _is_str_or_null(provenance[key]):
-            violations.append(
-                Violation(f"{path}.{key}", "wrong_type", f"{key} must be str or null")
-            )
-    for key in ("age_ms", "budget_ms", "seq"):
-        if key in provenance and not _is_nonneg_int_or_null(provenance[key]):
-            violations.append(
-                Violation(f"{path}.{key}", "wrong_type", f"{key} must be int>=0 or null")
-            )
+    violations.extend(
+        Violation(f"{path}.{key}", "wrong_type", f"{key} must be str or null")
+        for key in ("board", "node_id")
+        if key in provenance and (not _is_str_or_null(provenance[key]))
+    )
+    violations.extend(
+        Violation(f"{path}.{key}", "wrong_type", f"{key} must be int>=0 or null")
+        for key in ("age_ms", "budget_ms", "seq")
+        if key in provenance and (not _is_nonneg_int_or_null(provenance[key]))
+    )
 
     if node_state == "down" and provenance.get("trust") != "confirmed":
         violations.append(
@@ -398,11 +438,17 @@ def _validate_provenance(
 
     if node_state == "ok" and age_known and budget_known and age_ms > budget_ms:
         violations.append(
-            Violation(path, "ok_past_budget", f"age_ms {age_ms} > budget_ms {budget_ms}, state ok")
+            Violation(
+                path,
+                "ok_past_budget",
+                f"age_ms {age_ms} > budget_ms {budget_ms}, state ok",
+            )
         )
     if node_state == "stale":
         if age_ms is None:
-            violations.append(Violation(path, "stale_without_age", "stale requires a known age_ms"))
+            violations.append(
+                Violation(path, "stale_without_age", "stale requires a known age_ms")
+            )
         elif age_known and budget_known and not age_ms > budget_ms:
             violations.append(
                 Violation(
@@ -493,16 +539,15 @@ def _validate_provenance_placement(
                     "is not null",
                 )
             )
-    else:
-        if provenance is None:
-            violations.append(
-                Violation(
-                    path,
-                    "provenance_null_unmounted",
-                    f"{node_id!r} is neither inside nor above an owned/mounted subtree, but "
-                    "provenance is null",
-                )
+    elif provenance is None:
+        violations.append(
+            Violation(
+                path,
+                "provenance_null_unmounted",
+                f"{node_id!r} is neither inside nor above an owned/mounted subtree, but "
+                "provenance is null",
             )
+        )
 
     if isinstance(provenance, dict) and provenance.get("origin") == "local":
         prov_board = provenance.get("board")
@@ -519,7 +564,9 @@ def _validate_provenance_placement(
     return is_inside or any_descendant_inside
 
 
-def _validate_mount_ages(tree: object, peers: object, violations: list[Violation]) -> None:
+def _validate_mount_ages(
+    tree: object, peers: object, violations: list[Violation]
+) -> None:
     """Spec section 5.3: a mounted node cannot
     read fresher than the fetch that delivered it, because that age already includes the
     fetch -- the peer's own age plus the time since it arrived -- and one round trip
@@ -592,32 +639,48 @@ def _validate_value(value: object, path: str, violations: list[Violation]) -> No
         violations.append(Violation(path, "wrong_type", "value is not an object"))
         return
 
-    for key in VALUE_KEYS:
-        if key not in value:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in VALUE_KEYS
+        if key not in value
+    )
     _check_key_order(value, VALUE_KEYS + OPTIONAL_VALUE_KEYS, path, "value", violations)
 
     if "level" in value:
         level = value["level"]
         if level is not None and level not in LEVELS:
-            violations.append(Violation(f"{path}.level", "unknown_level", f"unknown level {level!r}"))
+            violations.append(
+                Violation(f"{path}.level", "unknown_level", f"unknown level {level!r}")
+            )
         elif level is not None and value.get("value", 0) is None:
             violations.append(
-                Violation(f"{path}.level", "level_without_reading", f"level {level!r} on a value without a reading")
+                Violation(
+                    f"{path}.level",
+                    "level_without_reading",
+                    f"level {level!r} on a value without a reading",
+                )
             )
 
     if "key" in value and (not _is_str(value["key"]) or value["key"] == ""):
-        violations.append(Violation(f"{path}.key", "wrong_type", "key must be a non-empty string"))
+        violations.append(
+            Violation(f"{path}.key", "wrong_type", "key must be a non-empty string")
+        )
 
     if "label" in value:
         label = value["label"]
         if not _is_str(label):
-            violations.append(Violation(f"{path}.label", "wrong_type", "label must be a string"))
+            violations.append(
+                Violation(f"{path}.label", "wrong_type", "label must be a string")
+            )
         elif label == "":
-            violations.append(Violation(f"{path}.label", "empty_label", "label must not be empty"))
+            violations.append(
+                Violation(f"{path}.label", "empty_label", "label must not be empty")
+            )
 
     if "unit" in value and not _is_str_or_null(value["unit"]):
-        violations.append(Violation(f"{path}.unit", "wrong_type", "unit must be str or null"))
+        violations.append(
+            Violation(f"{path}.unit", "wrong_type", "unit must be str or null")
+        )
 
     classification = value.get("classification")
     if "classification" in value and classification not in CLASSIFICATIONS:
@@ -633,19 +696,27 @@ def _validate_value(value: object, path: str, violations: list[Violation]) -> No
         is_sna = classification == "sna"
         if (value["value"] is None) != is_sna:
             violations.append(
-                Violation(path, "sna_value_mismatch", "value is null iff classification is sna")
+                Violation(
+                    path,
+                    "sna_value_mismatch",
+                    "value is null iff classification is sna",
+                )
             )
 
     if "raw_hex" in value and value["raw_hex"] is not None:
         raw_hex = value["raw_hex"]
         if not _is_str(raw_hex) or raw_hex == "" or not set(raw_hex) <= _HEX_CHARS:
             violations.append(
-                Violation(f"{path}.raw_hex", "raw_hex_not_canonical", f"raw_hex {raw_hex!r}")
+                Violation(
+                    f"{path}.raw_hex", "raw_hex_not_canonical", f"raw_hex {raw_hex!r}"
+                )
             )
 
     state = value.get("state")
     if "state" in value and state not in STATES:
-        violations.append(Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}"))
+        violations.append(
+            Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}")
+        )
 
     if "why" in value:
         _check_why(state == "ok", value["why"], f"{path}.why", violations)
@@ -655,21 +726,27 @@ def _validate_series(series: object, path: str, violations: list[Violation]) -> 
     if series is None:
         return
     if not isinstance(series, dict):
-        violations.append(Violation(path, "wrong_type", "series must be an object or null"))
+        violations.append(
+            Violation(path, "wrong_type", "series must be an object or null")
+        )
         return
 
-    for key in SERIES_KEYS:
-        if key not in series:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in SERIES_KEYS
+        if key not in series
+    )
     _check_key_order(series, SERIES_KEYS, path, "series", violations)
 
-    for key in ("key", "label"):
-        if key in series and (not _is_str(series[key]) or series[key] == ""):
-            violations.append(
-                Violation(f"{path}.{key}", "wrong_type", f"{key} must be a non-empty string")
-            )
+    violations.extend(
+        Violation(f"{path}.{key}", "wrong_type", f"{key} must be a non-empty string")
+        for key in ("key", "label")
+        if key in series and (not _is_str(series[key]) or series[key] == "")
+    )
     if "unit" in series and not _is_str_or_null(series["unit"]):
-        violations.append(Violation(f"{path}.unit", "wrong_type", "unit must be str or null"))
+        violations.append(
+            Violation(f"{path}.unit", "wrong_type", "unit must be str or null")
+        )
     if "index_base" in series and not _is_int(series["index_base"]):
         violations.append(
             Violation(f"{path}.index_base", "wrong_type", "index_base must be an int")
@@ -680,7 +757,11 @@ def _validate_series(series: object, path: str, violations: list[Violation]) -> 
         if index_frame is not None:
             if not _is_str(index_frame):
                 violations.append(
-                    Violation(f"{path}.index_frame", "wrong_type", "index_frame must be str or null")
+                    Violation(
+                        f"{path}.index_frame",
+                        "wrong_type",
+                        "index_frame must be str or null",
+                    )
                 )
             elif not _INDEX_FRAME_RE.match(index_frame):
                 # No membership check: the vocabulary is open (spec section 5.3) --
@@ -697,19 +778,27 @@ def _validate_series(series: object, path: str, violations: list[Violation]) -> 
         pack_index_base = series["pack_index_base"]
         if pack_index_base is not None and not _is_int(pack_index_base):
             violations.append(
-                Violation(f"{path}.pack_index_base", "wrong_type", "pack_index_base must be an int or null")
+                Violation(
+                    f"{path}.pack_index_base",
+                    "wrong_type",
+                    "pack_index_base must be an int or null",
+                )
             )
 
     values = series.get("values")
     values_ok = isinstance(values, list)
     if "values" in series and not values_ok:
-        violations.append(Violation(f"{path}.values", "wrong_type", "values must be a list"))
+        violations.append(
+            Violation(f"{path}.values", "wrong_type", "values must be a list")
+        )
 
     if "index" in series and series["index"] is not None:
         index = series["index"]
         if not isinstance(index, list) or not all(_is_int(x) for x in index):
             violations.append(
-                Violation(f"{path}.index", "wrong_type", "index must be null or a list of int")
+                Violation(
+                    f"{path}.index", "wrong_type", "index must be null or a list of int"
+                )
             )
         else:
             if values_ok and len(index) != len(values):
@@ -734,7 +823,11 @@ def _validate_series(series: object, path: str, violations: list[Violation]) -> 
         elif cls is None:
             if values_ok and any(v is None for v in values):
                 violations.append(
-                    Violation(path, "class_omitted_with_holes", "class omitted but a value is null")
+                    Violation(
+                        path,
+                        "class_omitted_with_holes",
+                        "class omitted but a value is null",
+                    )
                 )
         elif values_ok:
             if len(cls) != len(values):
@@ -748,7 +841,9 @@ def _validate_series(series: object, path: str, violations: list[Violation]) -> 
             bad_chars = sorted(set(cls) - set(CLASS_CHARS))
             if bad_chars:
                 violations.append(
-                    Violation(path, "unknown_class_char", f"unknown class chars {bad_chars}")
+                    Violation(
+                        path, "unknown_class_char", f"unknown class chars {bad_chars}"
+                    )
                 )
             if len(cls) == len(values):
                 for i, (char, elem) in enumerate(zip(cls, values, strict=True)):
@@ -790,7 +885,14 @@ ACTION_BODY_BY_CONTROL: dict[str, object] = {
 ACTION_RESULT_KEYS: tuple[str, ...] = ("state", "why", "age_ms", "value")
 ACTION_RESULT_STATES = _Vocab({"running", "accepted", "refused"})
 ACTION_REFUSED_CODES = _Vocab(
-    {"invalid_body", "wrong_type", "out_of_range", "unknown_option", "disabled", "body_too_large"}
+    {
+        "invalid_body",
+        "wrong_type",
+        "out_of_range",
+        "unknown_option",
+        "disabled",
+        "body_too_large",
+    }
 )
 ACTION_PATH_PREFIX = "/api/v1/actions/"
 
@@ -809,52 +911,98 @@ def _value_matches_control(control: str, value: object) -> bool:
     return False
 
 
-def _validate_action_result(result: object, control: object, path: str, violations: list[Violation]) -> None:
+def _validate_action_result(
+    result: object, control: object, path: str, violations: list[Violation]
+) -> None:
     """Spec section 5.5: result = {state, why, age_ms, value}; why is always an object."""
     if result is None:
         return
     if not isinstance(result, dict):
-        violations.append(Violation(path, "wrong_type", "result must be an object or null"))
+        violations.append(
+            Violation(path, "wrong_type", "result must be an object or null")
+        )
         return
-    for key in ACTION_RESULT_KEYS:
-        if key not in result:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in ACTION_RESULT_KEYS
+        if key not in result
+    )
     _check_key_order(result, ACTION_RESULT_KEYS, path, "result", violations)
 
     state = result.get("state")
     if "state" in result and state not in ACTION_RESULT_STATES:
-        violations.append(Violation(f"{path}.state", "unknown_result_state", f"result state {state!r}"))
+        violations.append(
+            Violation(
+                f"{path}.state", "unknown_result_state", f"result state {state!r}"
+            )
+        )
 
     if "why" in result:
         why = result["why"]
         if not isinstance(why, dict):
             violations.append(
-                Violation(f"{path}.why", "result_why_not_object", "result.why must always be an object")
+                Violation(
+                    f"{path}.why",
+                    "result_why_not_object",
+                    "result.why must always be an object",
+                )
             )
         else:
             _validate_why_block(why, f"{path}.why", violations)
             code = why.get("code")
             if state == "running" and code != "queued":
-                violations.append(Violation(f"{path}.why", "result_why_mismatch", f"running needs queued, got {code!r}"))
+                violations.append(
+                    Violation(
+                        f"{path}.why",
+                        "result_why_mismatch",
+                        f"running needs queued, got {code!r}",
+                    )
+                )
             elif state == "accepted" and code != "applied":
-                violations.append(Violation(f"{path}.why", "result_why_mismatch", f"accepted needs applied, got {code!r}"))
+                violations.append(
+                    Violation(
+                        f"{path}.why",
+                        "result_why_mismatch",
+                        f"accepted needs applied, got {code!r}",
+                    )
+                )
             elif state == "refused" and code not in ACTION_REFUSED_CODES:
                 violations.append(
-                    Violation(f"{path}.why", "result_why_mismatch", f"refused needs one of the refusal codes, got {code!r}")
+                    Violation(
+                        f"{path}.why",
+                        "result_why_mismatch",
+                        f"refused needs one of the refusal codes, got {code!r}",
+                    )
                 )
 
     if "age_ms" in result and not (_is_int(result["age_ms"]) and result["age_ms"] >= 0):
-        violations.append(Violation(f"{path}.age_ms", "wrong_type", "age_ms must be int>=0"))
+        violations.append(
+            Violation(f"{path}.age_ms", "wrong_type", "age_ms must be int>=0")
+        )
 
     if "value" in result:
         value = result["value"]
-        if value is not None and isinstance(control, str) and control in ACTION_CONTROLS:
+        if (
+            value is not None
+            and isinstance(control, str)
+            and control in ACTION_CONTROLS
+        ):
             if not _value_matches_control(control, value):
                 violations.append(
-                    Violation(f"{path}.value", "result_value_type", f"{value!r} does not fit control {control!r}")
+                    Violation(
+                        f"{path}.value",
+                        "result_value_type",
+                        f"{value!r} does not fit control {control!r}",
+                    )
                 )
         elif value is not None and not isinstance(value, (bool, int, float, str)):
-            violations.append(Violation(f"{path}.value", "wrong_type", "result.value must be a scalar or null"))
+            violations.append(
+                Violation(
+                    f"{path}.value",
+                    "wrong_type",
+                    "result.value must be a scalar or null",
+                )
+            )
 
 
 def _validate_action_extension(
@@ -863,55 +1011,113 @@ def _validate_action_extension(
     """Spec section 5.4: the extension keys, once ``control`` is present."""
     control = action["control"]
     if not _is_str(control) or control not in ACTION_CONTROLS:
-        violations.append(Violation(f"{path}.control", "unknown_control", f"control {control!r}"))
+        violations.append(
+            Violation(f"{path}.control", "unknown_control", f"control {control!r}")
+        )
         return
 
-    for key in ACTION_EXT_KEYS:
-        if key not in action:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in ACTION_EXT_KEYS
+        if key not in action
+    )
 
     _check_key_order(action, ACTION_KEYS + ACTION_EXT_KEYS, path, "action", violations)
 
     if action.get("method") != "POST":
-        violations.append(Violation(f"{path}.method", "action_method_not_post", f"method {action.get('method')!r}"))
+        violations.append(
+            Violation(
+                f"{path}.method",
+                "action_method_not_post",
+                f"method {action.get('method')!r}",
+            )
+        )
 
     if "body" in action and action["body"] != ACTION_BODY_BY_CONTROL[control]:
         violations.append(
-            Violation(f"{path}.body", "action_body_mismatch", f"body {action['body']!r} for control {control!r}")
+            Violation(
+                f"{path}.body",
+                "action_body_mismatch",
+                f"body {action['body']!r} for control {control!r}",
+            )
         )
 
     value = action.get("value")
     options = action.get("options")
     if control in ("switch", "button") and enabled is False:
         violations.append(
-            Violation(f"{path}.enabled", "action_always_enabled", f"{control} actions are always enabled")
+            Violation(
+                f"{path}.enabled",
+                "action_always_enabled",
+                f"{control} actions are always enabled",
+            )
         )
 
     if control in ("select", "number") and "enabled" in action and _is_bool(enabled):
         has_state = value is not None
         if enabled and not has_state:
-            violations.append(Violation(path, "action_value_mismatch", "enabled action without a state"))
-        if not enabled and has_state:
-            violations.append(Violation(path, "action_value_mismatch", "disabled action still carries a value"))
-        why = action.get("why")
-        if not enabled and isinstance(why, dict) and why.get("code") != "entity_unavailable":
             violations.append(
-                Violation(f"{path}.why", "action_why_code", f"disabled {control} needs entity_unavailable")
+                Violation(
+                    path, "action_value_mismatch", "enabled action without a state"
+                )
+            )
+        if not enabled and has_state:
+            violations.append(
+                Violation(
+                    path,
+                    "action_value_mismatch",
+                    "disabled action still carries a value",
+                )
+            )
+        why = action.get("why")
+        if (
+            not enabled
+            and isinstance(why, dict)
+            and why.get("code") != "entity_unavailable"
+        ):
+            violations.append(
+                Violation(
+                    f"{path}.why",
+                    "action_why_code",
+                    f"disabled {control} needs entity_unavailable",
+                )
             )
 
-    if "value" in action and value is not None and not _value_matches_control(control, value):
-        violations.append(Violation(f"{path}.value", "action_value_type", f"{value!r} does not fit control {control!r}"))
+    if (
+        "value" in action
+        and value is not None
+        and not _value_matches_control(control, value)
+    ):
+        violations.append(
+            Violation(
+                f"{path}.value",
+                "action_value_type",
+                f"{value!r} does not fit control {control!r}",
+            )
+        )
     if control == "button" and value is not None:
-        violations.append(Violation(f"{path}.value", "action_value_type", "button carries no value"))
+        violations.append(
+            Violation(f"{path}.value", "action_value_type", "button carries no value")
+        )
 
     if "options" in action:
         if control == "select":
             if not _is_list_of_str(options) or len(options) == 0:
                 violations.append(
-                    Violation(f"{path}.options", "wrong_type", "select options must be a non-empty list of strings")
+                    Violation(
+                        f"{path}.options",
+                        "wrong_type",
+                        "select options must be a non-empty list of strings",
+                    )
                 )
         elif options is not None:
-            violations.append(Violation(f"{path}.options", "action_field_not_applicable", "options only on select"))
+            violations.append(
+                Violation(
+                    f"{path}.options",
+                    "action_field_not_applicable",
+                    "options only on select",
+                )
+            )
 
     for key in ("min", "max", "step"):
         if key not in action:
@@ -919,22 +1125,48 @@ def _validate_action_extension(
         v = action[key]
         if control == "number":
             if not _is_number(v):
-                violations.append(Violation(f"{path}.{key}", "wrong_type", f"number {key} must be a number, never null"))
+                violations.append(
+                    Violation(
+                        f"{path}.{key}",
+                        "wrong_type",
+                        f"number {key} must be a number, never null",
+                    )
+                )
         elif v is not None:
-            violations.append(Violation(f"{path}.{key}", "wrong_type", f"{key} is null unless control is number"))
-    if control == "number" and all(_is_number(action.get(k)) for k in ("min", "max", "step")):
+            violations.append(
+                Violation(
+                    f"{path}.{key}",
+                    "wrong_type",
+                    f"{key} is null unless control is number",
+                )
+            )
+    if control == "number" and all(
+        _is_number(action.get(k)) for k in ("min", "max", "step")
+    ):
         if action["min"] > action["max"]:
-            violations.append(Violation(f"{path}.min", "action_range_inverted", "min > max"))
+            violations.append(
+                Violation(f"{path}.min", "action_range_inverted", "min > max")
+            )
         if action["step"] <= 0:
-            violations.append(Violation(f"{path}.step", "action_step_not_positive", "step must be > 0"))
+            violations.append(
+                Violation(
+                    f"{path}.step", "action_step_not_positive", "step must be > 0"
+                )
+            )
 
     if "unit" in action:
         unit = action["unit"]
         if control == "number":
             if not _is_str_or_null(unit):
-                violations.append(Violation(f"{path}.unit", "wrong_type", "unit must be str or null"))
+                violations.append(
+                    Violation(f"{path}.unit", "wrong_type", "unit must be str or null")
+                )
         elif unit is not None:
-            violations.append(Violation(f"{path}.unit", "action_field_not_applicable", "unit only on number"))
+            violations.append(
+                Violation(
+                    f"{path}.unit", "action_field_not_applicable", "unit only on number"
+                )
+            )
 
     if "result" in action:
         _validate_action_result(action["result"], control, f"{path}.result", violations)
@@ -947,53 +1179,75 @@ def _validate_action(
         violations.append(Violation(path, "wrong_type", "action is not an object"))
         return
 
-    for key in ACTION_KEYS:
-        if key not in action:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in ACTION_KEYS
+        if key not in action
+    )
 
-    for key in ("key", "label"):
-        if key in action and (not _is_str(action[key]) or action[key] == ""):
-            violations.append(
-                Violation(f"{path}.{key}", "wrong_type", f"{key} must be a non-empty string")
-            )
+    violations.extend(
+        Violation(f"{path}.{key}", "wrong_type", f"{key} must be a non-empty string")
+        for key in ("key", "label")
+        if key in action and (not _is_str(action[key]) or action[key] == "")
+    )
 
     if "method" in action and action["method"] not in _METHODS:
         violations.append(
-            Violation(f"{path}.method", "unknown_method", f"unknown method {action['method']!r}")
+            Violation(
+                f"{path}.method",
+                "unknown_method",
+                f"unknown method {action['method']!r}",
+            )
         )
 
     if "path" in action:
         action_path = action["path"]
         if not _is_str(action_path) or not action_path.startswith("/"):
             violations.append(
-                Violation(f"{path}.path", "bad_action_path", f"{action_path!r} lacks a leading /")
+                Violation(
+                    f"{path}.path",
+                    "bad_action_path",
+                    f"{action_path!r} lacks a leading /",
+                )
             )
         elif "control" in action and _is_str(node_id) and _is_str(action.get("key")):
             want = f"{ACTION_PATH_PREFIX}{node_id}/{action['key']}"
             if action_path != want:
                 violations.append(
-                    Violation(f"{path}.path", "bad_action_path", f"{action_path!r} != {want!r}")
+                    Violation(
+                        f"{path}.path",
+                        "bad_action_path",
+                        f"{action_path!r} != {want!r}",
+                    )
                 )
 
     enabled = action.get("enabled")
     if "enabled" in action and not _is_bool(enabled):
-        violations.append(Violation(f"{path}.enabled", "wrong_type", "enabled must be a bool"))
+        violations.append(
+            Violation(f"{path}.enabled", "wrong_type", "enabled must be a bool")
+        )
 
     if "why" in action:
         why = action["why"]
         is_enabled = enabled is True
         if is_enabled and why is not None:
-            violations.append(Violation(f"{path}.why", "action_why_mismatch", "why must be null"))
+            violations.append(
+                Violation(f"{path}.why", "action_why_mismatch", "why must be null")
+            )
         elif not is_enabled and why is None:
             violations.append(
-                Violation(f"{path}.why", "action_why_mismatch", "disabled action needs a why")
+                Violation(
+                    f"{path}.why", "action_why_mismatch", "disabled action needs a why"
+                )
             )
         # A why is a why wherever it appears: a disabled action carries a machine-readable
         # code, not prose.
         if isinstance(why, dict):
             _validate_why_block(why, f"{path}.why", violations)
         elif why is not None:
-            violations.append(Violation(f"{path}.why", "wrong_type", "why must be an object"))
+            violations.append(
+                Violation(f"{path}.why", "wrong_type", "why must be an object")
+            )
 
     if "control" in action:
         _validate_action_extension(action, enabled, path, violations)
@@ -1001,7 +1255,11 @@ def _validate_action(
         stray = [k for k in ACTION_EXT_KEYS if k in action]
         if stray:
             violations.append(
-                Violation(path, "action_extension_without_control", f"{stray} present without 'control'")
+                Violation(
+                    path,
+                    "action_extension_without_control",
+                    f"{stray} present without 'control'",
+                )
             )
 
 
@@ -1012,58 +1270,90 @@ def _validate_links(links: object, violations: list[Violation]) -> None:
     """Spec section 5.1: ``links`` is a list of {rel, label, href}, all non-empty strings, href
     starting with '/'. Optional (older producers)."""
     if not isinstance(links, list):
-        violations.append(Violation("links", "links_wrong_type", "links must be a list"))
+        violations.append(
+            Violation("links", "links_wrong_type", "links must be a list")
+        )
         return
     for i, link in enumerate(links):
         path = f"links[{i}]"
         if not isinstance(link, dict):
-            violations.append(Violation(path, "links_wrong_type", "link must be an object"))
+            violations.append(
+                Violation(path, "links_wrong_type", "link must be an object")
+            )
             continue
         for key in LINK_KEYS:
             if key not in link:
-                violations.append(Violation(path, "link_missing_key", f"missing {key!r}"))
+                violations.append(
+                    Violation(path, "link_missing_key", f"missing {key!r}")
+                )
             elif not _is_str(link[key]) or link[key] == "":
-                violations.append(Violation(f"{path}.{key}", "link_empty_field", f"{key} must be a non-empty string"))
-        for key in link:
-            if key not in LINK_KEYS:
-                violations.append(Violation(path, "unknown_key", f"unexpected link key {key!r}"))
+                violations.append(
+                    Violation(
+                        f"{path}.{key}",
+                        "link_empty_field",
+                        f"{key} must be a non-empty string",
+                    )
+                )
+        violations.extend(
+            Violation(path, "unknown_key", f"unexpected link key {key!r}")
+            for key in link
+            if key not in LINK_KEYS
+        )
         href = link.get("href")
         if _is_str(href) and href != "" and not href.startswith("/"):
-            violations.append(Violation(f"{path}.href", "link_href_not_relative", f"href {href!r} must start with /"))
+            violations.append(
+                Violation(
+                    f"{path}.href",
+                    "link_href_not_relative",
+                    f"href {href!r} must start with /",
+                )
+            )
 
 
 def _check_key_order(
-    obj: dict, expected: tuple[str, ...], path: str, label: str, violations: list[Violation]
+    obj: dict,
+    expected: tuple[str, ...],
+    path: str,
+    label: str,
+    violations: list[Violation],
 ) -> None:
     """Spec section 5.6: key sets are closed (a key outside required + optional is
     ``unknown_key``); the ORDER of keys is not checked."""
-    for key in obj:
-        if key not in expected:
-            violations.append(Violation(path, "unknown_key", f"unexpected {label} key {key!r}"))
+    violations.extend(
+        Violation(path, "unknown_key", f"unexpected {label} key {key!r}")
+        for key in obj
+        if key not in expected
+    )
 
 
 # --- served_by / peers ------------------------------------------------------------
 
 
-def _validate_served_by(served_by: object, path: str, violations: list[Violation]) -> list[str]:
+def _validate_served_by(
+    served_by: object, path: str, violations: list[Violation]
+) -> list[str]:
     if not isinstance(served_by, dict):
         violations.append(Violation(path, "wrong_type", "served_by must be an object"))
         return []
 
-    for key in SERVED_BY_KEYS:
-        if key not in served_by:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in SERVED_BY_KEYS
+        if key not in served_by
+    )
     _check_key_order(served_by, SERVED_BY_KEYS, path, "served_by", violations)
 
-    for key in ("board", "node_id", "mac", "build"):
-        if key in served_by and not _is_str_or_null(served_by[key]):
-            violations.append(
-                Violation(f"{path}.{key}", "wrong_type", f"{key} must be str or null")
-            )
+    violations.extend(
+        Violation(f"{path}.{key}", "wrong_type", f"{key} must be str or null")
+        for key in ("board", "node_id", "mac", "build")
+        if key in served_by and (not _is_str_or_null(served_by[key]))
+    )
 
     state = served_by.get("state")
     if "state" in served_by and state not in STATES:
-        violations.append(Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}"))
+        violations.append(
+            Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}")
+        )
 
     why = served_by.get("why")
     if "why" in served_by:
@@ -1071,17 +1361,23 @@ def _validate_served_by(served_by: object, path: str, violations: list[Violation
 
     if "uptime_ms" in served_by and not _is_nonneg_int_or_null(served_by["uptime_ms"]):
         violations.append(
-            Violation(f"{path}.uptime_ms", "wrong_type", "uptime_ms must be int>=0 or null")
+            Violation(
+                f"{path}.uptime_ms", "wrong_type", "uptime_ms must be int>=0 or null"
+            )
         )
 
     owns = served_by.get("owns")
     owns_ok = _is_list_of_str(owns)
     if "owns" in served_by and not owns_ok:
-        violations.append(Violation(f"{path}.owns", "wrong_type", "owns must be a list of str"))
+        violations.append(
+            Violation(f"{path}.owns", "wrong_type", "owns must be a list of str")
+        )
 
     if "components" in served_by and not _is_list_of_str(served_by["components"]):
         violations.append(
-            Violation(f"{path}.components", "wrong_type", "components must be a list of str")
+            Violation(
+                f"{path}.components", "wrong_type", "components must be a list of str"
+            )
         )
 
     board = served_by.get("board")
@@ -1102,7 +1398,9 @@ def _validate_served_by(served_by: object, path: str, violations: list[Violation
             )
 
     if state == "ok":
-        identity_complete = board is not None and node_id is not None and mac is not None
+        identity_complete = (
+            board is not None and node_id is not None and mac is not None
+        )
         owns_nonempty = owns_ok and len(owns) > 0
         if not (identity_complete and owns_nonempty):
             violations.append(
@@ -1117,20 +1415,27 @@ def _validate_served_by(served_by: object, path: str, violations: list[Violation
 
 
 def _validate_peer(
-    peer: object, envelope_schema_version: object, path: str, violations: list[Violation]
+    peer: object,
+    envelope_schema_version: object,
+    path: str,
+    violations: list[Violation],
 ) -> list[str]:
     if not isinstance(peer, dict):
         violations.append(Violation(path, "wrong_type", "peer is not an object"))
         return []
 
-    for key in PEER_KEYS:
-        if key not in peer:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in PEER_KEYS
+        if key not in peer
+    )
     _check_key_order(peer, PEER_KEYS, path, "peer", violations)
 
     state = peer.get("state")
     if "state" in peer and state not in STATES:
-        violations.append(Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}"))
+        violations.append(
+            Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}")
+        )
 
     why = peer.get("why")
     if "why" in peer:
@@ -1141,7 +1446,9 @@ def _validate_peer(
     if "mounts" in peer:
         if not mounts_ok:
             violations.append(
-                Violation(f"{path}.mounts", "wrong_type", "mounts must be a list of str")
+                Violation(
+                    f"{path}.mounts", "wrong_type", "mounts must be a list of str"
+                )
             )
         elif len(mounts) == 0:
             violations.append(
@@ -1160,7 +1467,11 @@ def _validate_peer(
 
     if state == "unreachable" and age_ms is not None:
         violations.append(
-            Violation(path, "peer_unreachable_has_age", "unreachable peer carries a live age_ms")
+            Violation(
+                path,
+                "peer_unreachable_has_age",
+                "unreachable peer carries a live age_ms",
+            )
         )
 
     peer_schema_version = peer.get("schema_version")
@@ -1175,15 +1486,16 @@ def _validate_peer(
                         "newer peer requires state degraded, why.code schema_skew",
                     )
                 )
-        elif peer_schema_version < envelope_schema_version:
-            if state != "incompatible" or why_code != "schema_skew":
-                violations.append(
-                    Violation(
-                        path,
-                        "peer_skew_older",
-                        "older peer requires state incompatible, why.code schema_skew",
-                    )
+        elif peer_schema_version < envelope_schema_version and (
+            state != "incompatible" or why_code != "schema_skew"
+        ):
+            violations.append(
+                Violation(
+                    path,
+                    "peer_skew_older",
+                    "older peer requires state incompatible, why.code schema_skew",
                 )
+            )
 
     return mounts if mounts_ok else []
 
@@ -1192,12 +1504,20 @@ def _validate_peer(
 
 
 def _check_hierarchical_id(
-    child_id: str, parent_id: str, parent_is_car_root: bool, path: str, violations: list[Violation]
+    child_id: str,
+    parent_id: str,
+    parent_is_car_root: bool,
+    path: str,
+    violations: list[Violation],
 ) -> None:
     if parent_is_car_root:
         if "." in child_id:
             violations.append(
-                Violation(path, "id_not_hierarchical", f"{child_id!r} must be one dotless segment")
+                Violation(
+                    path,
+                    "id_not_hierarchical",
+                    f"{child_id!r} must be one dotless segment",
+                )
             )
         return
     prefix = parent_id + "."
@@ -1225,9 +1545,11 @@ def _validate_node(
         violations.append(Violation(path, "wrong_type", "node is not an object"))
         return
 
-    for key in NODE_KEYS:
-        if key not in node:
-            violations.append(Violation(path, "missing_key", f"missing {key!r}"))
+    violations.extend(
+        Violation(path, "missing_key", f"missing {key!r}")
+        for key in NODE_KEYS
+        if key not in node
+    )
 
     _check_key_order(node, NODE_KEYS + OPTIONAL_NODE_KEYS, path, "node", violations)
 
@@ -1239,7 +1561,9 @@ def _validate_node(
             )
         else:
             if node_id in ids_seen:
-                violations.append(Violation(f"{path}.id", "duplicate_id", f"id {node_id!r} reused"))
+                violations.append(
+                    Violation(f"{path}.id", "duplicate_id", f"id {node_id!r} reused")
+                )
             ids_seen.add(node_id)
             if parent_id is not None:
                 _check_hierarchical_id(
@@ -1254,19 +1578,27 @@ def _validate_node(
     if "label" in node:
         label = node["label"]
         if not _is_str(label):
-            violations.append(Violation(f"{path}.label", "wrong_type", "label must be a string"))
+            violations.append(
+                Violation(f"{path}.label", "wrong_type", "label must be a string")
+            )
         elif label == "":
-            violations.append(Violation(f"{path}.label", "empty_label", "label must not be empty"))
+            violations.append(
+                Violation(f"{path}.label", "empty_label", "label must not be empty")
+            )
 
     state = node.get("state")
     if "state" in node and state not in STATES:
-        violations.append(Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}"))
+        violations.append(
+            Violation(f"{path}.state", "unknown_state", f"unknown state {state!r}")
+        )
 
     if "why" in node:
         _check_why(state == "ok", node["why"], f"{path}.why", violations)
 
     if "provenance" in node:
-        _validate_provenance(node["provenance"], state, f"{path}.provenance", violations)
+        _validate_provenance(
+            node["provenance"], state, f"{path}.provenance", violations
+        )
 
     if state in ("silent", "absent"):
         _check_frames_evidence(state, node.get("why"), path, violations)
@@ -1276,7 +1608,9 @@ def _validate_node(
     values_ok = isinstance(values, list)
     if "values" in node:
         if not values_ok:
-            violations.append(Violation(f"{path}.values", "wrong_type", "values must be a list"))
+            violations.append(
+                Violation(f"{path}.values", "wrong_type", "values must be a list")
+            )
         else:
             any_failing = False
             for i, v in enumerate(values):
@@ -1291,9 +1625,16 @@ def _validate_node(
                         "node state ok but a value is not",
                     )
                 )
-            if state == "ok" and any(isinstance(v, dict) and v.get("level") in ("warn", "bad") for v in values):
+            if state == "ok" and any(
+                isinstance(v, dict) and v.get("level") in ("warn", "bad")
+                for v in values
+            ):
                 violations.append(
-                    Violation(f"{path}.values", "node_ok_with_limit", "node state ok but a value is at warn/bad")
+                    Violation(
+                        f"{path}.values",
+                        "node_ok_with_limit",
+                        "node state ok but a value is at warn/bad",
+                    )
                 )
     _check_v15_why(node, state, values if values_ok else [], path, violations)
 
@@ -1323,7 +1664,9 @@ def _validate_node(
     if "actions" in node:
         actions = node["actions"]
         if not isinstance(actions, list):
-            violations.append(Violation(f"{path}.actions", "wrong_type", "actions must be a list"))
+            violations.append(
+                Violation(f"{path}.actions", "wrong_type", "actions must be a list")
+            )
         else:
             for i, a in enumerate(actions):
                 _validate_action(a, f"{path}.actions[{i}]", violations, node_id)
@@ -1338,15 +1681,25 @@ def _validate_node(
         )
         if not roles_ok:
             violations.append(
-                Violation(path, "role_not_available", "role needs a non-empty roles_available list")
+                Violation(
+                    path,
+                    "role_not_available",
+                    "role needs a non-empty roles_available list",
+                )
             )
         elif role is not None and role not in roles_available:
             violations.append(
-                Violation(f"{path}.role", "role_not_available", f"{role!r} not in roles_available")
+                Violation(
+                    f"{path}.role",
+                    "role_not_available",
+                    f"{role!r} not in roles_available",
+                )
             )
 
 
-def _check_v15_why(node: dict, state: object, values: list, path: str, violations: list[Violation]) -> None:
+def _check_v15_why(
+    node: dict, state: object, values: list, path: str, violations: list[Violation]
+) -> None:
     """Spec 5.3/5.6 (v1.5): `limit`, `not_requested` and `switched_off` must agree with the node."""
     why = node.get("why")
     if not isinstance(why, dict):
@@ -1355,10 +1708,18 @@ def _check_v15_why(node: dict, state: object, values: list, path: str, violation
     evidence = why.get("evidence")
     if code == "limit":
         ok = isinstance(evidence, dict)
-        ok = ok and _is_str(evidence.get("value")) and evidence.get("level") in ("warn", "bad")
+        ok = (
+            ok
+            and _is_str(evidence.get("value"))
+            and evidence.get("level") in ("warn", "bad")
+        )
         ok = ok and "reading" in evidence and isinstance(evidence.get("bound"), dict)
         if ok:
-            named = [v for v in values if isinstance(v, dict) and v.get("key") == evidence["value"]]
+            named = [
+                v
+                for v in values
+                if isinstance(v, dict) and v.get("key") == evidence["value"]
+            ]
             if named and "level" in named[0] and named[0]["level"] != evidence["level"]:
                 ok = False
         if not ok:
@@ -1370,12 +1731,22 @@ def _check_v15_why(node: dict, state: object, values: list, path: str, violation
                 )
             )
     elif code == "not_requested":
-        if state != "unknown" or any(isinstance(v, dict) and v.get("value") is not None for v in values):
+        if state != "unknown" or any(
+            isinstance(v, dict) and v.get("value") is not None for v in values
+        ):
             violations.append(
-                Violation(path, "not_requested_inconsistent", "not_requested needs state unknown and no reading")
+                Violation(
+                    path,
+                    "not_requested_inconsistent",
+                    "not_requested needs state unknown and no reading",
+                )
             )
     elif code == "switched_off" and state != "absent":
-        violations.append(Violation(path, "switched_off_inconsistent", f"switched_off on state {state!r}"))
+        violations.append(
+            Violation(
+                path, "switched_off_inconsistent", f"switched_off on state {state!r}"
+            )
+        )
 
 
 # --- ancestor_role ----------------------------------------------------------------
@@ -1391,14 +1762,20 @@ def _validate_ancestor_role(
         return
     if not isinstance(ancestor_role, dict):
         violations.append(
-            Violation(path, "ancestor_role_wrong_type", "ancestor_role must be null or an object")
+            Violation(
+                path,
+                "ancestor_role_wrong_type",
+                "ancestor_role must be null or an object",
+            )
         )
         return
 
     extra_keys = sorted(set(ancestor_role) - set(ANCESTOR_ROLE_KEYS))
     if extra_keys:
         violations.append(
-            Violation(path, "ancestor_role_wrong_type", f"unexpected key(s) {extra_keys}")
+            Violation(
+                path, "ancestor_role_wrong_type", f"unexpected key(s) {extra_keys}"
+            )
         )
 
     shape_ok = True
@@ -1407,7 +1784,9 @@ def _validate_ancestor_role(
         if key not in ancestor_role or not _is_str(value) or value == "":
             violations.append(
                 Violation(
-                    f"{path}.{key}", "ancestor_role_wrong_type", f"{key} must be a non-empty string"
+                    f"{path}.{key}",
+                    "ancestor_role_wrong_type",
+                    f"{key} must be a non-empty string",
                 )
             )
             shape_ok = False
@@ -1435,7 +1814,9 @@ def _validate_series_legend(envelope: dict, violations: list[Violation]) -> None
     legend_is_dict = isinstance(legend, dict)
     if legend is not None and not legend_is_dict:
         violations.append(
-            Violation("series_legend", "series_legend_wrong_type", "must be null or an object")
+            Violation(
+                "series_legend", "series_legend_wrong_type", "must be null or an object"
+            )
         )
     elif legend_is_dict:
         for key, value in legend.items():
@@ -1509,12 +1890,16 @@ def validate_envelope(envelope: object) -> list[Violation]:
     descended into, so one bad shape does not manufacture a cascade of children."""
     violations: list[Violation] = []
     if not isinstance(envelope, dict):
-        violations.append(Violation("", "not_an_object", "top-level envelope is not an object"))
+        violations.append(
+            Violation("", "not_an_object", "top-level envelope is not an object")
+        )
         return violations
 
-    for key in ENVELOPE_KEYS:
-        if key not in envelope:
-            violations.append(Violation("", "missing_key", f"envelope missing {key!r}"))
+    violations.extend(
+        Violation("", "missing_key", f"envelope missing {key!r}")
+        for key in ENVELOPE_KEYS
+        if key not in envelope
+    )
 
     _check_key_order(
         envelope,
@@ -1530,7 +1915,9 @@ def validate_envelope(envelope: object) -> list[Violation]:
     schema_version = envelope.get("schema_version")
     if "schema_version" in envelope:
         if not _is_int(schema_version):
-            violations.append(Violation("schema_version", "wrong_type", "must be an int"))
+            violations.append(
+                Violation("schema_version", "wrong_type", "must be an int")
+            )
         elif schema_version != SCHEMA_VERSION:
             violations.append(
                 Violation(
@@ -1555,7 +1942,9 @@ def validate_envelope(envelope: object) -> list[Violation]:
         path_value = envelope["path"]
         tree_id = tree.get("id") if isinstance(tree, dict) else None
         if not (_is_str(path_value) and path_value == tree_id):
-            violations.append(Violation("path", "path_mismatch", f"path {path_value!r} != tree.id"))
+            violations.append(
+                Violation("path", "path_mismatch", f"path {path_value!r} != tree.id")
+            )
 
     # Spec section 5.1: `path` and `ancestor_role` are emitted together or not at all --
     # a narrowed envelope with no opinion on its ancestor is a producer that predates this
@@ -1564,13 +1953,17 @@ def validate_envelope(envelope: object) -> list[Violation]:
     if has_path and not has_ancestor_role:
         violations.append(
             Violation(
-                "ancestor_role", "path_without_ancestor_role", "path is present but ancestor_role is absent"
+                "ancestor_role",
+                "path_without_ancestor_role",
+                "path is present but ancestor_role is absent",
             )
         )
     if has_ancestor_role and not has_path:
         violations.append(
             Violation(
-                "path", "ancestor_role_without_path", "ancestor_role is present but path is absent"
+                "path",
+                "ancestor_role_without_path",
+                "ancestor_role is present but path is absent",
             )
         )
 
@@ -1595,7 +1988,9 @@ def validate_envelope(envelope: object) -> list[Violation]:
         else:
             root_id = tree.get("id")
             if not has_path and _is_str(root_id) and "." in root_id:
-                violations.append(Violation("tree.id", "root_id_dotted", f"root id {root_id!r}"))
+                violations.append(
+                    Violation("tree.id", "root_id_dotted", f"root id {root_id!r}")
+                )
             _validate_node(tree, "tree", None, False, True, ids_seen, violations)
 
             if not has_path:
@@ -1603,21 +1998,31 @@ def validate_envelope(envelope: object) -> list[Violation]:
                 for src_path, mount_id in mount_refs:
                     if mount_id not in ids_seen:
                         violations.append(
-                            Violation(src_path, "mount_unresolved", f"{mount_id!r} not in tree")
+                            Violation(
+                                src_path,
+                                "mount_unresolved",
+                                f"{mount_id!r} not in tree",
+                            )
                         )
 
             # Applies to narrowed responses too (served_by.owns survives
             # ?path=, and a producer copies served_by/peers verbatim into a narrowed envelope).
             roots = set(owns) | {mount_id for _, mount_id in peer_mounts}
             served_by_obj = envelope.get("served_by")
-            served_by_board = served_by_obj.get("board") if isinstance(served_by_obj, dict) else None
-            _validate_provenance_placement(tree, roots, served_by_board, violations, "tree")
+            served_by_board = (
+                served_by_obj.get("board") if isinstance(served_by_obj, dict) else None
+            )
+            _validate_provenance_placement(
+                tree, roots, served_by_board, violations, "tree"
+            )
 
             # C10: applies to narrowed responses too (id-based, not depth-based).
             _validate_mount_ages(tree, envelope.get("peers"), violations)
 
     if has_ancestor_role:
-        _validate_ancestor_role(envelope["ancestor_role"], ids_seen, "ancestor_role", violations)
+        _validate_ancestor_role(
+            envelope["ancestor_role"], ids_seen, "ancestor_role", violations
+        )
 
     _validate_series_legend(envelope, violations)
 
@@ -1660,13 +2065,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Validate portal state envelopes against docs/portal-spec.md section 5 (v2 only).",
     )
     parser.add_argument("files", nargs="+", help="envelope JSON file(s) to check")
-    parser.add_argument("-q", "--quiet", action="store_true", help="suppress 'OK <path>' lines")
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="suppress 'OK <path>' lines"
+    )
     args = parser.parse_args(argv)
 
     exit_code = 0
     for file_path in args.files:
         try:
-            with open(file_path, encoding="utf-8") as handle:
+            with open(file_path, encoding="utf-8") as handle:  # noqa: PTH123 -- Preserve the input path spelling in CLI errors.
                 envelope = json.load(handle)
         except (OSError, json.JSONDecodeError) as err:
             print(f"{file_path}: {err}")
