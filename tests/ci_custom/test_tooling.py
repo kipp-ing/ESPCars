@@ -11,15 +11,17 @@ import yaml
 from script import lint_report
 
 ROOT = Path(__file__).resolve().parents[2]
-P2_HOOKS = (
+BLOCKING_HOOKS = (
     "ruff",
     "ruff-format",
     "pyupgrade",
     "yamllint",
     "end-of-file-fixer",
     "trailing-whitespace",
+    "hook-config",
+    "ci-custom",
 )
-ADVISORY_HOOKS = ("hook-config", "no-commit-to-branch", "ci-custom", "clang-tidy")
+ADVISORY_HOOKS = ("no-commit-to-branch",)
 
 
 def test_hook_revisions_match_shared_pins():
@@ -70,7 +72,7 @@ def test_ci_and_local_hooks_block_only_the_clean_tools():
     jobs = workflow["jobs"]
     assert not jobs["upstream-lint"].get("continue-on-error", False)
     assert "upstream-lint" in jobs["required-checks"]["needs"]
-    assert "clang-tidy" not in jobs["required-checks"]["needs"]
+    assert "clang-tidy" in jobs["required-checks"]["needs"]
     steps = jobs["upstream-lint"]["steps"]
     assert not any(step.get("continue-on-error", False) for step in steps)
     check_script = (ROOT / "script/check.sh").read_text(encoding="utf-8")
@@ -86,8 +88,8 @@ def test_ci_and_local_hooks_block_only_the_clean_tools():
         assert "--summary" in blocking[0]
         assert set(blocking[0][blocking[0].index("--only") + 1 :]) - {
             "--summary"
-        } == set(P2_HOOKS)
-        advisory = [command for command in commands if "ci-custom" in command]
+        } == set(BLOCKING_HOOKS) | ({"clang-tidy"} if source == check_script else set())
+        advisory = [command for command in commands if "no-commit-to-branch" in command]
         assert len(advisory) == 1
         assert "--report-only" in advisory[0]
         assert "--summary" in advisory[0]
@@ -95,7 +97,9 @@ def test_ci_and_local_hooks_block_only_the_clean_tools():
             "--summary",
             "--report-only",
         } == set(ADVISORY_HOOKS)
-    advisory_step = next(step for step in steps if "ci-custom" in step.get("run", ""))
+    advisory_step = next(
+        step for step in steps if "no-commit-to-branch" in step.get("run", "")
+    )
     assert advisory_step["if"] == "always()"
     assert (
         'echo "For details, run: .venv/bin/python script/lint_report.py"'
@@ -173,7 +177,7 @@ def test_report_continues_after_tool_error(report_environment, monkeypatch, caps
 @pytest.mark.parametrize("report_only", [False, True])
 @pytest.mark.parametrize("summary", [False, True])
 @pytest.mark.parametrize("findings", [0, 3, None])
-@pytest.mark.parametrize("tool", P2_HOOKS)
+@pytest.mark.parametrize("tool", BLOCKING_HOOKS)
 def test_report_only_exit_codes(
     report_environment, monkeypatch, capsys, report_only, summary, findings, tool
 ):
@@ -194,7 +198,7 @@ def test_report_only_exit_codes(
     assert f"Upstream lint summary ({mode};" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("failing_tool", P2_HOOKS)
+@pytest.mark.parametrize("failing_tool", BLOCKING_HOOKS)
 def test_combined_blocking_hooks_fail_on_each_tool(
     report_environment, monkeypatch, failing_tool
 ):
@@ -202,7 +206,31 @@ def test_combined_blocking_hooks_fail_on_each_tool(
         return int(tool == failing_tool or tool in ADVISORY_HOOKS)
 
     monkeypatch.setattr(lint_report, "report", fake_report)
-    assert lint_report.main(["--only", *P2_HOOKS, "--summary"]) == 1
+    assert lint_report.main(["--only", *BLOCKING_HOOKS, "--summary"]) == 1
+
+
+@pytest.mark.parametrize("report_only", [False, True])
+@pytest.mark.parametrize("summary", [False, True])
+def test_ci_custom_finding_exit_code(
+    report_environment, monkeypatch, capsys, report_only, summary
+):
+    def finding(command):
+        assert command[1:] == ["script/ci_custom.py"]
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "components/demo/demo.h:1: [pragma-once] missing\n  TOTAL: 1\n",
+            "",
+        )
+
+    monkeypatch.setattr(lint_report, "run", finding)
+    args = ["--only", "ci-custom"]
+    if report_only:
+        args.append("--report-only")
+    if summary:
+        args.append("--summary")
+    assert lint_report.main(args) == int(not report_only)
+    assert "  ci-custom: 1\n" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("summary", [False, True])

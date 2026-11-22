@@ -334,7 +334,11 @@ def test_cli_counts_exit_codes_and_summary(
 
 
 @pytest.mark.parametrize("strict", [False, True])
-def test_partial_builds_analyze_available_targets(tree, monkeypatch, capsys, strict):
+@pytest.mark.parametrize("report_only", [False, True])
+@pytest.mark.parametrize("findings", [False, True])
+def test_partial_builds_analyze_available_targets(
+    tree, monkeypatch, capsys, strict, report_only, findings
+):
     from esphome import config
     from esphome.core import CORE
 
@@ -354,26 +358,96 @@ def test_partial_builds_analyze_available_targets(tree, monkeypatch, capsys, str
 
     def run(*args):
         calls.append(args)
-        return {finding}
+        return {finding} if findings else set()
 
     monkeypatch.setattr(tidy, "run_tidy", run)
     summary_file = tree / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
-    args = ["missing.yaml", "ready.yaml", "--report-only", "--summary"]
+    args = ["missing.yaml", "ready.yaml", "--summary"]
+    if report_only:
+        args.append("--report-only")
     if strict:
         args.append("--strict")
-    assert tidy.main(args) == (2 if strict else 0)
+    assert tidy.main(args) == (2 if strict else int(findings and not report_only))
     assert len(calls) == 2
     output = capsys.readouterr().out
     assert "run: esphome compile missing.yaml" in output
     assert ("SKIP [clang-tidy]: missing.yaml:" in output) == (not strict)
     assert f"  tool errors: {int(strict)}\n" in output
-    assert "  TOTAL: 1\n" in output
+    assert f"  TOTAL: {int(findings)}\n" in output
     assert "targets analyzed (1/2): ready.yaml" in output
     assert "INCOMPLETE" in output
     content = summary_file.read_text(encoding="utf-8")
     assert "targets analyzed (1/2): ready.yaml" in content
     assert "INCOMPLETE" in content
+
+
+@pytest.mark.parametrize("reason", ["missing", "stale"])
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("analyze_linbus", [False, True])
+@pytest.mark.parametrize("findings", [0, 1])
+def test_component_table_distinguishes_skips_from_measured_zero(
+    tree, monkeypatch, capsys, reason, strict, analyze_linbus, findings
+):
+    linbus = tree / "components/linbus"
+    linbus.mkdir()
+    (linbus / "linbus.h").write_text("#pragma once\n", encoding="utf-8")
+    ready = "tests/build/demo/ready.yaml"
+    skipped = "tests/build/linbus/skipped.yaml"
+    measured = "tests/build/linbus/ready.yaml"
+    databases = {
+        target: database(tree, name)
+        for target, name in (
+            (ready, "ready"),
+            (skipped, "skipped"),
+            (measured, "measured"),
+        )
+    }
+    # A dependency's presence in another build must not turn its skipped
+    # dedicated target into a measured zero.
+    for db in databases.values():
+        copied = db.parent.parent / "src/esphome/components/linbus"
+        copied.mkdir()
+        shutil.copyfile(linbus / "linbus.h", copied / "linbus.h")
+    if reason == "missing":
+        databases[skipped].unlink()
+    else:
+        generated = databases[skipped].parent.parent / "src/esphome/core/defines.h"
+        os.utime(generated, ns=(500_000_000, 500_000_000))
+
+    from esphome import config
+    from esphome.core import CORE
+
+    def read_config(*args):
+        CORE.build_path = str(
+            databases[str(CORE.config_path.relative_to(tree))].parent.parent
+        )
+        return {}
+
+    monkeypatch.setattr(config, "read_config", read_config)
+    finding = tidy.Finding("components/demo/demo.cpp", 2, 1, "check-a", "details")
+    monkeypatch.setattr(
+        tidy, "run_tidy", lambda *args: {finding} if findings else set()
+    )
+    summary_file = tree / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    targets = [ready, skipped, *([measured] if analyze_linbus else [])]
+    assert tidy.main([*targets, "--summary", *(["--strict"] if strict else [])]) == (
+        2 if strict else findings
+    )
+    output = capsys.readouterr().out
+    summary = summary_file.read_text(encoding="utf-8")
+    assert f"    demo: {findings}\n" in output
+    assert f"| demo | {findings} |" in summary
+    expected = "0" if analyze_linbus else f"skipped ({reason})"
+    assert f"    linbus: {expected}\n" in output
+    assert f"| linbus | {expected} |" in summary
+    if not analyze_linbus:
+        assert "    linbus: 0\n" not in output
+        assert "| linbus | 0 |" not in summary
+    assert f"  TOTAL: {findings}\n" in output
+    assert f"Total: **{findings}**" in summary
+    assert "INCOMPLETE" in output and "INCOMPLETE" in summary
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -415,7 +489,7 @@ def test_invalid_database_is_never_skipped(tree, monkeypatch, capsys, strict):
     assert "targets analyzed (0/2): (none)" in output
 
 
-def test_ci_targets_and_nonblocking_wiring(capsys):
+def test_ci_targets_and_blocking_wiring(capsys):
     assert tidy.main(["--list-targets"]) == 0
     assert capsys.readouterr().out.splitlines() == list(tidy.DEFAULT_TARGETS)
     assert len(tidy.DEFAULT_TARGETS) == 7
@@ -423,13 +497,16 @@ def test_ci_targets_and_nonblocking_wiring(capsys):
     jobs = yaml.safe_load(
         (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     )["jobs"]
-    assert "clang-tidy" not in jobs["required-checks"]["needs"]
+    assert "clang-tidy" in jobs["required-checks"]["needs"]
     job = jobs["clang-tidy"]
+    assert job["name"] == "clang-tidy"
     assert not job.get("continue-on-error", False)
+    assert not any(step.get("continue-on-error", False) for step in job["steps"])
     runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "script/clang_tidy.py --list-targets" in runs
     assert 'esphome compile "$config"' in runs
-    assert "python script/clang_tidy.py --report-only --strict" in runs
+    assert "python script/clang_tidy.py --strict" in runs
+    assert "--report-only" not in runs
     assert "~/.esphome-idf" in str(job)
     assert "clang-tidy" in lint_report.TOOLS
 
@@ -464,7 +541,7 @@ def test_new_component_file_requires_compile(tree, monkeypatch, capsys, suffix, 
         lambda *args: pytest.fail("stale build must be detected before clang-tidy"),
     )
     target = "tests/build/demo/test.yaml"
-    args = [target, "--report-only", "--summary", *(["--strict"] if strict else [])]
+    args = [target, "--summary", *(["--strict"] if strict else [])]
     assert tidy.main(args) == (2 if strict else 0)
     output = capsys.readouterr().out
     assert (
@@ -495,7 +572,7 @@ def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state, stri
     monkeypatch.setattr(tidy, "run_tidy", lambda *args: set())
     target = "tests/build/demo/test.yaml"
     stale = state in ("missing", "older")
-    args = [target, "--report-only", "--summary", *(["--strict"] if strict else [])]
+    args = [target, "--summary", *(["--strict"] if strict else [])]
     assert tidy.main(args) == (2 if stale and strict else 0)
     output = capsys.readouterr().out
     if stale:
@@ -509,9 +586,11 @@ def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state, stri
 
 
 @pytest.mark.parametrize("summary", [False, True])
+@pytest.mark.parametrize("report_only", [False, True])
+@pytest.mark.parametrize("findings", [False, True])
 @pytest.mark.parametrize("state", ["missing", "stale", "new-file", "crash"])
 def test_lint_report_partial_builds_keep_coverage_visible(
-    tree, monkeypatch, capsys, summary, state
+    tree, monkeypatch, capsys, summary, report_only, findings, state
 ):
     ready = database(tree, "ready")
     unavailable = database(tree, "unavailable")
@@ -551,7 +630,7 @@ def test_lint_report_partial_builds_keep_coverage_visible(
     def run(*args):
         if state == "crash":
             raise RuntimeError("clang-tidy crashed")
-        return {finding}
+        return {finding} if findings else set()
 
     monkeypatch.setattr(tidy, "run_tidy", run)
 
@@ -563,10 +642,14 @@ def test_lint_report_partial_builds_keep_coverage_visible(
         return subprocess.CompletedProcess(command, code, output.getvalue(), "")
 
     monkeypatch.setattr(lint_report, "run", invoke)
-    args = ["--only", "clang-tidy", "--report-only"]
+    args = ["--only", "clang-tidy"]
+    if report_only:
+        args.append("--report-only")
     if summary:
         args.append("--summary")
-    assert lint_report.main(args) == (2 if state == "crash" else 0)
+    assert lint_report.main(args) == (
+        2 if state == "crash" else int(findings and not report_only)
+    )
     output = capsys.readouterr().out
     if state == "crash":
         assert "clang-tidy crashed" in output
@@ -575,7 +658,7 @@ def test_lint_report_partial_builds_keep_coverage_visible(
         assert "esphome compile unavailable.yaml" in output
         assert "targets analyzed (1/2): ready.yaml" in output
         assert "INCOMPLETE" in output
-        assert "  clang-tidy: 1\n" in output
+        assert f"  clang-tidy: {int(findings)}\n" in output
         assert "ERROR" not in output
 
 

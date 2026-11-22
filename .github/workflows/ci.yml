@@ -124,7 +124,7 @@ jobs:
           python script/lint_report.py --only clang-format --summary
 
   upstream-lint:
-    name: Python, YAML and whitespace lint
+    name: Source and hook lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,16 +134,17 @@ jobs:
           cache: pip
           cache-dependency-path: requirements_lint.txt
       - run: pip install -r requirements_lint.txt
-      - name: Check Python, YAML and whitespace without modifying source files
-        run: python script/lint_report.py --only ruff ruff-format pyupgrade yamllint end-of-file-fixer trailing-whitespace --summary
-      - name: Summarize remaining advisory hooks
+      - name: Check source and hook configuration without modifying source files
+        run: python script/lint_report.py --only ruff ruff-format pyupgrade yamllint end-of-file-fixer trailing-whitespace hook-config ci-custom --summary
+      # A push to main checks out main; this commit-time hook rejects that
+      # legitimate post-merge CI run, so it remains advisory.
+      - name: Summarize protected-branch hook
         if: always()
-        run: python script/lint_report.py --only hook-config no-commit-to-branch ci-custom clang-tidy --report-only --summary
+        run: python script/lint_report.py --only no-commit-to-branch --report-only --summary
 
   clang-tidy:
-    name: clang-tidy (report-only)
+    name: clang-tidy
     runs-on: ubuntu-latest
-    # Deliberately absent from Required checks.needs until P5 is clean.
     env:
       # ESPHome 2026.11 uses native ESP-IDF; cache its install and ccache too.
       ESPHOME_ESP_IDF_PREFIX: ~/.esphome-idf
@@ -170,8 +171,8 @@ jobs:
           python script/clang_tidy.py --list-targets | while IFS= read -r config; do
             esphome compile "$config"
           done
-      - name: Report clang-tidy findings and count tables
-        run: python script/clang_tidy.py --report-only --strict
+      - name: Check clang-tidy findings and report count tables
+        run: python script/clang_tidy.py --strict
 
   ha-integration:
     name: Home Assistant glue (sdlog_relay)
@@ -193,7 +194,7 @@ jobs:
   required-checks:
     name: Required checks
     if: always()
-    needs: [validate, host-tests, compile, clang-format, upstream-lint, ha-integration]
+    needs: [validate, host-tests, compile, clang-format, upstream-lint, clang-tidy, ha-integration]
     runs-on: ubuntu-latest
     steps:
       # One stable context for branch protection to require, instead of

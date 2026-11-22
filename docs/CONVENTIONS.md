@@ -61,7 +61,12 @@ sanitizers. If `.venv` is missing:
 - CI runs everything `script/check.sh` runs, plus the compile matrix. When you
   add a step to one of them, add it to the other too. Until 2026-10-10 the
   private-data guard ran only in `check.sh`.
-- Ruff, Ruff format, pyupgrade, yamllint, EOF and trailing-whitespace findings block both `script/check.sh` and CI.
+- Ruff, Ruff format, pyupgrade, yamllint, EOF, trailing-whitespace, ci-custom,
+  hook-config and clang-tidy block both `script/check.sh` and CI. Local
+  clang-tidy analyzes available builds and skips missing/stale targets; CI's
+  dedicated Required check uses `--strict` and requires all seven builds.
+- Only no-commit-to-branch remains advisory in `check.sh` and CI: the commit-time
+  hook rejects `main`, including legitimate post-merge CI runs on that branch.
 - Merge with a merge commit, as the history does.
 - If PRs stop getting runs: this repo got its first run ever only from a manual
   `gh workflow run CI --ref <branch>`, and push/PR runs followed only after

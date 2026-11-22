@@ -171,7 +171,7 @@ upstream `requirements_dev.txt`. `.clang-tidy` preserves upstream's complete
 check selections and options, adding only the external-component header filter.
 No additional checks are disabled.
 
-Compile the seven YAMLs printed by
+For the P1b baseline, compile the seven YAMLs printed by
 `.venv/bin/python script/clang_tidy.py --list-targets`, then run
 `.venv/bin/python script/clang_tidy.py --report-only -j 6`.
 The native ESP-IDF CMake databases supply flags and toolchain paths. The runner
@@ -249,10 +249,11 @@ risk. No finding fixes belong in P1b.
 build exists. With partial local builds, available targets are analyzed; each
 missing or stale target gets a SKIP line with its reason and compile command.
 Summaries list the analyzed targets and mark incomplete counts as partial.
-The separate `clang-tidy (report-only)` CI job uses `--strict` to treat missing
-or stale builds as tool errors, compiles these same seven configs, caches native
-ESP-IDF/ccache as well as PlatformIO, and writes per-check
-and per-component tables to the step summary. It is absent from Required checks.
+The separate CI job uses `--strict` to treat missing or stale builds as tool
+errors, compiles these same seven configs, caches native ESP-IDF/ccache as well
+as PlatformIO, and writes per-check and per-component tables to the step summary.
+It started report-only and outside Required checks in P1b; P5e makes it blocking
+and adds it to `Required checks.needs` after the cleanup reaches zero findings.
 Tool/compiler errors fail even in report-only mode. The P1a tool counts above
 remain unchanged after adding this infrastructure.
 
@@ -266,8 +267,9 @@ findings by hand. Add `DOMAIN` to every component.
 `script/`, `tests/` and `tests_ha/`, plus YAML comments and whitespace/EOF.
 The last P2 PR makes all six clean hooks blocking in `script/check.sh` and the
 `upstream-lint` CI job, which is now in `Required checks.needs`. It reuses
-`lint_report.py --only`; no new runner or flag is needed. ci-custom and
-clang-tidy remain report-only until P3/P5 clear their findings.
+`lint_report.py --only`; no new runner or flag is needed. At the end of P2,
+ci-custom and clang-tidy stayed report-only pending cleanup. P5e promotes both
+to blocking after P4/P5 clear their findings.
 
 | Tool | P1a baseline | After P2, repository-wide |
 |---|---:|---:|
@@ -302,7 +304,9 @@ P3a's clang-format cleanup is tracked separately below.
    A change in `gateway_core.h`, or in the text written to a file by
    sd_logger, is bench-pending (the second case is a format contract).
 
-**Done:** clang-format and `ci_custom.py` are blocking in CI.
+**Done:** clang-format and `ci_custom.py` are blocking in CI. Custom lint's
+promotion waits for P4's remaining linbus findings to reach zero and is wired
+in P5e alongside clang-tidy.
 
 ### P4 — linbus restructure · bench-pending
 
@@ -345,9 +349,9 @@ compiled with zero warnings before the logging-level correction. The available
 ESP32 build supports a scoped clang-tidy run on the corrected repository sources:
 89 findings, zero tool errors; cleanup remains P5. Compilation of the corrected
 sources and the full clang-tidy matrix remain operator gates; the sandbox cannot
-compile or reach the bench. The default `script/check.sh` tidy matrix stops at
-the absent isotp compilation database; all preceding gates pass. This does not
-change P4's completion gate below.
+compile or reach the bench. The current `script/check.sh` runner (#36) skips
+missing/stale local builds while analyzing available targets. P5e preserves that
+behavior when findings become blocking. P4's completion gate below is unchanged.
 
 **Done:** compiles on all three linbus targets. The LIN timing check is part
 of P9.
@@ -367,7 +371,33 @@ can_gateway stays last because of its ISR and lock-free contracts.
   "setup-time only, fine" and "runtime, fix", and put that list in the PR
   description.
 
-**Done:** clang-tidy is blocking in CI with zero findings.
+**P5 closing gates implemented; final seven-build CI evidence pending:** P5e is
+the mechanical closing step, with no component changes. The operator reports
+zero clang-tidy findings for ccp, isotp, uds, portal and linbus on main, and zero
+for sd_logger (#40) and can_gateway (#41) on their cleanup branches. Those two
+PRs must merge before P5e; the seven real builds are checked again afterwards.
+Repo-wide ci-custom and hook-config are already at zero.
+
+P5e makes ci-custom and hook-config blocking in both `script/check.sh` and the
+existing `upstream-lint` job (now named "Source and hook lint"). The dedicated
+`clang-tidy` job drops `--report-only`, keeps `--strict`, and joins
+`Required checks.needs`. Locally clang-tidy findings fail `check.sh`, but missing
+or stale targets still SKIP; partial counts and compile instructions stay visible.
+The existing runners already distinguish findings, skips and tool errors, so
+no runner change is needed. Regression tests cover one finding failing each
+blocking path, skips alone passing locally, and strict CI rejecting unavailable
+builds.
+
+Only no-commit-to-branch stays advisory: the pinned hook returns 1 on `main`,
+including legitimate post-merge CI pushes, and 0 on a feature branch. Making
+that hook blocking would fail those main runs. It remains a commit-time guard
+in pre-commit.
+
+**Done:** ci-custom, hook-config and clang-tidy block locally and in Required
+checks with zero findings across all seven real clang-tidy builds. CI requires
+fresh builds; local missing/stale builds alone remain non-fatal. P5e merges only
+after #40/#41 and the zero-finding CI-equivalent run, preserving P1's rule that
+report-only jobs join Required checks only at zero findings.
 
 ### P6 — Test layout like upstream · mechanical
 

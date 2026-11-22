@@ -80,6 +80,10 @@ COMPONENT_SOURCE_EXTENSIONS = {
 class BuildUnavailable(RuntimeError):
     """A missing or stale target build that can be refreshed by compiling."""
 
+    def __init__(self, message, reason):
+        super().__init__(message)
+        self.reason = reason
+
 
 def locate_database(target):
     """Let ESPHome resolve substitutions, packages and custom build_path."""
@@ -92,7 +96,9 @@ def locate_database(target):
         raise RuntimeError(f"Invalid ESPHome config: {target}")
     database = Path(CORE.build_path) / "build/compile_commands.json"
     if not database.is_file():
-        raise BuildUnavailable(f"Missing {database}; run: esphome compile {target}")
+        raise BuildUnavailable(
+            f"Missing {database}; run: esphome compile {target}", "missing"
+        )
     return database
 
 
@@ -370,7 +376,9 @@ def check_build_freshness(source_root, components, target):
                 f"Generated config {generated} is older than {codegen.relative_to(ROOT)}"
             )
     if problems:
-        raise BuildUnavailable("; ".join([*problems, f"run: esphome compile {target}"]))
+        raise BuildUnavailable(
+            "; ".join([*problems, f"run: esphome compile {target}"]), "stale"
+        )
 
 
 def prepare_jobs(database, temporary, target):
@@ -447,8 +455,23 @@ def count_findings(findings, components):
     )
 
 
-def print_counts(findings, components, errors, analyzed, targets):
+def print_counts(findings, components, errors, analyzed, targets, skipped):
     checks, areas = count_findings(findings, components)
+    areas = dict(areas)
+    analyzed_components = {Path(target).parent.name for target in analyzed}
+    skipped_components = {}
+    for target, reason in skipped.items():
+        # tests/build/<component>/ identifies the component's dedicated targets.
+        # A dependency in another build does not replace their coverage.
+        component = Path(target).parent.name
+        if (
+            component not in analyzed_components
+            and (ROOT / "components" / component).is_dir()
+            and component
+        ):
+            skipped_components.setdefault(component, set()).add(reason)
+    for component, reasons in skipped_components.items():
+        areas[component] = f"skipped ({', '.join(sorted(reasons))})"
     coverage = f"targets analyzed ({len(analyzed)}/{len(targets)}): {', '.join(analyzed) or '(none)'}"
     incomplete = bool(errors) or len(analyzed) != len(targets)
     print("clang-tidy counts (unique path, line, column, check, message):")
@@ -513,7 +536,7 @@ def main(argv=None):
     if args.jobs < 1:
         parser.error("-j must be positive")
     findings, components, errors = set(), set(), []
-    analyzed = []
+    analyzed, skipped = [], {}
     try:
         pins = (ROOT / "requirements_lint.txt").read_text(encoding="utf-8")
         expected = re.search(r"^clang-tidy==([\w.]+)$", pins, re.MULTILINE)[1]
@@ -532,6 +555,7 @@ def main(argv=None):
                         locate_database(target), directory, target
                     )
                 except BuildUnavailable as error:
+                    skipped[target] = error.reason
                     message = f"{target}: {error}"
                     if args.strict:
                         errors.append(message)
@@ -588,7 +612,7 @@ def main(argv=None):
             print(f"{finding.path}:{finding.line}: [{finding.check}] {finding.message}")
     for error in errors:
         print(f"ERROR [clang-tidy]: {error}")
-    print_counts(findings, components, errors, analyzed, args.targets)
+    print_counts(findings, components, errors, analyzed, args.targets, skipped)
     return 2 if errors else int(bool(findings) and not args.report_only)
 
 
