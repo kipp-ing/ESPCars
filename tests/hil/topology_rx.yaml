@@ -104,7 +104,7 @@
 #   nothing that matters on that device's wire: its own frames sit well above
 #   this range, so a beacon here does not delay the traffic we are measuring.
 # * BENCH ONLY. High-priority ids and unconditional TX are both wrong on a
-#   vehicle bus; this package must never appear in tests/build/, in an example,
+#   vehicle bus; this package must never appear in tests/components/, in an example,
 #   or in a car config. CLAUDE.md: "never widen a default that causes
 #   transmission".
 # * Subscribing decode entities marks the port observed, which allocates its

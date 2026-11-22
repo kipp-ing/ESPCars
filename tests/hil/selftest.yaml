@@ -108,7 +108,7 @@
 #   .venv/bin/python script/hil/selftest.py --board orange    # just one
 #
 # BENCH ONLY: the topology beacons transmit unconditionally on high-priority
-# ids. Never in tests/build/, an example, or a car config.
+# ids. Never in tests/components/, an example, or a car config.
 substitutions:
   node_name: mr-orange
   # Identity hue. Brightness is state (hil_common), never the hue — three red

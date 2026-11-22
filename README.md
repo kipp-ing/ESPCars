@@ -88,14 +88,16 @@ the wire is understood. See the safety model in the
 |---|---|---|---|
 | [`can_gateway`](docs/can_gateway-user-guide.md) | CAN observe, decode, send, gateway | CAN 2.0A/B (classic CAN), 10 kbit/s – 1 Mbit/s | Observe/decode: any ESP32 with TWAI (ESP32, S2, S3, C3, C6, H2, P4). Gateway: two controllers (C6, P4). Not the C5. |
 | [`linbus`](docs/linbus-user-guide.md) | LIN master, slave, sniffer | LIN 1.x / 2.x, 1–20 kbit/s | ESP32, C3, C6 |
-| `isotp` | Diagnostic transport | ISO 15765-2 | ESP32-C6 |
+| [`isotp`](docs/isotp-user-guide.md) | Diagnostic transport | ISO 15765-2 | ESP32-C6 |
 | [`uds`](docs/uds-user-guide.md) | Diagnostic client | ISO 14229 | ESP32-C6 |
-| `ccp` | Measurement and calibration | CCP 2.1 | ESP32-C6 |
+| [`ccp`](docs/ccp-user-guide.md) | Measurement and calibration | CCP 2.1 | ESP32-C6 |
 | [`sd_logger`](docs/sd_logger-user-guide.md) | Frame and log recording | — | ESP32-C6 |
-| [`portal`](docs/portal-spec.md) | Local web page and state API | HTTP/JSON | ESP32 (ESP-IDF), tested on C6 |
+| [`portal`](docs/portal-user-guide.md) | Local web page and state API | HTTP/JSON | ESP32 (ESP-IDF), tested on C6 |
 
-Framework: ESP-IDF. Requires ESPHome 2026.7.0 or later. Complete, compiling
-configurations for every feature are in [`tests/build/`](tests/build/).
+Framework: ESP-IDF. Requires ESPHome 2026.7.0 or later. Test packages for every
+feature are in [`tests/components/`](tests/components/). Compose them with their
+shared platform base using `.venv/bin/python script/test_build_components.py
+config` or `compile`, optionally followed by fixture paths.
 
 **Reference hardware:** ESP32-C6 adapter board with CAN, LIN and Modbus
 transceivers. Any ESP32 with a CAN transceiver (e.g. TJA1051, SN65HVD230) or a

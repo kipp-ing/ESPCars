@@ -57,7 +57,7 @@ this repository may name that project, its boards, MACs, IPs or captures
 | owner | paths |
 |---|---|
 | implementer | `components/portal/**` (Python, C++, `index.html`) |
-| tester | `tests/portal/**`, `tests/host/*portal*`, `tests/build/portal/**`, `script/portal_schema.py`, `tests/host/Makefile` (include path only), `.github/workflows/ci.yml` (compile-matrix entries only) |
+| tester | `tests/portal/**`, `tests/host/*portal*`, `tests/components/portal/**`, `script/portal_schema.py`, `tests/host/Makefile` (include path only), `.github/workflows/ci.yml` (compile-matrix entries only) |
 | spec owner | `docs/portal-spec.md`, `docs/**` for the portal, `README.md` component list, `docs/HANDOVER.md` portal entry |
 
 Commit only your own paths: `git commit <paths>`; never `git add -A` / `git commit -a`.
@@ -708,9 +708,9 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 
 | ID | criterion | tier |
 |---|---|---|
-| PS-G-01 | `script/check.sh` exits 0 (private-data guard, pytest, host, clang-format, config of every `tests/build/*/test*.yaml`) | all |
+| PS-G-01 | `script/check.sh` exits 0 (private-data guard, pytest, host, clang-format, `script/test_build_components.py config` over every test/validate fixture) | all |
 | PS-G-02 | No existing component's files change; nothing private (vehicle names, real MACs/IPs, captures, sibling-repo paths) in any tracked file, commit message or PR text | py, rev |
-| PS-G-03 | Every `tests/build/portal/test*.yaml` is in the CI compile matrix | rev |
+| PS-G-03 | Every `tests/components/portal/test*.yaml` is in the CI compile matrix | rev |
 
 ### M0 — spec
 
@@ -733,7 +733,7 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M1-09 | `script/portal_schema.py`: every rule of §5 has a rejecting case with its violation code; the §5.6 compatibility list has an accepting case each (no `links`, 7-key actions, `class: null`, a non-empty `peers`, a reordered envelope); CLI exit codes 0/1; never raises on non-dict / missing keys | py |
 | PS-M1-10 | `web_asset:` replaces the embedded bytes (codegen embeds the gzip of the given file); missing file rejected | py |
 | PS-M1-11 | Built-in `index.html`: <= 64 KiB gzipped, no `http://`/`https://` resource reference, no private marker, `KINDS` contains the §7 neutral nouns | py |
-| PS-M1-12 | `tests/build/portal/test-minimal.esp32-c6-idf.yaml` (no actions, no auth) passes cfg and cc | cfg, cc |
+| PS-M1-12 | `tests/components/portal/test-minimal.esp32-c6-idf.yaml` (no actions, no auth) passes cfg and cc | cfg, cc |
 
 ### M2 — on `web_server_base`
 
@@ -772,8 +772,8 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 
 | ID | criterion | tier |
 |---|---|---|
-| PS-M4-01 | `tests/build/portal/test.esp32-c6-idf.yaml`: fictional vehicle (bus, device, logger nodes), values of all three entity kinds, a series, all four action kinds (template entities, nothing on a vehicle bus), `auth:`, `wifi: ap:` + `captive_portal`; cfg + cc green | cfg, cc |
-| PS-M4-02 | `tests/build/portal/test-asset.esp32-c6-idf.yaml` with `web_asset:` passes cfg + cc | cfg, cc |
+| PS-M4-01 | `tests/components/portal/test.esp32-c6-idf.yaml`: fictional vehicle (bus, device, logger nodes), values of all three entity kinds, a series, all four action kinds (template entities, nothing on a vehicle bus), `auth:`, `wifi: ap:` + `captive_portal`; cfg + cc green | cfg, cc |
+| PS-M4-02 | `tests/components/portal/test-asset.esp32-c6-idf.yaml` with `web_asset:` passes cfg + cc | cfg, cc |
 | PS-M4-03 | `docs/portal-user-guide.md`, README component list, `docs/HANDOVER.md` entry for open bench items exist | rev |
 
 ### M5 — bench
@@ -795,7 +795,7 @@ Tier legend: **py** pytest (schema/codegen/asset/tool), **host** `make -C tests/
 | PS-M6-06 | §5.3 precedence table, incl. `not_requested` (no parent upgrade, not in parent evidence, normal after first reading) | host |
 | PS-M6-07 | §4.6 `switch_off`: absent while off with `switched_off` and the action evidence, `{}` without an action, values still emitted, seq advances on a switch change | host, py |
 | PS-M6-08 | §5.6 v1.5 validator rules: each has a rejecting case; envelopes without `level` still pass | py |
-| PS-M6-09 | `tests/build/portal/test.esp32-c6-idf.yaml` carries every v1.5 key; cfg + cc green; static RAM before/after recorded in the PR | cfg, cc |
+| PS-M6-09 | `tests/components/portal/test.esp32-c6-idf.yaml` carries every v1.5 key; cfg + cc green; static RAM before/after recorded in the PR | cfg, cc |
 
 ---
 

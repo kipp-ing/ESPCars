@@ -21,7 +21,7 @@
 # -s board esp32dev -s variant esp32 -s pin_a_tx GPIO26 -s pin_a_rx GPIO25.
 #
 # BENCH ONLY: it transmits unconditionally, on ids chosen for identity rather
-# than for politeness. Never in tests/build/, an example, or a car config.
+# than for politeness. Never in tests/components/, an example, or a car config.
 substitutions:
   node_name: topo-live
   board: esp32-c6-devkitc-1

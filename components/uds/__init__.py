@@ -383,23 +383,27 @@ CATALOG_SCHEMA = cv.All(
     _validate_catalog,
 )
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(UdsHub),
-        cv.Required(CONF_ISOTP_ID): cv.use_id(IsoTpProtocol),
-        cv.Required(CONF_CATALOG): CATALOG_SCHEMA,
-        cv.Optional(CONF_ECU): cv.string_strict,
-        # Three failures is the same threshold isotp's own retries settle on: enough that one
-        # missed answer on a busy bus is not an outage, few enough that a real one shows up fast.
-        cv.Optional(CONF_MAX_CONSECUTIVE_FAILURES, default=3): cv.int_range(
-            min=1, max=255
-        ),
-        # Never widen this default (design §6). Everything that can change ECU state is behind it.
-        cv.Optional(CONF_ALLOW_ACTIVE_SERVICES, default=False): cv.boolean,
-        cv.Optional(CONF_ON_VALUE): automation.validate_automation(),
-        cv.Optional(CONF_ON_ERROR): automation.validate_automation(),
-    }
-).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(
+    cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(UdsHub),
+            cv.Required(CONF_ISOTP_ID): cv.use_id(IsoTpProtocol),
+            cv.Required(CONF_CATALOG): CATALOG_SCHEMA,
+            cv.Optional(CONF_ECU): cv.string_strict,
+            # Three failures is the same threshold isotp's own retries settle on: enough that one
+            # missed answer on a busy bus is not an outage, few enough that a real one shows up fast.
+            cv.Optional(CONF_MAX_CONSECUTIVE_FAILURES, default=3): cv.int_range(
+                min=1, max=255
+            ),
+            # Never widen this default (design §6). Everything that can change ECU state is behind it.
+            cv.Optional(CONF_ALLOW_ACTIVE_SERVICES, default=False): cv.boolean,
+            cv.Optional(CONF_ON_VALUE): automation.validate_automation(),
+            cv.Optional(CONF_ON_ERROR): automation.validate_automation(),
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+)
 
 
 # --- final validation ------------------------------------------------------------------------

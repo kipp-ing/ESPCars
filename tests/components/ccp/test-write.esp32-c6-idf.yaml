@@ -1,0 +1,3 @@
+# ESP32-C6 CCP write-enabled config wrapper.
+packages:
+  ccp: !include common_write.yaml

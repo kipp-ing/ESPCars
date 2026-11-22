@@ -28,13 +28,7 @@ jobs:
       - name: Run component schema tests
         run: python -m pytest tests/ -q
       - name: Validate build configs
-        run: |
-          set -e
-          for y in tests/build/*/test*.yaml; do
-            echo "::group::$y"
-            esphome config "$y" > /dev/null
-            echo "::endgroup::"
-          done
+        run: python script/test_build_components.py config
 
   host-tests:
     name: Host unit tests (freestanding cores)
@@ -57,47 +51,47 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - tests/build/can_gateway/test.esp32-c6-idf.yaml
-          - tests/build/can_gateway/test-monitor.esp32-c6-idf.yaml
+          - tests/components/can_gateway/test.esp32-c6-idf.yaml
+          - tests/components/can_gateway/test-monitor.esp32-c6-idf.yaml
           # Bridge with no diagnostics at all: the only config that compiles the
           # no-RX-taps branch and try_hw_filter_offload_. See common_bridge.yaml.
-          - tests/build/can_gateway/test-bridge.esp32-c6-idf.yaml
+          - tests/components/can_gateway/test-bridge.esp32-c6-idf.yaml
           # Classic ESP32: one TWAI controller, so this is the single-
           # controller code path (and the target of docs/commissioning-mr-purple.md).
-          - tests/build/can_gateway/test-monitor.esp32-idf.yaml
+          - tests/components/can_gateway/test-monitor.esp32-idf.yaml
           # Sniffer: `on_frame:` is the only observation subscriber, so it is the
           # only config where USE_CAN_GATEWAY_OBSERVE (and with it
           # CanGatewayFrameTrigger) can come from the trigger's own codegen.
           # See common_sniffer.yaml.
-          - tests/build/can_gateway/test-sniffer.esp32-c6-idf.yaml
+          - tests/components/can_gateway/test-sniffer.esp32-c6-idf.yaml
           # Tap-only: `log_tap:` is the ports' only receive consumer — no
           # routes, no on_frame, no decode entities. The shape no config
           # compiled while it silently never received (HANDOVER-guest-bms.md
           # §8). See common_taponly.yaml.
-          - tests/build/sd_logger/test-taponly.esp32-c6-idf.yaml
-          - tests/build/linbus/test.esp32-idf.yaml
-          - tests/build/linbus/test.esp32-c3-idf.yaml
-          - tests/build/linbus/test.esp32-c6-idf.yaml
-          - tests/build/isotp/test.esp32-c6-idf.yaml
+          - tests/components/sd_logger/test-taponly.esp32-c6-idf.yaml
+          - tests/components/linbus/test.esp32-idf.yaml
+          - tests/components/linbus/test.esp32-c3-idf.yaml
+          - tests/components/linbus/test.esp32-c6-idf.yaml
+          - tests/components/isotp/test.esp32-c6-idf.yaml
           # uds with `embed: true`: the whole decode path — catalog open, name
           # resolution, group scheduling, bit extraction, scale evaluation,
           # entity publishing — compiled with NOTHING flashed. This is the only
           # config CI can build without a device, which is why the second
           # catalog source exists at all (DESIGN-uds.md §2).
-          - tests/build/uds/test.esp32-c6-idf.yaml
+          - tests/components/uds/test.esp32-c6-idf.yaml
           # uds with a memory-mapped partition: the case that actually runs on
           # the bench, and the only one that compiles esp_partition_mmap() and
           # esp32.add_partition(). It also builds two hubs sharing one `diag`
           # partition, so it proves codegen requests the partition exactly once
           # — add_partition() refuses a duplicate name.
-          - tests/build/uds/test-partition.esp32-c6-idf.yaml
-          - tests/build/ccp/test.esp32-c6-idf.yaml
-          - tests/build/ccp/test-write.esp32-c6-idf.yaml
+          - tests/components/uds/test-partition.esp32-c6-idf.yaml
+          - tests/components/ccp/test.esp32-c6-idf.yaml
+          - tests/components/ccp/test-write.esp32-c6-idf.yaml
           # portal: minimal (no actions, no auth), full (all value kinds, series, four action
           # kinds on template entities, auth, AP + captive_portal), custom web_asset.
-          - tests/build/portal/test-minimal.esp32-c6-idf.yaml
-          - tests/build/portal/test.esp32-c6-idf.yaml
-          - tests/build/portal/test-asset.esp32-c6-idf.yaml
+          - tests/components/portal/test-minimal.esp32-c6-idf.yaml
+          - tests/components/portal/test.esp32-c6-idf.yaml
+          - tests/components/portal/test-asset.esp32-c6-idf.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -111,7 +105,7 @@ jobs:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ matrix.config }}-${{ hashFiles('requirements_test.txt') }}
       - name: Compile
-        run: esphome compile ${{ matrix.config }}
+        run: python script/test_build_components.py compile ${{ matrix.config }}
 
   clang-format:
     name: C++ formatting
@@ -169,7 +163,7 @@ jobs:
         run: |
           set -e
           python script/clang_tidy.py --list-targets | while IFS= read -r config; do
-            esphome compile "$config"
+            python script/test_build_components.py compile "$config"
           done
       - name: Check clang-tidy findings and report count tables
         run: python script/clang_tidy.py --strict

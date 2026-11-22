@@ -233,7 +233,7 @@ tests, build-yaml coverage, compile at least one affected target).
    `CASES[]` id from the schedule and clear its response slot. Without this, P4 is
    not repeatable on a permanent rig. Acceptance: P4 run twice back-to-back without
    reflashing, identical lap rate before/after.
-3. **`tests/build/isotp/test.esp32-idf.yaml` (new).** isotp today has only a C6
+3. **`tests/components/isotp/test.esp32-idf.yaml` (new).** isotp today has only a C6
    compile target, but the rig runs it on Purple (classic ESP32, `esp32dev`).
    Compile-gate the variant before any hardware flash.
 
@@ -290,7 +290,7 @@ The old ring configs and gate stay untouched and green until M5 replaces them.
 |---|---|---|
 | **M1** | Rewire per §2 (checklist: close Green JP20/JP22, verify 2×120 Ω per segment against the netlist, LIN daisy-chain, 12 V to Purple J4). New `rig-green/orange/purple.yaml` running the **ported ring only** — Purple LIN0 replaces Blue as relay, DUT already carries the `0x700`-drop rules, no sequencer yet. `bench-rig.yaml` + criteria-driven `verify.py`. | `verify.py --bench tests/hil/bench-rig.yaml` exit 0 on ring criteria; new baseline (laps/s, bus loads) recorded in the manifest header; legacy configs untouched. |
 | **M2** | STATUS/PHASE protocol, sequencer with **P0+P1 only**, LED overhaul (§5), `err_events` sensor (§6.1, own DoD). | Flash → rig self-starts → all-green LEDs with no host involvement; `verify.py` exit 0 on the structured verdict; fault drill: pull one CAN connector → FAIL + red blip + `verdict=FAIL`; reconnect + power-cycle → green again. |
-| **M3** | P2 (rules) + P3 (isotp), incl. `tests/build/isotp/test.esp32-idf.yaml`. | P0–P3 green. Negative test documented and run once: flash an Orange variant missing the patch rule → bench FAILs at P2 (the rig can see its own DUT misconfigured). |
+| **M3** | P2 (rules) + P3 (isotp), incl. `tests/components/isotp/test.esp32-idf.yaml`. | P0–P3 green. Negative test documented and run once: flash an Orange variant missing the patch rule → bench FAILs at P2 (the rig can see its own DUT misconfigured). |
 | **M4** | P4 (+ linbus teardown fix §6.2) + P5. | Full sequence green **twice consecutively without reflashing** (P4 repeatability); P5 off-window shows lap freeze + `disabled` climb + `observed` alive. |
 | **M5** | Cutover: `bench-rig.yaml` → `bench.yaml`, `flash.sh` defaults, `tests/hil/HIL.md` rewrite (topology, protocol, phase table, LED table, new baseline), `docs/HANDOVER.md` + `CLAUDE.md` bench sections, legacy `mr-green/blue/orange.yaml` marked legacy (kept for Blue-as-stub work). | From cold boot: `script/hil/flash.sh && .venv/bin/python script/hil/verify.py --seconds 60` exit 0. Docs merged. |
 

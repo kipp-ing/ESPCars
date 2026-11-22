@@ -267,8 +267,8 @@ def test_spec_exists_and_is_neutral() -> None:
 
 
 def test_our_own_files_carry_nothing_private() -> None:
-    """PS-G-02: tests/portal, tests/build/portal, script/portal_schema.py, tests/host/*portal*."""
-    roots = [Path(__file__).parent, REPO / "tests" / "build" / "portal"]
+    """PS-G-02: tests/portal, tests/components/portal, script/portal_schema.py, tests/host/*portal*."""
+    roots = [Path(__file__).parent, REPO / "tests" / "components" / "portal"]
     files = [
         p
         for r in roots
@@ -300,7 +300,7 @@ def test_our_own_files_carry_nothing_private() -> None:
 def test_every_portal_build_yaml_is_in_the_ci_compile_matrix() -> None:
     """PS-G-03."""
     ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
-    yamls = sorted((REPO / "tests" / "build" / "portal").glob("test*.yaml"))
+    yamls = sorted((REPO / "tests" / "components" / "portal").glob("test*.yaml"))
     assert len(yamls) >= 3
     for y in yamls:
         rel = y.relative_to(REPO).as_posix()
@@ -309,7 +309,7 @@ def test_every_portal_build_yaml_is_in_the_ci_compile_matrix() -> None:
 
 def test_build_yamls_transmit_on_no_bus() -> None:
     """PS-M4-01 / TX safety: the build configs contain no bus component at all."""
-    for y in (REPO / "tests" / "build" / "portal").glob("*.yaml"):
+    for y in (REPO / "tests" / "components" / "portal").glob("*.yaml"):
         text = y.read_text()
         for banned in (
             "can_gateway:",

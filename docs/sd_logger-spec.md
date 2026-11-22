@@ -15,7 +15,7 @@ the C6. So this is built from scratch, SPI-mode, on our own architecture.
 (SDSPI mount with the H2 settle delay, lock-guarded RAM ring, writer task at
 prio 6, batched `fsync`/rotation, the `sd_logger.log` action, and the VCC ADC
 monitor → emergency close of §7 Layer B). Schema tests (`tests/sd_logger/`,
-V1-V6/V8) and a build yaml (`tests/build/sd_logger/`) are green; the standalone
+V1-V6/V8) and a build yaml (`tests/components/sd_logger/`) are green; the standalone
 image and the Orange integration image both compile on the C6.
 
 **Update (2026-07-26): M0 is closed and M1 is proven on hardware.** The card is
@@ -810,7 +810,7 @@ eras apart on a card that holds both, without sniffing.
   | I1 | Every file the writer opens — the first after boot (a wake from deep sleep is a boot), every rotation, every file after a recovery remount — carries exactly one `#ident` line, directly after `#sdlog`. It does not depend on config: `id`, `mac`, `date`, `clock`, `build`, `elf` and `cfg` are always there (`-`/`none` when unknown). | host: `ident_*` golden lines; source test `tests/sd_logger/test_ident.py` (the header writer emits it unconditionally, right after `#sdlog`); HIL: `sdlog.py check` on a card after a boot, a rotation and a deep-sleep wake shows an `ident` line for every file |
   | I2 | Field order and spelling exactly as in the table; the untrusted strings (`id`, `project`) go through the F1e escape pass with `,`→`_`; an over-long line is cut with `~` like every other line and stays terminated. `mac` is the six-byte MAC-48 and equals `Local MAC`; `elf` has 16 digits. Both were wrong in the first field test (2026-10-11, ESP32-C6: `mac=20:6e:f1:ff:fe:0a` from the EUI-64, `elf=` 9 digits). | host: golden lines, escaping, truncation, `ident_i2_mac_is_the_six_byte_mac_48`, `ident_i2_elf_is_sixteen_digits_of_the_binary_digest`; source test: the MAC and digest sources (`test_ident.py`); HIL (with I1): `dump_config`'s `ident: mac=` equals the WiFi `Local MAC` |
   | I3 | `date`/`clock` are the header's `#clock` statement at file-open time, rounded down to whole seconds; `est` stays `est`. No statement → `date=-,clock=none`. | host: a golden line per basis; epoch, leap-day and year-end dates |
-  | I4 | Cheap: MAC, ELF digest, config hash, build time and project are captured once in `setup()`, the CID once per mount; the line is built without heap and without `snprintf`. | review; `esphome compile` of `tests/build/sd_logger/*` |
+  | I4 | Cheap: MAC, ELF digest, config hash, build time and project are captured once in `setup()`, the CID once per mount; the line is built without heap and without `snprintf`. | review; `script/test_build_components.py compile` of the sd_logger fixtures |
   | I5 | Readers: `parse_file` exposes it (`Report.idents`) and `sdlog.py check` prints it (`ident` line); a file without `#ident` (written before 2026-10-11) reads exactly as before; unknown keys are kept, not refused; a field without `=` is a malformed line. | `tests/sd_logger/test_sdlog_reader.py` |
 
 - **F2 — Rotation:** new file at `max_file_size` and at each boot. Filename =
@@ -1140,7 +1140,7 @@ recovery; V21 is likewise a warning.
 
 1. Schema tests in `tests/sd_logger/` — **accept and reject** paths for every
    Vxx in §8.
-2. A `tests/build/sd_logger/` yaml exercising every new key/action so CI runs
+2. A `tests/components/sd_logger/` yaml exercising every new key/action so CI runs
    `esphome config` + `esphome compile` on it (C6 target).
 3. `pytest` green + `esphome config` green on all build yamls before commit.
 4. C++ touched → `esphome compile` at least one C6 target locally.
@@ -1218,7 +1218,7 @@ recovery; V21 is likewise a warning.
      a `text_dropped_` counter surfacing as `#drop,…,text`.
   5. ✅ **Schema**: `can_ports[].label`, `sources:`, `esphome_logs:`; V13–V18 with
      accept and reject tests in `tests/sd_logger/` (48 new cases); every new key
-     exercised in both `tests/build/sd_logger/common*.yaml`. The action's
+     exercised in both `tests/components/sd_logger/common*.yaml`. The action's
      `source:` now also takes a declared label.
   6. ✅ **`script/sdlog.py`** — the counterpart reader: parse-check, report
      `#drop` markers apart, flag a missing `#close`, extract one type as a plain

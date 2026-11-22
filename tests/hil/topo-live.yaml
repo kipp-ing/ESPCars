@@ -42,7 +42,7 @@
 #     --device "$(.venv/bin/python script/hil/ports.py purple)"
 #
 # BENCH ONLY: it transmits unconditionally, on ids chosen for identity rather
-# than for politeness. Never in tests/build/, an example, or a car config.
+# than for politeness. Never in tests/components/, an example, or a car config.
 substitutions:
   node_name: mr-orange
   board: esp32-c6-devkitc-1

@@ -32,9 +32,14 @@ import tempfile
 
 import yaml
 
+try:
+    from . import test_build_components as component_tests
+except ImportError:
+    import test_build_components as component_tests
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGETS = tuple(
-    f"tests/build/{component}/test.{board}-idf.yaml"
+    f"tests/components/{component}/test.{board}-idf.yaml"
     for component, board in (
         ("linbus", "esp32"),
         ("isotp", "esp32-c6"),
@@ -91,22 +96,21 @@ def locate_database(target):
     from esphome.core import CORE
 
     CORE.reset()
-    CORE.config_path = ROOT / target
+    CORE.config_path = component_tests.compose(target, root=ROOT)
     if read_config({}) is None:
         raise RuntimeError(f"Invalid ESPHome config: {target}")
     database = Path(CORE.build_path) / "build/compile_commands.json"
     if not database.is_file():
         raise BuildUnavailable(
-            f"Missing {database}; run: esphome compile {target}", "missing"
+            f"Missing {database}; run: {component_tests.compile_command(target)}",
+            "missing",
         )
     return database
 
 
 def has_local_builds():
     """Cheap fresh-clone check, without importing ESPHome or compiling anything."""
-    return any(
-        (ROOT / "tests/build").glob("*/.esphome/build/*/build/compile_commands.json")
-    )
+    return any((ROOT / ".esphome/build").glob("*/build/compile_commands.json"))
 
 
 def expand_responses(tokens, directory, seen=()):
@@ -377,7 +381,8 @@ def check_build_freshness(source_root, components, target):
             )
     if problems:
         raise BuildUnavailable(
-            "; ".join([*problems, f"run: esphome compile {target}"]), "stale"
+            "; ".join([*problems, f"run: {component_tests.compile_command(target)}"]),
+            "stale",
         )
 
 
@@ -461,7 +466,7 @@ def print_counts(findings, components, errors, analyzed, targets, skipped):
     analyzed_components = {Path(target).parent.name for target in analyzed}
     skipped_components = {}
     for target, reason in skipped.items():
-        # tests/build/<component>/ identifies the component's dedicated targets.
+        # tests/components/<component>/ identifies the component's dedicated targets.
         # A dependency in another build does not replace their coverage.
         component = Path(target).parent.name
         if (
@@ -508,7 +513,7 @@ def main(argv=None):
         "targets",
         nargs="*",
         default=list(DEFAULT_TARGETS),
-        help="tests/build target YAMLs (default: seven component targets)",
+        help="tests/components fixture YAMLs (default: seven component targets)",
     )
     parser.add_argument("-j", "--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument(

@@ -253,7 +253,7 @@ def main(argv=None):
 
             if not has_local_builds():
                 counts[tool] = (
-                    "SKIPPED (no local compile_commands.json; run esphome compile)"
+                    "SKIPPED (no local compile_commands.json; run python script/test_build_components.py compile)"
                 )
                 print(f"SKIP [clang-tidy]: {counts[tool]}")
                 continue

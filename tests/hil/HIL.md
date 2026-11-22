@@ -106,7 +106,7 @@ senders on one id, and `verify.py` could not run at all while it was attached.
 The whole block moved rather than one board, so
 `base + node*2 + bus` still holds and an id still decodes by eye. The full slot
 map and the design constraints (why one id per (node,bus), why this range) are in
-`tests/hil/topology_rx.yaml`. **Bench only** — never in `tests/build/`, an
+`tests/hil/topology_rx.yaml`. **Bench only** — never in `tests/components/`, an
 example, or a car config: it transmits unconditionally on high-priority ids.
 
 ### Read it off every board at once

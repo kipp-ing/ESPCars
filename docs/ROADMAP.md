@@ -21,7 +21,7 @@ card recovery behind it.
 
 Missing: **no release/tag yet**, and per-component config reference docs exist
 only for `uds` ([`uds-user-guide.md`](uds-user-guide.md)) — for the rest you
-still have to read `tests/build/`.
+still have to read `tests/components/`.
 
 The bug picture is in [`HANDOVER.md`](HANDOVER.md): §1 is what is open, §3 the
 `can_gateway` ledger. Issue #1's fix is confirmed on the bench but its bus-off
@@ -59,7 +59,7 @@ findings are closed except for one decision and two small gaps.
   `verify.py` green → tag. Switch README to recommend
   `github://kipp-ing/ESPCars@v0.1` pinning so users don't silently track main.
 - [~] **Config reference per component** (`docs/<name>.md`): all keys, actions,
-  triggers — today you have to read `tests/build/` for that. Done for `uds`
+  triggers — today you have to read `tests/components/` for that. Done for `uds`
   ([`uds-user-guide.md`](uds-user-guide.md)), `sd_logger`
   ([`sd_logger-user-guide.md`](sd_logger-user-guide.md)), `can_gateway`
   ([`can_gateway-user-guide.md`](can_gateway-user-guide.md)) and `linbus`

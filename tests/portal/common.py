@@ -25,7 +25,7 @@ HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures"
 REPO = HERE.parent.parent
 COMPONENT = REPO / "components" / "portal"
-BUILD_DIR = REPO / "tests" / "build" / "portal"
+BUILD_DIR = REPO / "tests" / "components" / "portal"
 
 
 class _ExplicitNull:

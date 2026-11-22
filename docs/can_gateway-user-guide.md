@@ -1,5 +1,8 @@
 # Using `can_gateway` — a CAN observer, decoder and gateway in an ESPHome project
 
+Supported platform: **ESP32 with ESP-IDF only**. Arduino and non-ESP32
+targets are rejected during config validation. TWAI-capable variants only; the ESP32-C5 is rejected (V27) because its TWAI-FD HAL does not meet the slot tracker contract.
+
 A practical guide: what the component does, how a project is actually put
 together, and the end-to-end workflow from a wired-up transceiver to decoded
 entities and (if you need it) a bridged bus. This document only covers the
@@ -95,7 +98,7 @@ sensor:
 `rx_pin`/`tx_pin`/`bit_rate` are the only required port keys. One port with
 no `routes:` **cannot forward anything** — there's no second port to send
 to — which makes it the safe default shape to start a bus you don't fully
-understand yet: full sub-component test (`tests/build/can_gateway/
+understand yet: full sub-component test (`tests/components/can_gateway/
 common_monitor.yaml`) even calls `can_gateway.send` from this exact shape,
 because a single-bus node is a legitimate read-and-write node, just never a
 bridge. Add a second port and a `routes:` block only once you actually need
@@ -229,7 +232,7 @@ would be nothing for `set_patch` to target.
 
 **Bridging needs two ports on a chip with two on-chip TWAI controllers**
 (C6, P4 — §5); declaring `routes:` on a chip with only one controller, or
-on the ESP32-C5 at all, fails at `esphome config` (§7). `tests/build/
+on the ESP32-C5 at all, fails at `esphome config` (§7). `tests/components/
 can_gateway/common_bridge.yaml` is the minimal always-on two-port bridge —
 deliberately stripped of every diagnostic surface (no `statistics:`, no
 decode entity, no switch) to prove the plain forwarding path compiles clean
@@ -729,12 +732,12 @@ and the log.
   signals come out in the byte form when byte-aligned and in the bit-level
   `byte_order: big` form otherwise; only >32-bit and out-of-frame signals are
   refused. `tests/can_gateway/test_dbc2yaml.py` pins the SNA and Motorola cases.
-- `tests/build/can_gateway/common.yaml` — full-feature worked example:
+- `tests/components/can_gateway/common.yaml` — full-feature worked example:
   routes, cyclic sends, all four decode platforms, statistics, `log_tap`,
   runtime patch, the switch.
-- `tests/build/can_gateway/common_bridge.yaml` — minimal always-on two-port
+- `tests/components/can_gateway/common_bridge.yaml` — minimal always-on two-port
   bridge, diagnostics-free.
-- `tests/build/can_gateway/common_monitor.yaml` /
+- `tests/components/can_gateway/common_monitor.yaml` /
   `common_sniffer.yaml` — single-bus node shapes: decode entities, and a raw
   `on_frame:` sniffer.
 - `tests/hil/mr-orange.yaml` — a real board: `packages:` split, two-port

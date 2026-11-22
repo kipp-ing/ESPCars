@@ -1,0 +1,3 @@
+# ESP32-C6 CCP config wrapper.
+packages:
+  ccp: !include common.yaml

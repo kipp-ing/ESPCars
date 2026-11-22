@@ -1,0 +1,2 @@
+packages:
+  portal: !include common_minimal.yaml

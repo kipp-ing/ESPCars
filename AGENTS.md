@@ -19,8 +19,8 @@ per branch and per PR, in the order listed there.
   the plan: what could differ, and how P9 checks it. It is merged after
   review; the bench check happens once, in P9.
 - **Gates you can run:** `script/check.sh` (pytest, host C++ tests, clang-format,
-  `esphome config` on all build YAMLs) and `esphome compile` on the affected
-  `tests/build/` targets. CI runs the full compile matrix. `script/check.sh`
+  `esphome config` on all build YAMLs) and `script/test_build_components.py compile` on the affected
+  `tests/components/` fixtures. CI runs the full compile matrix. `script/check.sh`
   must pass before every commit.
 - Ruff, Ruff format, pyupgrade, yamllint, EOF and trailing-whitespace findings now block both `script/check.sh` and CI.
 - **`gateway_core.h` and other ISR or lock-free code:** change it only together

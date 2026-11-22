@@ -52,7 +52,7 @@ def test_hook_revisions_match_shared_pins():
         "tests/portal/fixtures/envelopes/basic.json",
         "tests/portal/page/healthy.json",
         "components/portal/index.html",
-        "tests/build/portal/custom_page.html",
+        "tests/components/portal/custom_page.html",
     ],
 )
 def test_byte_exact_files_excluded(name):

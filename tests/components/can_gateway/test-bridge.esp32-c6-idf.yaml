@@ -1,0 +1,8 @@
+substitutions:
+  bridge_a_tx_pin: GPIO2
+  bridge_a_rx_pin: GPIO3
+  bridge_b_tx_pin: GPIO10
+  bridge_b_rx_pin: GPIO11
+
+packages:
+  can_gateway: !include common_bridge.yaml

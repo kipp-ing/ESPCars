@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-norecursedirs = ["tests/build"]
+norecursedirs = ["tests/components"]
 
 # Adapted from esphome/esphome dev @ 03eebae7b6e4cc81058f36a00a7f8c0c98eba341.
 [tool.ruff]

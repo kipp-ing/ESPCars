@@ -9,9 +9,14 @@ changed in the move.
 - `tests/<name>/` — pytest schema/codegen suites (`tests/conftest.py` maps
   `esphome.components.<name>` onto `components/`, so suites written in-tree run
   unmodified)
-- `tests/build/<name>/` — complete YAML configs that must `esphome config` and
-  `esphome compile`; `common*.yaml` holds the feature-exercising config,
-  `test.<target>.yaml` wraps it with board/framework/external_components
+- `tests/components/<name>/` — component fixture fragments: `common*.yaml`
+  packages, `test[-variant].<target>-idf.yaml` for compilation, and
+  `validate[-variant].<target>-idf.yaml` for config-only checks.
+- `tests/test_build_components/` — shared platform bases. Run fixtures through
+  `script/test_build_components.py`; it composes the base and fixture with package
+  vars into `.esphome/test_build_components/`, using a unique node name and
+  `.esphome/build/<node>/` for each config. `config` selects all fixtures;
+  `compile` (including `--only-generate`) selects only compile fixtures.
 - `tests/host/` — C++ unit tests for `can_gateway/gateway_core.h`, which is
   ESPHome- and IDF-free precisely so the code that runs in the RX ISR also runs
   on the host. Plain `make`, no CMake, no test framework (`harness.h` is it),
@@ -27,8 +32,8 @@ changed in the move.
 script/check.sh                                      # pytest + clang-format + config
 .venv/bin/python -m pytest tests/ -q                 # fast (<1s), run always
 make -C tests/host                                   # host C++ tests (~10 s)
-.venv/bin/esphome config tests/build/<c>/<t>.yaml    # fast, run always
-.venv/bin/esphome compile tests/build/<c>/<t>.yaml   # minutes, run when C++ changed
+.venv/bin/python script/test_build_components.py config tests/components/<c>/<t>.yaml    # fast, run always
+.venv/bin/python script/test_build_components.py compile tests/components/<c>/<t>.yaml   # minutes, run when C++ changed
 ```
 
 `make -C tests/host FILTER=<substring>` runs a subset; `SAN=` drops the
@@ -39,7 +44,7 @@ sanitizers. If `.venv` is missing:
 
 1. Behavior changes ship with schema tests in `tests/<component>/` (validation
    acceptance AND rejection paths).
-2. New config keys/actions must also appear in a `tests/build/` yaml so CI
+2. New config keys/actions must also appear in a `tests/components/` yaml so CI
    compiles them.
 3. `pytest` green and `esphome config` green on all build yamls before commit.
 4. C++ touched → `esphome compile` at least one affected target locally.
@@ -119,7 +124,7 @@ sanitizers. If `.venv` is missing:
 - A shed forward still gets received and tapped, so observation, snapshot and
   bus load survive a shed — except in a build with no diagnostics at all, where
   `CAN_GATEWAY_HAS_RX_TAPS` compiles the whole tap path away. Keep
-  `tests/build/can_gateway/common_bridge.yaml` diagnostics-free; it is the only
+  `tests/components/can_gateway/common_bridge.yaml` diagnostics-free; it is the only
   config compiling that branch.
 
 ## Provenance
