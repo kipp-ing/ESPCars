@@ -1,4 +1,5 @@
 #include "can_gateway.h"
+#include "idle_notify.h"
 
 #ifdef USE_ESP32
 
@@ -191,7 +192,20 @@ bool GatewayPort::start_(GatewayRoute *route_out, const std::atomic<bool> *gatew
   // Note: flags.enable_loopback deliberately NOT exposed — the ESP32-C6
   // TWAI core has no loopback mode bit (twai_ll_set_mode ignores it).
 
-  if (twai_new_node_onchip(&config, &this->node_) != ESP_OK) {
+#ifdef CAN_GATEWAY_IDLE_NOTIFY_ACTIVE
+  if (!idle_notify_begin(this->index_)) {
+    ESP_LOGE(TAG, "Port %u: idle-event capture busy", this->index_);
+    return false;
+  }
+#endif
+  esp_err_t allocation = twai_new_node_onchip(&config, &this->node_);
+#ifdef CAN_GATEWAY_IDLE_NOTIFY_ACTIVE
+  if (!idle_notify_end(allocation == ESP_OK)) {
+    ESP_LOGE(TAG, "Port %u: idle-event capture failed; refusing to enable", this->index_);
+    return false;
+  }
+#endif
+  if (allocation != ESP_OK) {
     ESP_LOGE(TAG, "Port %u: controller allocation failed", this->index_);
     return false;
   }
@@ -224,30 +238,37 @@ bool GatewayPort::start_(GatewayRoute *route_out, const std::atomic<bool> *gatew
 }
 
 void GatewayPort::try_hw_filter_offload_(const GatewayRoute *route) {
-  // A single accept rule + default drop + no RTR constraint collapses onto
-  // the C6's one hardware mask filter; everything else keeps accept-all and
-  // the software table decides. Forwarding behavior is identical either way
-  // (the rule still runs in software for patching), but diagnostics are not:
-  // frames the hardware rejects never reach the RX ISR, so they would vanish
-  // from the filtered counter, the bus statistics, and the last_frame
-  // snapshot. The offload therefore only engages when no such consumer
-  // exists for this port.
+  // Rejected frames never reach software; every consumer requiring all RX
+  // frames must keep accept-all hardware. First-match/drop/RTR/patch decisions
+  // always remain in the software table.
+  this->hw_filter_reason_ = "compiled statistics";
 #ifndef USE_CAN_GATEWAY_STATS
-#ifdef USE_CAN_GATEWAY_SNAPSHOT
-  if (this->snapshot_ring_ != nullptr)
-    return;
+  this->hw_filter_reason_ = "active RX consumer";
+#ifdef CAN_GATEWAY_HAS_RX_TAPS
+  if (this->rx_taps_active_())
+    return;  // Includes direct ISR hooks, even without observation entities.
 #endif
-  if (route == nullptr || !route->table_.default_drop || route->rules_.size() != 1 || route->observed_)
+  this->hw_filter_reason_ = "no route";
+  if (route == nullptr)
     return;
-  const RuleEntry &rule = route->rules_[0];
-  if (rule.is_drop() || (rule.flags & RULE_FLAG_CHECK_RTR) != 0)
+  this->hw_filter_reason_ = "observed route";
+  if (route->observed_)
     return;
-
+#ifdef CAN_GATEWAY_TEST_DISABLE_HW_FILTER
+  this->hw_filter_reason_ = "test disabled";
+  return;
+#else
+  AllowlistFilter derived;
+  if (!derive_allowlist_filter(route->table_, derived, this->hw_filter_reason_))
+    return;
   twai_mask_filter_config_t filter{};
-  filter.id = rule.match_id;
-  filter.mask = rule.match_mask;
-  filter.is_ext = (rule.flags & RULE_FLAG_EXTENDED) != 0;
+  filter.id = derived.id;
+  filter.mask = derived.mask;
+  filter.is_ext = derived.extended;
   this->hw_filter_engaged_ = twai_node_config_mask_filter(this->node_, 0, &filter) == ESP_OK;
+  if (!this->hw_filter_engaged_)
+    this->hw_filter_reason_ = "driver rejected filter";
+#endif
 #else
   (void) route;
 #endif
@@ -341,17 +362,39 @@ bool GatewayPort::inject(uint32_t can_id, bool extended, bool rtr, const uint8_t
       }
     }
   }
-  // A failed hand-off logs a throttled warning and counts nothing.
+  count(this->counters_.inject_refused);
+#ifdef CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS
   uint32_t now = millis();
   uint32_t last_warn = this->last_inject_warn_ms_.load(std::memory_order_relaxed);
   if (now - last_warn >= 1000 &&
       this->last_inject_warn_ms_.compare_exchange_strong(last_warn, now, std::memory_order_relaxed)) {
     ESP_LOGW(TAG, "Port %u: inject failed (%s)", this->index_, fail_reason);
   }
+#else
+  // Close a stale episode even if no loop pass ran during its quiet interval.
+  portENTER_CRITICAL(&this->mux_);
+  uint32_t now = millis();
+  bool stopped = this->inject_refusal_log_.stop(now);
+  uint32_t stopped_count = this->inject_refusal_log_.count();
+  bool started = this->inject_refusal_log_.refuse(now);
+  portEXIT_CRITICAL(&this->mux_);
+  if (stopped)
+    ESP_LOGW(TAG, "Port %u: inject refusals stopped (%" PRIu32 " refused)", this->index_, stopped_count);
+  if (started)
+    ESP_LOGW(TAG, "Port %u: inject refusals started (%s, 1 refused)", this->index_, fail_reason);
+#endif
   return false;
 }
 
 void GatewayPort::loop_(uint32_t now_ms) {
+#ifndef CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS
+  portENTER_CRITICAL(&this->mux_);
+  bool stopped = this->inject_refusal_log_.stop(millis());
+  uint32_t stopped_count = this->inject_refusal_log_.count();
+  portEXIT_CRITICAL(&this->mux_);
+  if (stopped)
+    ESP_LOGW(TAG, "Port %u: inject refusals stopped (%" PRIu32 " refused)", this->index_, stopped_count);
+#endif
   uint8_t state = this->state_.load(std::memory_order_relaxed);
   if (state != this->last_loop_state_) {
     bool was_bus_off = this->last_loop_state_ == static_cast<uint8_t>(TWAI_ERROR_BUS_OFF);
@@ -514,11 +557,12 @@ void GatewayPort::log_statistics_(uint32_t now_ms) {
       this->read_error_counters(tec, rec);
       ESP_LOGI(TAG,
                "Port %u stats: bus load %.1f%% (rx %.1f%% / tx %.1f%%), bus_err %" PRIu32 ", err_events %" PRIu32
-               ", tx_fail %" PRIu32 ", TEC %u, REC %u",
+               ", tx_fail %" PRIu32 ", inject_refused %" PRIu32 ", TEC %u, REC %u",
                this->index_, rx_load + tx_load, rx_load, tx_load,
                this->counters_.bus_err.load(std::memory_order_relaxed),
                this->counters_.err_events.load(std::memory_order_relaxed),
-               this->counters_.tx_fail.load(std::memory_order_relaxed), tec, rec);
+               this->counters_.tx_fail.load(std::memory_order_relaxed),
+               this->counters_.inject_refused.load(std::memory_order_relaxed), tec, rec);
     }
   }
   this->log_seeded_ = true;
@@ -963,9 +1007,12 @@ void CanGateway::dump_config() {
                   "    TX pin: GPIO%d, RX pin: GPIO%d\n"
                   "    Bit rate: %" PRIu32 " bit/s\n"
                   "    TX queue depth: %u\n"
-                  "    Hardware filter offload: %s",
+                  "    Hardware filter offload: %s (%s)",
                   port->index_, port->index_, port->tx_pin_, port->rx_pin_, port->bit_rate_, port->tx_queue_depth_,
-                  YESNO(port->hw_filter_engaged_));
+                  YESNO(port->hw_filter_engaged_), port->hw_filter_reason_);
+#ifdef CAN_GATEWAY_IDLE_NOTIFY_ACTIVE
+    ESP_LOGCONFIG(TAG, "    Suppressed TX idle notifications: %" PRIu32, idle_notify_suppressed(port->index_));
+#endif
     if (port->listen_only_)
       ESP_LOGCONFIG(TAG, "    Listen only: YES");
     if (port->self_test_)

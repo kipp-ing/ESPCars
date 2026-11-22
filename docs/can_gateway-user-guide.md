@@ -745,3 +745,49 @@ and the log.
 - `docs/CONVENTIONS.md` §"Known sharp edges" and `docs/HANDOVER.md` §3 — the
   full Issue #1–#4 findings ledger (bus-off/shed-path fix, the cyclic-send
   floor, the C5 HAL contract, and more), with bench verdicts.
+
+### Driver optimizations (D-101)
+
+Three optimizations are enabled automatically, with no new YAML options:
+
+- On single-core ESP-IDF 5.5.x targets (C6, C3, H2, S2), suppress only the
+  gateway-owned TWAI TX-idle event's BIT0 deferred callback. Other groups,
+  callbacks and bit values pass through. The gateway does not use
+  `twai_node_transmit_wait_all_done`; **calling that API on these gateway-owned
+  nodes is incompatible with suppression**. A changed event allocation contract
+  prevents the port from enabling. Other targets/frameworks get no wrap flags.
+  The suppressed count appears in `dump_config` and is available through
+  `idle_notify_suppressed(port_index)` for runtime diagnostics.
+- Under default-drop, derive one conservative hardware mask covering all
+  same-format accepting rules. Software still applies first-match drops, RTR
+  conditions and patches. Mixed standard/extended accepts, all-drop and
+  accept-all masks keep offload disengaged. Compiled statistics, active
+  observation, log taps, snapshots and direct RX hooks also disengage it so
+  every required frame remains visible. `dump_config` reports engagement and
+  its reason. RX consumers must register before gateway setup.
+- Count every inject refusal in `PortCounters::inject_refused` and the existing
+  statistics log. Emit one WARN when an episode starts, then one with its total
+  when a full second passes without refusals. Successful sends between refusals
+  do not reset an episode. Sustained overload therefore costs two lines total.
+
+Measured on an ESP32-C6 two-port gateway (both TWAIs on one wire, 3 boots per
+side, free CPU from a calibrated idle-loop meter that includes ISR time):
+
+| Change | Load | Result |
+|---|---|---|
+| TX-idle suppression | 1,000 frames/s per direction | Tmr_Svc 12.1% → 0%, free CPU 76.7% → 82.0% (+5.3 pp), delivery identical |
+| Hardware filter | wire saturated, statistics and RX hooks off | free CPU 67.4% → 71.6% (+4.2 pp); CAN ISRs −25%, CAN ISR time −17% |
+| Episode warnings | wire saturated, injects refused | 8 instead of 70 warning lines per 30 s; the periodic ~0.5 ms warning pass is gone |
+
+Delivery, loss and latency were unchanged in every pair. With statistics or RX
+hooks compiled in, the filter stays off and the saturated free CPU is unchanged.
+Evidence is maintained in the esp_timing project's D-101 studies; the numbers
+are workload-specific.
+
+Linked cost (C6 IDF bridge build, each feature off → on): TX-idle suppression
++586 B flash / +98 B static RAM, hardware filter +468 B / 0 B, episode warnings
++276 B / +16 B; all three together on the C6 gateway fixture +980 B / +132 B.
+Classic ESP32 builds get no wraps and link unchanged. `script/d101_compile_matrix.sh`
+reproduces the numbers; its `CAN_GATEWAY_TEST_DISABLE_IDLE_NOTIFY`,
+`CAN_GATEWAY_TEST_DISABLE_HW_FILTER` and `CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS`
+defines are measurement controls, not component configuration.

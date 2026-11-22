@@ -48,6 +48,8 @@ from esphome.const import (
     CONF_TRIGGER_ID,
     CONF_TX_PIN,
     CONF_VALUE,
+    KEY_CORE,
+    KEY_FRAMEWORK_VERSION,
 )
 from esphome.core import CORE, ID
 
@@ -1354,7 +1356,34 @@ def _declared_mask(modify) -> int:
     return declared
 
 
+def idle_notify_build_flags() -> tuple[str, ...]:
+    """Wrap only IDF 5.5 single-core targets; no symbols added elsewhere."""
+    if CORE.target_framework != "esp-idf":
+        return ()
+    version = CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION]
+    if not cv.Version(5, 5, 0) <= version < cv.Version(5, 6, 0):
+        return ()
+    if get_esp32_variant() not in {
+        VARIANT_ESP32S2,
+        VARIANT_ESP32C3,
+        VARIANT_ESP32C6,
+        VARIANT_ESP32H2,
+    }:
+        return ()
+    # -u keeps idle_notify.o in the link: it lives in an archive, and when nothing else references it the
+    # TWAI library's __wrap_ references would stay undefined (seen with the test-disable build).
+    return (
+        "-DCAN_GATEWAY_IDLE_NOTIFY",
+        "-Wl,--wrap=xEventGroupCreateWithCaps",
+        "-Wl,--wrap=xTimerPendFunctionCallFromISR",
+        "-Wl,-u,__wrap_xEventGroupCreateWithCaps",
+        "-Wl,-u,__wrap_xTimerPendFunctionCallFromISR",
+    )
+
+
 async def to_code(config):
+    for flag in idle_notify_build_flags():
+        cg.add_build_flag(flag)
     # The modern node-based TWAI driver lives in its own IDF component.
     include_builtin_idf_component("esp_driver_twai")
     # Keep the data plane servicing while the flash cache is disabled
