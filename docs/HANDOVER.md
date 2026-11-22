@@ -155,6 +155,11 @@ with the extended config (its 3 extra template sensors and 4 nodes, not the feat
 board: a limit crossing advances `seq` and shows `limit` evidence; `switch_off` node goes absent
 when its switch is turned off over the portal; heap with the new page open (largest block ± 1 KB).
 
+**1.9 ESPHome upstream quality — long-running, not urgent.** The plan
+[`PLAN-esphome-quality.md`](PLAN-esphome-quality.md) (decided 2026-11-22) is
+mostly for Codex, one phase per PR. A PR titled `[bench-pending]` waits for
+`verify.py` exit 0. P0 (esphome 2026.11.0, `AGENTS.md`) is in.
+
 ## 2. Where the detail lives
 
 | document | what it carries |
@@ -166,6 +171,7 @@ when its switch is turned off over the portal; heap with the new page open (larg
 | [`DESIGN-uds.md`](DESIGN-uds.md), [`uds-catalog-format.md`](uds-catalog-format.md), [`uds-user-guide.md`](uds-user-guide.md) | `uds` design rationale, the normative `.dcat` format, and the how-to |
 | [`can_gateway-user-guide.md`](can_gateway-user-guide.md), [`linbus-user-guide.md`](linbus-user-guide.md) | the how-to for `can_gateway` (bridging, filters, cyclic sends, bus-off recovery) and `linbus` (master/slave/listener, checksum handling, self-test) — no separate design docs for either, the component sources carry the "why" |
 | [`sd_logger-spec.md`](sd_logger-spec.md), [`sdlog-collection-design.md`](sdlog-collection-design.md), [`sdlog-phase-b-wire-contract.md`](sdlog-phase-b-wire-contract.md), [`sd_logger-user-guide.md`](sd_logger-user-guide.md) | the recorder: component spec, collection design, the normative wire contract, and the how-to |
+| [`PLAN-esphome-quality.md`](PLAN-esphome-quality.md), [`../AGENTS.md`](../AGENTS.md) | the road to upstream quality (phases P0–P8, what counts as behavior-neutral) and the agent guide for Codex |
 | [`commissioning-mr-purple.md`](commissioning-mr-purple.md), [`hil-rig-spec.md`](hil-rig-spec.md), [`bench-hmi-wiring.md`](bench-hmi-wiring.md), [`TODO-bench-hmi.md`](TODO-bench-hmi.md) | the second platform, the rig, and the board-level SW/HW items |
 
 ## 3. The `can_gateway` findings ledger
