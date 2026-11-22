@@ -169,7 +169,7 @@ class Portal : public Component, public AsyncWebHandler {
   void mark_published_(size_t index);
   void update_seq_locked_();
   bool copy_snapshot_(core::Snapshot *out);
-  static bool flush_chunk_(void *ctx, const char *data, size_t size);
+  static bool flush_chunk(void *ctx, const char *data, size_t size);
 
   bool authorized_(AsyncWebServerRequest *request);
   void send_unauthorized_(httpd_req_t *req);

@@ -449,8 +449,8 @@ class ChunkWriter {
           if (!this->literal("\\t"))
             return false;
         } else if (c < 0x20) {
-          static const char hex[] = "0123456789abcdef";
-          const char escaped[6] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 0x0F]};
+          static const char HEX[] = "0123456789abcdef";
+          const char escaped[6] = {'\\', 'u', '0', '0', HEX[c >> 4], HEX[c & 0x0F]};
           if (!this->write(escaped, 6))
             return false;
         } else {
@@ -749,10 +749,11 @@ inline NodeReason describe_node_reason(const Snapshot &s, const Resolved &r, siz
   bool any_stale = false;
   for (uint16_t k = 0; k < node.value_count; k++) {
     const ValueVerdict verdict = classify_value(s.values[node.value_first + k], node.budget_ms, node.budget_known);
-    if (verdict.classification == Classification::SNA)
+    if (verdict.classification == Classification::SNA) {
       any_unavailable = true;
-    else if (verdict.state == State::STALE)
+    } else if (verdict.state == State::STALE) {
       any_stale = true;
+    }
   }
   if (any_unavailable)
     return {"entities_unavailable", nullptr, false};
@@ -794,10 +795,11 @@ inline void resolve(const Snapshot &s, Resolved &out) {
       if (v.age_known)
         any_known_age = true;
       const detail::ValueVerdict verdict = detail::classify_value(v, node.budget_ms, node.budget_known);
-      if (verdict.classification == Classification::SNA)
+      if (verdict.classification == Classification::SNA) {
         any_unavailable = true;
-      else if (verdict.state == State::STALE)
+      } else if (verdict.state == State::STALE) {
         any_stale = true;
+      }
     }
 
     State state;
@@ -950,8 +952,7 @@ inline bool write_value(ChunkWriter &w, const Snapshot &s, const ValueSample &v,
     if (!w.number_float(v.number, v.decimals))
       return false;
   }
-  if (!w.literal(",\"raw_hex\":null,\"classification\":") ||
-      !w.json_string(classification_name(verdict.classification)))
+  if (!w.literal(R"(,"raw_hex":null,"classification":)") || !w.json_string(classification_name(verdict.classification)))
     return false;
   if (!w.literal(",\"state\":") || !w.json_string(state_name(verdict.state)))
     return false;
@@ -967,7 +968,7 @@ inline bool write_value(ChunkWriter &w, const Snapshot &s, const ValueSample &v,
       return false;
     if (!(verdict.detail != nullptr ? w.json_string(verdict.detail) : w.literal("null")))
       return false;
-    if (!w.literal(",\"since_ms\":null,\"evidence\":{}}"))
+    if (!w.literal(R"(,"since_ms":null,"evidence":{}})"))
       return false;
   }
   // §5.3: `level` after the v2 keys; null without limits or without a reading.
@@ -987,7 +988,7 @@ inline bool write_node_why(ChunkWriter &w, const Snapshot &s, const Resolved &r,
     return false;
   if (!(reason.detail != nullptr ? w.json_string(reason.detail) : w.literal("null")))
     return false;
-  if (!w.literal(",\"since_ms\":null,\"evidence\":{"))
+  if (!w.literal(R"(,"since_ms":null,"evidence":{)"))
     return false;
   bool wrote_evidence = false;
   // A pre-rendered fragment for evidence-gated codes, authored beside the provider that backs
@@ -1009,10 +1010,10 @@ inline bool write_node_why(ChunkWriter &w, const Snapshot &s, const Resolved &r,
     if (!(v.is_bool ? w.literal(v.number != 0.0f ? "true" : "false") : w.number_float(v.number, v.decimals)))
       return false;
     if (hit.which == 2) {
-      if (!w.literal(",\"bound\":{\"when\":") || !w.literal(hit.when ? "true}" : "false}"))
+      if (!w.literal(R"(,"bound":{"when":)") || !w.literal(hit.when ? "true}" : "false}"))
         return false;
     } else {
-      if (!w.literal(hit.which == 0 ? ",\"bound\":{\"below\":" : ",\"bound\":{\"above\":"))
+      if (!w.literal(hit.which == 0 ? R"(,"bound":{"below":)" : R"(,"bound":{"above":)"))
         return false;
       if (!w.number_float(hit.bound, shortest_decimals(hit.bound)) || !w.literal("}"))
         return false;
@@ -1078,7 +1079,7 @@ inline bool write_provenance(ChunkWriter &w, const Snapshot &s, const Resolved &
   if (is_skeleton_node(s, index))
     return w.literal("null");
   const NodeDef &node = s.nodes[index];
-  if (!w.literal("{\"origin\":\"local\",\"board\":"))
+  if (!w.literal(R"({"origin":"local","board":)"))
     return false;
   if (!(s.identity.board != nullptr ? w.json_string(s.identity.board) : w.literal("null")))
     return false;
@@ -1171,7 +1172,7 @@ inline bool write_series_with(ChunkWriter &w, const SeriesDef &def, SeriesElemen
   }
   // class is always an explicit string, never null (§1.3): a single-pass emitter cannot
   // know "every element is real" before it has written the values.
-  if (!w.literal("],\"class\":\""))
+  if (!w.literal(R"(],"class":")"))
     return false;
   for (uint16_t i = 0; i < count; i++) {
     if (!w.write(&resolved[i].cls, 1))
@@ -1247,9 +1248,9 @@ inline bool write_action_value(ChunkWriter &w, const ActionValue &v, int8_t deci
 inline bool write_action_result(ChunkWriter &w, const ActionResult &r, int8_t decimals) {
   if (!w.literal("{\"state\":") || !w.json_string(action_state_name(r.state)))
     return false;
-  if (!w.literal(",\"why\":{\"code\":") || !w.json_string(action_code_name(r.code)))
+  if (!w.literal(R"(,"why":{"code":)") || !w.json_string(action_code_name(r.code)))
     return false;
-  if (!w.literal(",\"detail\":null,\"since_ms\":null,\"evidence\":{}},\"age_ms\":") || !w.number_u32(r.age_ms))
+  if (!w.literal(R"(,"detail":null,"since_ms":null,"evidence":{}},"age_ms":)") || !w.number_u32(r.age_ms))
     return false;
   if (!w.literal(",\"value\":") || !write_action_value(w, r.value, decimals))
     return false;
@@ -1266,19 +1267,19 @@ inline bool write_action(ChunkWriter &w, const NodeDef &node, const ActionDef &d
     return false;
   if (!w.literal(",\"label\":") || !w.json_string(def.label))
     return false;
-  if (!w.literal(",\"method\":\"POST\",\"path\":\"/api/v1/actions/") || !w.write(node.id, std::strlen(node.id)))
+  if (!w.literal(R"(,"method":"POST","path":"/api/v1/actions/)") || !w.write(node.id, std::strlen(node.id)))
     return false;
   if (!w.literal("/") || !w.write(def.key, std::strlen(def.key)))
     return false;
   const bool enabled = a.enabled || def.control == Control::SWITCH || def.control == Control::BUTTON;
-  if (!w.literal("\",\"enabled\":") || !w.literal(enabled ? "true" : "false"))
+  if (!w.literal(R"(","enabled":)") || !w.literal(enabled ? "true" : "false"))
     return false;
   if (!w.literal(",\"why\":"))
     return false;
   if (enabled) {
     if (!w.literal("null"))
       return false;
-  } else if (!w.literal("{\"code\":\"entity_unavailable\",\"detail\":null,\"since_ms\":null,\"evidence\":{}}")) {
+  } else if (!w.literal(R"({"code":"entity_unavailable","detail":null,"since_ms":null,"evidence":{}})")) {
     return false;
   }
   if (!w.literal(",\"body\":"))
@@ -1286,13 +1287,13 @@ inline bool write_action(ChunkWriter &w, const NodeDef &node, const ActionDef &d
   const char *body = "null";
   switch (def.control) {
     case Control::SWITCH:
-      body = "{\"value\":\"bool\"}";
+      body = R"({"value":"bool"})";
       break;
     case Control::SELECT:
-      body = "{\"value\":\"string\"}";
+      body = R"({"value":"string"})";
       break;
     case Control::NUMBER:
-      body = "{\"value\":\"number\"}";
+      body = R"({"value":"number"})";
       break;
     case Control::BUTTON:
       break;
@@ -1455,7 +1456,7 @@ inline bool write_served_by(ChunkWriter &w, const Snapshot &s) {
     if (!w.literal("null"))
       return false;
   } else {
-    if (!w.literal("{\"code\":\"no_identity\",\"detail\":null,\"since_ms\":null,\"evidence\":{}}"))
+    if (!w.literal(R"({"code":"no_identity","detail":null,"since_ms":null,"evidence":{}})"))
       return false;
   }
   if (!w.literal(",\"uptime_ms\":") || !w.number_u32(s.uptime_ms))
@@ -1551,7 +1552,7 @@ inline bool write_envelope(ChunkWriter &w, const Snapshot &s, const Resolved &r,
   if (!w.literal(",\"series_legend\":"))
     return false;
   if (detail::subtree_has_series(s, r, root_index)) {
-    if (!w.literal("{\"r\":\"real\",\"s\":\"SNA\",\"i\":\"implausible\",\"-\":\"not measured\"}"))
+    if (!w.literal(R"({"r":"real","s":"SNA","i":"implausible","-":"not measured"})"))
       return false;
   } else {
     if (!w.literal("null"))
@@ -1837,10 +1838,11 @@ inline bool parse_json_string(Cursor &c, char *out, size_t cap, bool *truncated)
   const auto put = [&](char ch) {
     if (out == nullptr)
       return;
-    if (n + 1 < cap)
+    if (n + 1 < cap) {
       out[n++] = ch;
-    else if (truncated != nullptr)
+    } else if (truncated != nullptr) {
       *truncated = true;
+    }
   };
   while (c.p < c.end) {
     const unsigned char ch = static_cast<unsigned char>(*c.p++);
@@ -2281,14 +2283,15 @@ inline RouteMatch match_route(bool is_post, const char *path, bool has_actions, 
   while (path[len] != '\0' && path[len] != '?')
     len++;
   if (!is_post) {
-    if (len == 1 && path[0] == '/')
+    if (len == 1 && path[0] == '/') {
       m.route = Route::PAGE;
-    else if (len == 13 && std::memcmp(path, "/api/v1/state", 13) == 0)
+    } else if (len == 13 && std::memcmp(path, "/api/v1/state", 13) == 0) {
       m.route = Route::STATE;
-    else if (ap_active && !(len == 5 && std::memcmp(path, "/wifi", 5) == 0) &&
-             !(len == 12 && std::memcmp(path, "/config.json", 12) == 0) &&
-             !(len == 9 && std::memcmp(path, "/wifisave", 9) == 0))
+    } else if (ap_active && (len != 5 || std::memcmp(path, "/wifi", 5) != 0) &&
+               (len != 12 || std::memcmp(path, "/config.json", 12) != 0) &&
+               (len != 9 || std::memcmp(path, "/wifisave", 9) != 0)) {
       m.route = Route::REDIRECT;
+    }
     return m;
   }
   static const char PREFIX[] = "/api/v1/actions/";
