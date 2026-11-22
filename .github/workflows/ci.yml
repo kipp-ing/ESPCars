@@ -171,7 +171,7 @@ jobs:
             esphome compile "$config"
           done
       - name: Report clang-tidy findings and count tables
-        run: python script/clang_tidy.py --report-only
+        run: python script/clang_tidy.py --report-only --strict
 
   ha-integration:
     name: Home Assistant glue (sdlog_relay)

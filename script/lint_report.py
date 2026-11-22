@@ -263,6 +263,14 @@ def main(argv=None):
         try:
             with redirect_stdout(details) if args.summary else nullcontext():
                 counts[tool] = report(tool, files, config)
+            if args.summary and tool == "clang-tidy":
+                # Counts from local builds may cover only part of the target set.
+                # Keep coverage and rebuild instructions visible even in check.sh.
+                for line in details.getvalue().splitlines():
+                    if line.startswith(
+                        ("SKIP [clang-tidy]:", "  targets analyzed", "  INCOMPLETE:")
+                    ):
+                        print(line)
         except (OSError, ValueError, RuntimeError) as error:
             if args.summary:
                 print(details.getvalue(), end="")

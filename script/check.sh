@@ -45,7 +45,8 @@ echo "== Python, YAML and whitespace lint =="
 "$PY" script/lint_report.py --only ruff ruff-format pyupgrade yamllint end-of-file-fixer trailing-whitespace --summary
 
 # The remaining hooks stay advisory until their cleanup phases clear the baseline.
-# clang-tidy skips on a fresh clone; compiled local builds are analyzed.
+# clang-tidy analyzes available local builds and skips missing/stale targets.
+# The dedicated CI clang-tidy job requires all builds with --strict.
 # CI uses this runner with requirements_lint.txt. Fixers use temporary copies.
 echo "== upstream lint (report-only; pins: requirements_lint.txt) =="
 "$PY" script/lint_report.py --only hook-config no-commit-to-branch ci-custom clang-tidy --report-only --summary
