@@ -19,8 +19,8 @@ flash only.
 import gzip
 import json
 import logging
-import re
 from pathlib import Path
+import re
 
 import esphome.codegen as cg
 from esphome.components import (
@@ -49,6 +49,7 @@ import esphome.final_validate as fv
 
 CODEOWNERS = ["@swifty99"]
 DEPENDENCIES = ["network"]
+DOMAIN = "portal"
 AUTO_LOAD = ["web_server_base", "binary_sensor", "sensor", "text_sensor", "socket"]
 
 _LOGGER = logging.getLogger(__name__)
@@ -142,7 +143,9 @@ _NODE_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
 _MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 # Top-level config keys that are infrastructure, not behaviour: never part of served_by.components.
-_NON_COMPONENT_TOP_LEVEL_KEYS = frozenset({"substitutions", "packages", "esphome", "external_components"})
+_NON_COMPONENT_TOP_LEVEL_KEYS = frozenset(
+    {"substitutions", "packages", "esphome", "external_components"}
+)
 
 
 def _identifier(what):
@@ -163,7 +166,9 @@ _role_name = _identifier("role")
 # These why-codes derive their meaning from evidence (counters, response codes) that a
 # config-declared why cannot carry, so they are unrepresentable in `unknown_when.why`, and in
 # `absent` unless the chosen `absent_when` provider declares evidence for exactly that code.
-_EVIDENCE_GATED_WHY_CODES = frozenset({"never_announced", "no_transfer", "crc_fail", "negative_response"})
+_EVIDENCE_GATED_WHY_CODES = frozenset(
+    {"never_announced", "no_transfer", "crc_fail", "negative_response"}
+)
 
 
 def _config_why_code(value):
@@ -191,7 +196,9 @@ ABSENT_PROVIDERS: dict = {}
 SERIES_PROVIDERS: dict = {}
 
 
-def register_absent_provider(name, *, args, source_type, body, evidence=None, for_why=(), default_why=None):
+def register_absent_provider(
+    name, *, args, source_type, body, evidence=None, for_why=(), default_why=None
+):
     """`default_why`: the why-code a node gets when it declares `absent_when` with this provider
     but no `absent:` of its own (spec 4.1)."""
     ABSENT_PROVIDERS[name] = {
@@ -216,7 +223,7 @@ def register_series_provider(name, *, args, source_type, body):
 
 def _registered(registry):
     names = sorted(registry)
-    return names if names else "none registered"
+    return names or "none registered"
 
 
 def _provider_backs_why(entry: dict, code: str) -> bool:
@@ -233,7 +240,9 @@ def _validate_absent_evidence(value):
     provider = absent_when[CONF_PROVIDER] if absent_when else None
     spec = ABSENT_PROVIDERS.get(provider) if provider else None
     if spec is None or not _provider_backs_why(spec, code):
-        permitted = sorted(n for n, e in ABSENT_PROVIDERS.items() if _provider_backs_why(e, code))
+        permitted = sorted(
+            n for n, e in ABSENT_PROVIDERS.items() if _provider_backs_why(e, code)
+        )
         raise cv.Invalid(
             f"why code {code!r} is evidence-gated: its verdict needs evidence this component has "
             "no mechanism to attach to a config-declared why on its own. 'absent_when' opens it "
@@ -250,7 +259,9 @@ def _check_provider_args(what, provider, spec, present_args):
         raise cv.Invalid(f"{what}.provider {provider!r} requires {sorted(missing)}")
     extra = present_args - declared
     if extra:
-        raise cv.Invalid(f"{what}.provider {provider!r} does not accept {sorted(extra)}")
+        raise cv.Invalid(
+            f"{what}.provider {provider!r} does not accept {sorted(extra)}"
+        )
 
 
 def _validated_args(what, spec, value):
@@ -270,11 +281,15 @@ def _absent_when_schema(value):
         raise cv.Invalid("absent_when requires 'provider'")
     provider = value[CONF_PROVIDER]
     if provider not in ABSENT_PROVIDERS:
-        raise cv.Invalid(f"absent_when.provider {provider!r} is not one of {_registered(ABSENT_PROVIDERS)}")
+        raise cv.Invalid(
+            f"absent_when.provider {provider!r} is not one of {_registered(ABSENT_PROVIDERS)}"
+        )
     if CONF_SOURCE not in value:
         raise cv.Invalid("absent_when requires 'source'")
     spec = ABSENT_PROVIDERS[provider]
-    _check_provider_args("absent_when", provider, spec, set(value) - {CONF_SOURCE, CONF_PROVIDER})
+    _check_provider_args(
+        "absent_when", provider, spec, set(value) - {CONF_SOURCE, CONF_PROVIDER}
+    )
     out = dict(value)
     out[CONF_SOURCE] = cv.use_id(spec["source_type"])(value[CONF_SOURCE])
     out.update(_validated_args("absent_when", spec, value))
@@ -349,7 +364,9 @@ def _unique_segments(nodes):
 
 def _limit_bound(value):
     """`{below: x, above: y}`, at least one (spec 4.3)."""
-    value = cv.Schema({cv.Optional(CONF_BELOW): cv.float_, cv.Optional(CONF_ABOVE): cv.float_})(value)
+    value = cv.Schema(
+        {cv.Optional(CONF_BELOW): cv.float_, cv.Optional(CONF_ABOVE): cv.float_}
+    )(value)
     if not value:
         raise cv.Invalid("a limit needs at least one of 'below' or 'above'")
     return value
@@ -369,7 +386,9 @@ VALUE_SCHEMA = cv.Schema(
         cv.Optional(CONF_BAD_WHEN): cv.boolean,
         cv.Exclusive(CONF_SENSOR, "entity"): cv.use_id(sensor.Sensor),
         cv.Exclusive(CONF_TEXT_SENSOR, "entity"): cv.use_id(text_sensor.TextSensor),
-        cv.Exclusive(CONF_BINARY_SENSOR, "entity"): cv.use_id(binary_sensor.BinarySensor),
+        cv.Exclusive(CONF_BINARY_SENSOR, "entity"): cv.use_id(
+            binary_sensor.BinarySensor
+        ),
     }
 )
 
@@ -379,7 +398,9 @@ _ENTITY_KEYS = (CONF_SENSOR, CONF_TEXT_SENSOR, CONF_BINARY_SENSOR)
 def _require_one_entity(value):
     present = [key for key in _ENTITY_KEYS if key in value]
     if len(present) != 1:
-        raise cv.Invalid("a value needs exactly one of 'sensor', 'text_sensor' or 'binary_sensor'")
+        raise cv.Invalid(
+            "a value needs exactly one of 'sensor', 'text_sensor' or 'binary_sensor'"
+        )
     return value
 
 
@@ -400,15 +421,23 @@ def _limits_fit_entity(value):
     numeric = [k for k in (CONF_WARN, CONF_BAD) if k in value]
     boolean = [k for k in (CONF_WARN_WHEN, CONF_BAD_WHEN) if k in value]
     if CONF_TEXT_SENSOR in value and (numeric or boolean):
-        raise cv.Invalid(f"a 'text_sensor' value carries no limits ({numeric + boolean})")
+        raise cv.Invalid(
+            f"a 'text_sensor' value carries no limits ({numeric + boolean})"
+        )
     if CONF_BINARY_SENSOR in value and numeric:
-        raise cv.Invalid(f"{numeric} are numeric limits; a 'binary_sensor' value uses 'warn_when'/'bad_when'")
+        raise cv.Invalid(
+            f"{numeric} are numeric limits; a 'binary_sensor' value uses 'warn_when'/'bad_when'"
+        )
     if CONF_SENSOR in value and boolean:
-        raise cv.Invalid(f"{boolean} are boolean limits; a 'sensor' value uses 'warn'/'bad' with below/above")
+        raise cv.Invalid(
+            f"{boolean} are boolean limits; a 'sensor' value uses 'warn'/'bad' with below/above"
+        )
     return value
 
 
-VALUE_SCHEMA = cv.All(VALUE_SCHEMA, _require_one_entity, _no_cadence_on_binary_sensor, _limits_fit_entity)
+VALUE_SCHEMA = cv.All(
+    VALUE_SCHEMA, _require_one_entity, _no_cadence_on_binary_sensor, _limits_fit_entity
+)
 
 _index_frame_name = _identifier("index_frame")
 
@@ -423,7 +452,15 @@ def _index_frame(value):
 
 
 _SERIES_BASE_KEYS = frozenset(
-    {CONF_KEY, CONF_LABEL, CONF_UNIT, CONF_INDEX_BASE, CONF_INDEX_FRAME, CONF_COUNT, CONF_DECIMALS}
+    {
+        CONF_KEY,
+        CONF_LABEL,
+        CONF_UNIT,
+        CONF_INDEX_BASE,
+        CONF_INDEX_FRAME,
+        CONF_COUNT,
+        CONF_DECIMALS,
+    }
     | {CONF_SOURCE, CONF_PROVIDER}
 )
 
@@ -440,12 +477,16 @@ def _validate_series_provider(value):
     present_args = {key for key in value if key not in _SERIES_BASE_KEYS}
     if not has_provider:
         if present_args:
-            raise cv.Invalid(f"series {sorted(present_args)} may only be given alongside 'provider'")
+            raise cv.Invalid(
+                f"series {sorted(present_args)} may only be given alongside 'provider'"
+            )
         return value
 
     provider = value[CONF_PROVIDER]
     if provider not in SERIES_PROVIDERS:
-        raise cv.Invalid(f"series.provider {provider!r} is not one of {_registered(SERIES_PROVIDERS)}")
+        raise cv.Invalid(
+            f"series.provider {provider!r} is not one of {_registered(SERIES_PROVIDERS)}"
+        )
     spec = SERIES_PROVIDERS[provider]
     _check_provider_args("series", provider, spec, present_args)
     value[CONF_SOURCE] = cv.use_id(spec["source_type"])(value[CONF_SOURCE])
@@ -486,7 +527,9 @@ def _ref(what):
     def validate(value):
         value = cv.string_strict(value)
         if not _REF_RE.match(value):
-            raise cv.Invalid(f"{what} {value!r} must be '<node id>/<key>' (e.g. 'bus.unit/rate')")
+            raise cv.Invalid(
+                f"{what} {value!r} must be '<node id>/<key>' (e.g. 'bus.unit/rate')"
+            )
         return value
 
     return validate
@@ -500,11 +543,15 @@ def _node_id_ref(value):
 
 
 # `value` is typed against the target control once the whole tree is known (_check_ui_refs).
-BEFORE_SCHEMA = cv.Schema({cv.Required(CONF_ACTION): _ref("action ref"), cv.Required(CONF_VALUE): cv.valid})
+BEFORE_SCHEMA = cv.Schema(
+    {cv.Required(CONF_ACTION): _ref("action ref"), cv.Required(CONF_VALUE): cv.valid}
+)
 BORROW_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ACTION): _ref("action ref"),
-        cv.Optional(CONF_BEFORE): cv.All(cv.ensure_list(BEFORE_SCHEMA), cv.Length(min=1)),
+        cv.Optional(CONF_BEFORE): cv.All(
+            cv.ensure_list(BEFORE_SCHEMA), cv.Length(min=1)
+        ),
     }
 )
 DEFAULT_ACTION_DECIMALS = 2
@@ -513,7 +560,9 @@ DEFAULT_ACTION_DECIMALS = 2
 def _validate_action(value):
     present = [key for key in _ACTION_CONTROL_KEYS if key in value]
     if len(present) != 1:
-        raise cv.Invalid("an action needs exactly one of 'switch', 'button', 'select' or 'number'")
+        raise cv.Invalid(
+            "an action needs exactly one of 'switch', 'button', 'select' or 'number'"
+        )
     value = dict(value)
     if CONF_DECIMALS in value and present[0] != CONF_NUMBER:
         raise cv.Invalid("'decimals' is only valid on a 'number' action")
@@ -534,7 +583,9 @@ ACTION_SCHEMA = cv.All(
             cv.Optional(CONF_DECIMALS): cv.int_range(min=0, max=6),
             cv.Optional(CONF_CONFIRM): cv.one_of("hold", lower=True),
             cv.Optional(CONF_GROUP): _nonempty_string,
-            cv.Optional(CONF_BEFORE): cv.All(cv.ensure_list(BEFORE_SCHEMA), cv.Length(min=1)),
+            cv.Optional(CONF_BEFORE): cv.All(
+                cv.ensure_list(BEFORE_SCHEMA), cv.Length(min=1)
+            ),
         }
     ),
     _validate_action,
@@ -547,7 +598,9 @@ def _node_schema(value):
 
 def _validate_node_cross_fields(value):
     if CONF_ABSENT_WHEN in value and CONF_ABSENT not in value:
-        default_why = ABSENT_PROVIDERS[value[CONF_ABSENT_WHEN][CONF_PROVIDER]].get("default_why")
+        default_why = ABSENT_PROVIDERS[value[CONF_ABSENT_WHEN][CONF_PROVIDER]].get(
+            "default_why"
+        )
         if default_why is None:
             raise cv.Invalid("'absent_when' requires 'absent' on the same node")
         value[CONF_ABSENT] = default_why
@@ -561,7 +614,9 @@ def _validate_node_cross_fields(value):
     if CONF_ABSENT in value:
         if CONF_ABSENT_WHEN in value:
             # A conditionally-absent node is a real node: values/children/series/actions stay.
-            exclusive_with_absent = [key for key in (CONF_ROLE, CONF_UNKNOWN_WHEN) if key in value]
+            exclusive_with_absent = [
+                key for key in (CONF_ROLE, CONF_UNKNOWN_WHEN) if key in value
+            ]
         else:
             exclusive_with_absent = [
                 key
@@ -576,7 +631,9 @@ def _validate_node_cross_fields(value):
                 if key in value
             ]
         if exclusive_with_absent:
-            raise cv.Invalid(f"'absent' is mutually exclusive with {exclusive_with_absent}")
+            raise cv.Invalid(
+                f"'absent' is mutually exclusive with {exclusive_with_absent}"
+            )
         _validate_absent_evidence(value)
 
     if CONF_ROLE in value:
@@ -584,7 +641,9 @@ def _validate_node_cross_fields(value):
         if not roles_available:
             raise cv.Invalid("'role' requires a non-empty 'roles_available' list")
         if value[CONF_ROLE] not in roles_available:
-            raise cv.Invalid(f"role {value[CONF_ROLE]!r} is not in roles_available {roles_available!r}")
+            raise cv.Invalid(
+                f"role {value[CONF_ROLE]!r} is not in roles_available {roles_available!r}"
+            )
 
     own_keys = {v[CONF_KEY] for v in value.get(CONF_VALUES, [])}
 
@@ -604,15 +663,21 @@ def _validate_node_cross_fields(value):
             raise cv.Invalid("'unknown_when' cannot be combined with 'children'")
         target = value[CONF_UNKNOWN_WHEN][CONF_VALUE]
         if target not in own_keys:
-            raise cv.Invalid(f"unknown_when.value {target!r} is not one of this node's own values")
+            raise cv.Invalid(
+                f"unknown_when.value {target!r} is not one of this node's own values"
+            )
 
     if CONF_TRUST_FROM in value and value[CONF_TRUST_FROM] not in own_keys:
-        raise cv.Invalid(f"trust_from {value[CONF_TRUST_FROM]!r} is not one of this node's own values")
+        raise cv.Invalid(
+            f"trust_from {value[CONF_TRUST_FROM]!r} is not one of this node's own values"
+        )
 
     # A node carrying a binary_sensor value may not declare a positive budget_ms: a boolean's age
     # is since its last CHANGE, so a finite budget would let a healthy, still-reconfirming boolean
     # tip 'stale'. `budget_ms: null` stays legal.
-    if value.get(CONF_BUDGET_MS) is not None and any(CONF_BINARY_SENSOR in v for v in value.get(CONF_VALUES, [])):
+    if value.get(CONF_BUDGET_MS) is not None and any(
+        CONF_BINARY_SENSOR in v for v in value.get(CONF_VALUES, [])
+    ):
         raise cv.Invalid(
             "a node carrying a 'binary_sensor' value may not declare an explicit positive "
             "'budget_ms': a boolean's age is since its last CHANGE, not its last publish (no "
@@ -637,7 +702,9 @@ def _apply_derived_budget(value):
         value[CONF_BUDGET_MS] = None
         return value
     cadences = [v.get(CONF_CADENCE_MS) for v in values]
-    value[CONF_BUDGET_MS] = None if any(c is None for c in cadences) else 3 * max(cadences)
+    value[CONF_BUDGET_MS] = (
+        None if any(c is None for c in cadences) else 3 * max(cadences)
+    )
     return value
 
 
@@ -648,11 +715,19 @@ NODE_SCHEMA = cv.All(
             cv.Required(CONF_KIND): _nonempty_string,
             cv.Required(CONF_LABEL): _nonempty_string,
             cv.Optional(CONF_BUDGET_MS): _budget_ms,
-            cv.Optional(CONF_CHILDREN): cv.All(cv.ensure_list(_node_schema), cv.Length(min=1), _unique_segments),
-            cv.Optional(CONF_VALUES): cv.All(cv.ensure_list(VALUE_SCHEMA), cv.Length(min=1)),
-            cv.Optional(CONF_ACTIONS): cv.All(cv.ensure_list(ACTION_SCHEMA), cv.Length(min=1)),
+            cv.Optional(CONF_CHILDREN): cv.All(
+                cv.ensure_list(_node_schema), cv.Length(min=1), _unique_segments
+            ),
+            cv.Optional(CONF_VALUES): cv.All(
+                cv.ensure_list(VALUE_SCHEMA), cv.Length(min=1)
+            ),
+            cv.Optional(CONF_ACTIONS): cv.All(
+                cv.ensure_list(ACTION_SCHEMA), cv.Length(min=1)
+            ),
             cv.Optional(CONF_ROLE): _role_name,
-            cv.Optional(CONF_ROLES_AVAILABLE): cv.All(cv.ensure_list(_role_name), cv.Length(min=1)),
+            cv.Optional(CONF_ROLES_AVAILABLE): cv.All(
+                cv.ensure_list(_role_name), cv.Length(min=1)
+            ),
             cv.Optional(CONF_ABSENT): _why_code,
             cv.Optional(CONF_ABSENT_WHEN): _absent_when_schema,
             cv.Optional(CONF_UNKNOWN_WHEN): UNKNOWN_WHEN_SCHEMA,
@@ -660,7 +735,9 @@ NODE_SCHEMA = cv.All(
             cv.Optional(CONF_SERIES): SERIES_SCHEMA,
             cv.Optional(CONF_SUBMODULE_POSITION): cv.int_range(min=1),
             cv.Optional(CONF_ON_DEMAND, default=False): cv.boolean,
-            cv.Optional(CONF_BORROW): cv.All(cv.ensure_list(BORROW_SCHEMA), cv.Length(min=1)),
+            cv.Optional(CONF_BORROW): cv.All(
+                cv.ensure_list(BORROW_SCHEMA), cv.Length(min=1)
+            ),
         }
     ),
     _validate_node_cross_fields,
@@ -765,9 +842,9 @@ def _resolve_submodule_positions(config):
                 "submodule_position; the frame is never recovered from kind, key, label or unit."
             )
         if index_frame == SUBMODULE_CELL_FRAME:
-            series[CONF_RESOLVED_PACK_INDEX_BASE] = (position - 1) * config[CONF_SUBMODULE_SIZE] + series[
-                CONF_INDEX_BASE
-            ]
+            series[CONF_RESOLVED_PACK_INDEX_BASE] = (position - 1) * config[
+                CONF_SUBMODULE_SIZE
+            ] + series[CONF_INDEX_BASE]
         else:
             series[CONF_RESOLVED_PACK_INDEX_BASE] = None
 
@@ -783,7 +860,9 @@ def _validate_owns(config):
         if owned in seen:
             raise cv.Invalid(f"owns entry {owned!r} is listed twice")
         seen.add(owned)
-    identity_complete = CONF_BOARD in config and CONF_NODE_ID in config and CONF_MAC in config
+    identity_complete = (
+        CONF_BOARD in config and CONF_NODE_ID in config and CONF_MAC in config
+    )
     if identity_complete and not owns:
         raise cv.Invalid(
             "board/node_id/mac are all set, so served_by.state would be 'ok', but 'owns' is empty: "
@@ -808,16 +887,24 @@ def _tree_refs(config):
 
 
 def _unknown_ref(what, ref, valid):
-    return cv.Invalid(f"{what} {ref!r} names nothing in 'tree'; valid: {sorted(valid) or 'none'}")
+    return cv.Invalid(
+        f"{what} {ref!r} names nothing in 'tree'; valid: {sorted(valid) or 'none'}"
+    )
 
 
-_BEFORE_VALUE = {CONF_SELECT: cv.string, CONF_NUMBER: cv.float_, CONF_SWITCH: cv.boolean}
+_BEFORE_VALUE = {
+    CONF_SELECT: cv.string,
+    CONF_NUMBER: cv.float_,
+    CONF_SWITCH: cv.boolean,
+}
 
 
 def _check_before(where, entries, action_refs, own_ref=None):
     """Spec 4.7: each `before` entry names a select/number/switch action (not the action itself)
     and carries a value of that control's type; written back typed."""
-    settable = {ref for ref, (control, _) in action_refs.items() if control in _BEFORE_VALUE}
+    settable = {
+        ref for ref, (control, _) in action_refs.items() if control in _BEFORE_VALUE
+    }
     for entry in entries:
         ref = entry[CONF_ACTION]
         if ref not in action_refs:
@@ -831,7 +918,9 @@ def _check_before(where, entries, action_refs, own_ref=None):
         if ref == own_ref:
             raise cv.Invalid(f"{where}: before.action {ref!r} is the action itself")
         if isinstance(entry[CONF_VALUE], bool) and control != CONF_SWITCH:
-            raise cv.Invalid(f"{where}: before {ref!r} is a {control}; a bool value fits only a switch")
+            raise cv.Invalid(
+                f"{where}: before {ref!r} is a {control}; a bool value fits only a switch"
+            )
         try:
             entry[CONF_VALUE] = _BEFORE_VALUE[control](entry[CONF_VALUE])
         except cv.Invalid as err:
@@ -853,17 +942,29 @@ def _check_ui_refs(config):
         for action_conf in node.get(CONF_ACTIONS, []):
             own = f"{node_id}/{action_conf[CONF_KEY]}"
             if CONF_BEFORE in action_conf:
-                _check_before(f"action {own!r}", action_conf[CONF_BEFORE], action_refs, own)
+                _check_before(
+                    f"action {own!r}", action_conf[CONF_BEFORE], action_refs, own
+                )
         for entry in node.get(CONF_BORROW, []):
             if entry[CONF_ACTION] not in action_refs:
-                raise _unknown_ref(f"node {node_id!r}: borrow.action", entry[CONF_ACTION], action_refs)
+                raise _unknown_ref(
+                    f"node {node_id!r}: borrow.action", entry[CONF_ACTION], action_refs
+                )
             if CONF_BEFORE in entry:
-                _check_before(f"node {node_id!r} borrow {entry[CONF_ACTION]!r}", entry[CONF_BEFORE], action_refs)
+                _check_before(
+                    f"node {node_id!r} borrow {entry[CONF_ACTION]!r}",
+                    entry[CONF_BEFORE],
+                    action_refs,
+                )
 
 
 def _entity_config(full, domain, entity_id):
     for item in full.get(domain, []) or []:
-        if isinstance(item, dict) and CONF_ID in item and str(item[CONF_ID]) == str(entity_id):
+        if (
+            isinstance(item, dict)
+            and CONF_ID in item
+            and str(item[CONF_ID]) == str(entity_id)
+        ):
             return item
     return None
 
@@ -875,9 +976,15 @@ def _check_before_against_entities(config, full):
     entries = []
     for node_id, node in _iter_tree(config[CONF_TREE], ""):
         for action_conf in node.get(CONF_ACTIONS, []):
-            entries += [(f"action '{node_id}/{action_conf[CONF_KEY]}'", e) for e in action_conf.get(CONF_BEFORE, [])]
+            entries += [
+                (f"action '{node_id}/{action_conf[CONF_KEY]}'", e)
+                for e in action_conf.get(CONF_BEFORE, [])
+            ]
         for b in node.get(CONF_BORROW, []):
-            entries += [(f"node {node_id!r} borrow {b[CONF_ACTION]!r}", e) for e in b.get(CONF_BEFORE, [])]
+            entries += [
+                (f"node {node_id!r} borrow {b[CONF_ACTION]!r}", e)
+                for e in b.get(CONF_BEFORE, [])
+            ]
     for where, entry in entries:
         control, action_conf = action_refs[entry[CONF_ACTION]]
         target = _entity_config(full, control, action_conf[control])
@@ -885,14 +992,20 @@ def _check_before_against_entities(config, full):
             continue
         value = entry[CONF_VALUE]
         options = target.get("options")
-        if control == CONF_SELECT and isinstance(options, list) and value not in [str(o) for o in options]:
+        if (
+            control == CONF_SELECT
+            and isinstance(options, list)
+            and value not in [str(o) for o in options]
+        ):
             raise cv.Invalid(
                 f"{where}: before {entry[CONF_ACTION]!r} value {value!r} is not an option of "
                 f"{action_conf[control]} ({[str(o) for o in options]})"
             )
         if control == CONF_NUMBER:
             low, high = target.get("min_value"), target.get("max_value")
-            if (isinstance(low, (int, float)) and value < low) or (isinstance(high, (int, float)) and value > high):
+            if (isinstance(low, (int, float)) and value < low) or (
+                isinstance(high, (int, float)) and value > high
+            ):
                 raise cv.Invalid(
                     f"{where}: before {entry[CONF_ACTION]!r} value {value} is outside "
                     f"[{low}, {high}] of {action_conf[control]}"
@@ -911,11 +1024,19 @@ def _check_tree(config):
 TAB_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_LABEL): _nonempty_string,
-        cv.Optional(CONF_GLANCE, default=[]): cv.All(cv.ensure_list(_ref("glance ref")), cv.Length(max=4)),
+        cv.Optional(CONF_GLANCE, default=[]): cv.All(
+            cv.ensure_list(_ref("glance ref")), cv.Length(max=4)
+        ),
         cv.Optional(CONF_NODES, default=[]): cv.ensure_list(_node_id_ref),
     }
 )
-LAYOUT_SCHEMA = cv.Schema({cv.Optional(CONF_TABS, default=[]): cv.All(cv.ensure_list(TAB_SCHEMA), cv.Length(max=5))})
+LAYOUT_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_TABS, default=[]): cv.All(
+            cv.ensure_list(TAB_SCHEMA), cv.Length(max=5)
+        )
+    }
+)
 
 
 def _consume_sockets(config):
@@ -928,7 +1049,9 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(Portal),
-            cv.GenerateID(CONF_WEB_SERVER_BASE_ID): cv.use_id(web_server_base.WebServerBase),
+            cv.GenerateID(CONF_WEB_SERVER_BASE_ID): cv.use_id(
+                web_server_base.WebServerBase
+            ),
             cv.GenerateID(CONF_WEB_ASSET_ID): cv.declare_id(cg.uint8),
             cv.Optional(CONF_PORT, default=80): _port,
             cv.Optional(CONF_BOARD): cv.string_strict,
@@ -945,7 +1068,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_AUTH): AUTH_SCHEMA,
             cv.Optional(CONF_LANG, default="en"): cv.one_of("en", "de", lower=True),
             cv.Optional(CONF_LAYOUT): LAYOUT_SCHEMA,
-            cv.Required(CONF_TREE): cv.All(cv.ensure_list(_node_schema), cv.Length(min=1), _unique_segments),
+            cv.Required(CONF_TREE): cv.All(
+                cv.ensure_list(_node_schema), cv.Length(min=1), _unique_segments
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
@@ -967,7 +1092,9 @@ def _final_validate(config):
 
     _check_tree(config)
     _check_before_against_entities(config, full)
-    config[CONF_RESOLVED_COMPONENTS] = sorted(key for key in full if key not in _NON_COMPONENT_TOP_LEVEL_KEYS)
+    config[CONF_RESOLVED_COMPONENTS] = sorted(
+        key for key in full if key not in _NON_COMPONENT_TOP_LEVEL_KEYS
+    )
     return config
 
 
@@ -986,7 +1113,11 @@ def _before_json(entries):
 def build_ui_hints(config) -> dict:
     """The static UI hints of spec 4.9 from a validated config."""
     tabs = [
-        {"label": tab[CONF_LABEL], "glance": list(tab[CONF_GLANCE]), "nodes": list(tab[CONF_NODES])}
+        {
+            "label": tab[CONF_LABEL],
+            "glance": list(tab[CONF_GLANCE]),
+            "nodes": list(tab[CONF_NODES]),
+        }
         for tab in config.get(CONF_LAYOUT, {}).get(CONF_TABS, [])
     ]
     values, actions, borrow = {}, {}, {}
@@ -997,7 +1128,11 @@ def build_ui_hints(config) -> dict:
                 hint["expert"] = True
             for key in (CONF_WARN, CONF_BAD):
                 if key in v:
-                    hint[key] = {k: _num(v[key][k]) for k in (CONF_BELOW, CONF_ABOVE) if k in v[key]}
+                    hint[key] = {
+                        k: _num(v[key][k])
+                        for k in (CONF_BELOW, CONF_ABOVE)
+                        if k in v[key]
+                    }
             for key in (CONF_WARN_WHEN, CONF_BAD_WHEN):
                 if key in v:
                     hint[key] = v[key]
@@ -1014,10 +1149,23 @@ def build_ui_hints(config) -> dict:
                 actions[f"{node_id}/{a[CONF_KEY]}"] = hint
         if CONF_BORROW in node:
             borrow[node_id] = [
-                {"action": b[CONF_ACTION], **({"before": _before_json(b[CONF_BEFORE])} if CONF_BEFORE in b else {})}
+                {
+                    "action": b[CONF_ACTION],
+                    **(
+                        {"before": _before_json(b[CONF_BEFORE])}
+                        if CONF_BEFORE in b
+                        else {}
+                    ),
+                }
                 for b in node[CONF_BORROW]
             ]
-    return {"lang": config.get(CONF_LANG, "en"), "tabs": tabs, "values": values, "actions": actions, "borrow": borrow}
+    return {
+        "lang": config.get(CONF_LANG, "en"),
+        "tabs": tabs,
+        "values": values,
+        "actions": actions,
+        "borrow": borrow,
+    }
 
 
 def inject_ui(page: bytes, hints: dict) -> bytes:
@@ -1026,7 +1174,9 @@ def inject_ui(page: bytes, hints: dict) -> bytes:
     token = UI_TOKEN.encode()
     if token not in page:
         return page
-    text = json.dumps(hints, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
+    text = json.dumps(hints, separators=(",", ":"), ensure_ascii=False).replace(
+        "<", "\\u003c"
+    )
     return page.replace(token, text.encode("utf-8"))
 
 
@@ -1054,7 +1204,11 @@ def _limit_initializer(v) -> str | None:
 def _string_array(prefix, values):
     """A `static const char *const NAME[] = {...}` global, the shape Identity.owns and
     Identity.components need."""
-    arr_id = ID(f"{prefix}_data", is_declaration=True, type=cg.global_ns.namespace("constexpr char * const"))
+    arr_id = ID(
+        f"{prefix}_data",
+        is_declaration=True,
+        type=cg.global_ns.namespace("constexpr char * const"),
+    )
     return cg.static_const_array(arr_id, cg.ArrayInitializer(*values))
 
 
@@ -1092,9 +1246,16 @@ async def to_code(config):
 
     nodes = list(_iter_tree(config[CONF_TREE], ""))
     cg.add_define("PORTAL_MAX_NODES", len(nodes) + 1)  # +1 for the synthetic root
-    cg.add_define("PORTAL_MAX_VALUES", max(sum(len(n.get(CONF_VALUES, [])) for _, n in nodes), 1))
-    cg.add_define("PORTAL_MAX_SERIES", max(sum(1 for _, n in nodes if CONF_SERIES in n), 1))
-    cg.add_define("PORTAL_MAX_ACTIONS", max(sum(len(n.get(CONF_ACTIONS, [])) for _, n in nodes), 1))
+    cg.add_define(
+        "PORTAL_MAX_VALUES", max(sum(len(n.get(CONF_VALUES, [])) for _, n in nodes), 1)
+    )
+    cg.add_define(
+        "PORTAL_MAX_SERIES", max(sum(1 for _, n in nodes if CONF_SERIES in n), 1)
+    )
+    cg.add_define(
+        "PORTAL_MAX_ACTIONS",
+        max(sum(len(n.get(CONF_ACTIONS, [])) for _, n in nodes), 1),
+    )
     cg.add_define("PORTAL_TEXT_MAX", config[CONF_TEXT_MAX])
 
     auth = config.get(CONF_AUTH)
@@ -1114,7 +1275,9 @@ async def to_code(config):
     cg.add(var.set_base(paren))
     cg.add(paren.set_port(config[CONF_PORT]))
 
-    asset_path = Path(config[CONF_WEB_ASSET]) if CONF_WEB_ASSET in config else BUILTIN_ASSET
+    asset_path = (
+        Path(config[CONF_WEB_ASSET]) if CONF_WEB_ASSET in config else BUILTIN_ASSET
+    )
     page = inject_ui(asset_path.read_bytes(), build_ui_hints(config))
     compressed = gzip.compress(page, compresslevel=9, mtime=0)
     asset = cg.progmem_array(config[CONF_WEB_ASSET_ID], list(compressed))
@@ -1133,9 +1296,13 @@ async def to_code(config):
     owns = config[CONF_RESOLVED_OWNS]
     components_list = config[CONF_RESOLVED_COMPONENTS]
     owns_id = str(config[CONF_ID])
-    owns_arr = _string_array(f"{owns_id}_owns", owns) if owns else cg.RawExpression("nullptr")
+    owns_arr = (
+        _string_array(f"{owns_id}_owns", owns) if owns else cg.RawExpression("nullptr")
+    )
     components_arr = (
-        _string_array(f"{owns_id}_components", components_list) if components_list else cg.RawExpression("nullptr")
+        _string_array(f"{owns_id}_components", components_list)
+        if components_list
+        else cg.RawExpression("nullptr")
     )
     cg.add(var.set_owns(owns_arr, len(owns)))
     cg.add(var.set_components(components_arr, len(components_list)))
@@ -1149,7 +1316,9 @@ async def to_code(config):
     for node_id, node in _iter_tree(config[CONF_TREE], ""):
         for action_conf in node.get(CONF_ACTIONS, []):
             if CONF_SWITCH in action_conf:
-                action_of_switch.setdefault(str(action_conf[CONF_SWITCH]), f"{node_id}/{action_conf[CONF_KEY]}")
+                action_of_switch.setdefault(
+                    str(action_conf[CONF_SWITCH]), f"{node_id}/{action_conf[CONF_KEY]}"
+                )
 
     def emit_limit(value_conf):
         """The value's 1-based slot in the limits table, 0 without limits."""
@@ -1158,6 +1327,7 @@ async def to_code(config):
             return 0
         limit_inits.append(init)
         return len(limit_inits)
+
     # One thunk per distinct (provider, args), deduplicated by its deterministic name and scoped
     # to this call: dedup must hold within one image and never leak across validation runs.
     emitted_thunks: set[str] = set()
@@ -1168,7 +1338,11 @@ async def to_code(config):
         if name not in emitted_thunks:
             emitted_thunks.add(name)
             body = spec["body"].format(**args)
-            cg.add_global(cg.RawStatement(template.format(name=name, cast=spec["cast"], body=body)))
+            cg.add_global(
+                cg.RawStatement(
+                    template.format(name=name, cast=spec["cast"], body=body)
+                )
+            )
         return name
 
     async def emit(node_conf, dotted_id, parent_index):
@@ -1195,7 +1369,9 @@ async def to_code(config):
             provider = absent_when[CONF_PROVIDER]
             spec = ABSENT_PROVIDERS[provider]
             args = {key: absent_when[key] for key in spec["args"]}
-            absent_fn = cg.RawExpression(emit_thunk(ABSENT_PROVIDERS, provider, args, _ABSENT_THUNK_TEMPLATE))
+            absent_fn = cg.RawExpression(
+                emit_thunk(ABSENT_PROVIDERS, provider, args, _ABSENT_THUNK_TEMPLATE)
+            )
             absent_ctx = await cg.get_variable(absent_when[CONF_SOURCE])
             if spec.get("evidence"):
                 absent_evidence = spec["evidence"]
@@ -1233,19 +1409,34 @@ async def to_code(config):
                 entity = await cg.get_variable(value_conf[CONF_SENSOR])
                 cg.add(
                     var.add_value_sensor(
-                        value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, decimals, entity, emit_limit(value_conf)
+                        value_conf[CONF_KEY],
+                        value_conf[CONF_LABEL],
+                        unit_arg,
+                        decimals,
+                        entity,
+                        emit_limit(value_conf),
                     )
                 )
             elif CONF_TEXT_SENSOR in value_conf:
                 entity = await cg.get_variable(value_conf[CONF_TEXT_SENSOR])
                 cg.add(
-                    var.add_value_text_sensor(value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, decimals, entity)
+                    var.add_value_text_sensor(
+                        value_conf[CONF_KEY],
+                        value_conf[CONF_LABEL],
+                        unit_arg,
+                        decimals,
+                        entity,
+                    )
                 )
             else:
                 entity = await cg.get_variable(value_conf[CONF_BINARY_SENSOR])
                 cg.add(
                     var.add_value_binary_sensor(
-                        value_conf[CONF_KEY], value_conf[CONF_LABEL], unit_arg, entity, emit_limit(value_conf)
+                        value_conf[CONF_KEY],
+                        value_conf[CONF_LABEL],
+                        unit_arg,
+                        entity,
+                        emit_limit(value_conf),
                     )
                 )
 
@@ -1257,7 +1448,9 @@ async def to_code(config):
                 provider = series_conf[CONF_PROVIDER]
                 spec = SERIES_PROVIDERS[provider]
                 args = {key: series_conf[key] for key in spec["args"]}
-                element = cg.RawExpression(emit_thunk(SERIES_PROVIDERS, provider, args, _SERIES_THUNK_TEMPLATE))
+                element = cg.RawExpression(
+                    emit_thunk(SERIES_PROVIDERS, provider, args, _SERIES_THUNK_TEMPLATE)
+                )
                 ctx = await cg.get_variable(series_conf[CONF_SOURCE])
             series_unit = series_conf.get(CONF_UNIT)
             index_frame = series_conf[CONF_INDEX_FRAME]
@@ -1292,10 +1485,18 @@ async def to_code(config):
                 cg.add(var.add_action_select(key, label, entity))
             else:
                 entity = await cg.get_variable(action_conf[CONF_NUMBER])
-                cg.add(var.add_action_number(key, label, action_conf[CONF_DECIMALS], entity))
+                cg.add(
+                    var.add_action_number(
+                        key, label, action_conf[CONF_DECIMALS], entity
+                    )
+                )
 
         for child in node_conf.get(CONF_CHILDREN, []):
-            child_id = child[CONF_SEGMENT] if index == 0 else f"{dotted_id}.{child[CONF_SEGMENT]}"
+            child_id = (
+                child[CONF_SEGMENT]
+                if index == 0
+                else f"{dotted_id}.{child[CONF_SEGMENT]}"
+            )
             await emit(child, child_id, index)
 
     # The synthetic root (id and kind stay `car` for wire compatibility): `tree:` is its
@@ -1318,7 +1519,9 @@ async def to_code(config):
         table = f"{config[CONF_ID]}_limits"
         rows = ",\n    ".join(limit_inits)
         cg.add_global(
-            cg.RawStatement(f"static const esphome::portal::core::ValueLimit {table}[] = {{\n    {rows},\n}};")
+            cg.RawStatement(
+                f"static const esphome::portal::core::ValueLimit {table}[] = {{\n    {rows},\n}};"
+            )
         )
         cg.add(var.set_limits(cg.RawExpression(table), len(limit_inits)))
 

@@ -25,11 +25,11 @@ to be "catalog unavailable", never a wrong decode.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import difflib
+from functools import cached_property
 import struct
 import zlib
-from dataclasses import dataclass, field
-from functools import cached_property
 
 # --- format constants (spec §1, §2) ---------------------------------------
 
@@ -229,9 +229,7 @@ class Field:
     def bit_end(self) -> int:
         """One past the last bit this field (array included) can occupy."""
         return (
-            self.bit_pos
-            + (self.repeat_count - 1) * self.repeat_stride
-            + self.bit_size
+            self.bit_pos + (self.repeat_count - 1) * self.repeat_stride + self.bit_size
         )
 
     @property
@@ -373,7 +371,7 @@ class Catalog:
 
     @cached_property
     def _targets(self) -> dict[str, list[tuple[int, int]]]:
-        """name -> [(kind, flat index)], exactly the name index's content."""
+        """Name -> [(kind, flat index)], exactly the name index's content."""
         out: dict[str, list[tuple[int, int]]] = {}
 
         def add(name: str, kind: int, idx: int) -> None:
@@ -881,7 +879,9 @@ def read_catalog(data: bytes | bytearray | memoryview) -> Catalog:
     if magic != MAGIC:
         raise FormatError(f"bad magic {magic!r}")
     if version != FORMAT_VERSION:
-        raise FormatError(f"format_version {version}; this reader knows {FORMAT_VERSION}")
+        raise FormatError(
+            f"format_version {version}; this reader knows {FORMAT_VERSION}"
+        )
     # 2. total_size within the mapped region
     if not FIRST_TABLE <= total_size <= n:
         raise FormatError(f"total_size {total_size} outside [0x50, {n}]")
@@ -894,7 +894,7 @@ def read_catalog(data: bytes | bytearray | memoryview) -> Catalog:
         if off % 4:
             raise FormatError(f"{name} table at 0x{off:X} is not 4-byte aligned")
         end = off + count * size
-        if not (FIRST_TABLE <= off and end <= total_size):
+        if not (off >= FIRST_TABLE and end <= total_size):
             raise FormatError(
                 f"{name} table [0x{off:X}, 0x{end:X}) outside [0x50, 0x{total_size:X})"
             )
@@ -911,7 +911,7 @@ def read_catalog(data: bytes | bytearray | memoryview) -> Catalog:
         ("request-byte", reqbytes_off, reqbytes_len),
         ("string", strings_off, strings_len),
     ):
-        if not (FIRST_TABLE <= off and off + length <= total_size):
+        if not (off >= FIRST_TABLE and off + length <= total_size):
             raise FormatError(f"{name} pool outside [0x50, 0x{total_size:X})")
     if strings_len < 1:
         raise FormatError("string pool is empty; it must hold at least a NUL")
@@ -1006,9 +1006,7 @@ def read_catalog(data: bytes | bytearray | memoryview) -> Catalog:
     group_aliases: list[set[str]] = [set() for _ in range(group_count)]
     prev = (-1, -1)
     for i in range(index_count):
-        h, name_ref, target = _INDEX.unpack_from(
-            data, index_off + i * INDEX_ENTRY_SIZE
-        )
+        h, name_ref, target = _INDEX.unpack_from(data, index_off + i * INDEX_ENTRY_SIZE)
         if (h, target) < prev:
             raise FormatError(f"name index not sorted at entry {i}")
         prev = (h, target)
@@ -1047,7 +1045,9 @@ def read_catalog(data: bytes | bytearray | memoryview) -> Catalog:
         ) = raw
         if field_first + n_fields > field_count:
             raise FormatError(f"group {i}: field run outside the field table")
-        if not (reqbytes_off <= req_off and req_off + req_len <= reqbytes_off + reqbytes_len):
+        if not (
+            reqbytes_off <= req_off and req_off + req_len <= reqbytes_off + reqbytes_len
+        ):
             raise FormatError(f"group {i}: request bytes outside the pool")
         request = data[req_off : req_off + req_len]
         if req_len < 1:
@@ -1059,9 +1059,7 @@ def read_catalog(data: bytes | bytearray | memoryview) -> Catalog:
             Group(
                 name=name,
                 request=request,
-                fields=tuple(
-                    fields_flat[field_first : field_first + n_fields]
-                ),
+                fields=tuple(fields_flat[field_first : field_first + n_fields]),
                 aliases=tuple(sorted(group_aliases[i] - {name})),
                 needs_session=bool(gflags & GROUP_FLAG_NEEDS_SESSION),
                 needs_security=bool(gflags & GROUP_FLAG_NEEDS_SECURITY),

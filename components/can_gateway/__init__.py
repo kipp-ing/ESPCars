@@ -55,6 +55,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@kipp-ing"]
 DEPENDENCIES = ["esp32"]
+DOMAIN = "can_gateway"
 # esp32_can drives the same TWAI controllers through the legacy driver/twai
 # API; the two drivers cannot share a controller and fail only at boot, so
 # reject the combination at config time.
@@ -345,7 +346,9 @@ def _validate_port(port):
     if port[CONF_SELF_TEST] and port[CONF_LISTEN_ONLY]:
         raise cv.Invalid("self_test and listen_only are mutually exclusive")
     if port[CONF_LOG_TAP_TX] and not port[CONF_LOG_TAP]:
-        raise cv.Invalid("log_tap_tx: true requires log_tap: true; without log_tap the TX tap has no ring")
+        raise cv.Invalid(
+            "log_tap_tx: true requires log_tap: true; without log_tap the TX tap has no ring"
+        )
     # V23: max_frames_per_loop defaults to the ring depth and may not exceed it
     # (you cannot drain more records per loop than the ring can hold).
     depth = port[CONF_OBSERVE_QUEUE_DEPTH]
@@ -539,11 +542,14 @@ PATCH_BYTE_SCHEMA = cv.Schema(
     }
 )
 
+
 def _validate_signal_patch(sig):
     """V32: a modify.signals field lies inside the frame; its value fits."""
     big = sig[CONF_BYTE_ORDER] == BYTE_ORDER_BIG
     _check_signal_fits(sig[CONF_BIT_OFFSET], sig[CONF_BIT_LENGTH], big)
-    if (value := sig.get(CONF_VALUE)) is not None and value >= (1 << sig[CONF_BIT_LENGTH]):
+    if (value := sig.get(CONF_VALUE)) is not None and value >= (
+        1 << sig[CONF_BIT_LENGTH]
+    ):
         raise cv.Invalid(
             f"value {value} does not fit a {sig[CONF_BIT_LENGTH]}-bit field "
             f"(this is the RAW value; physical values go through set_signal's factor/offset)"
@@ -579,7 +585,9 @@ def _validate_e2e(e2e):
     if first > last:
         raise cv.Invalid(f"first_byte ({first}) is after last_byte ({last})")
     if first <= crc <= last:
-        raise cv.Invalid(f"crc_byte ({crc}) lies inside the covered range {first}..{last}")
+        raise cv.Invalid(
+            f"crc_byte ({crc}) lies inside the covered range {first}..{last}"
+        )
     return e2e
 
 
@@ -626,7 +634,9 @@ def _validate_modify(modify):
     owner = _payload_cells(modify)
     if (e2e := modify.get(CONF_E2E)) is not None:
         if not owner:
-            raise cv.Invalid("e2e repairs the CRC after a payload patch; add data or signals")
+            raise cv.Invalid(
+                "e2e repairs the CRC after a payload patch; add data or signals"
+            )
         crc = e2e[CONF_CRC_BYTE]
         if any(byte == crc for byte, _ in owner):
             raise cv.Invalid(
@@ -886,8 +896,7 @@ def validate_sna_value(value):
         if value.strip().lower() == SNA_ALL_ONES:
             return SNA_ALL_ONES
         raise cv.Invalid(
-            f"sna must be '{SNA_ALL_ONES}' or a non-negative raw value, "
-            f"got {value!r}"
+            f"sna must be '{SNA_ALL_ONES}' or a non-negative raw value, got {value!r}"
         )
     return cv.int_range(min=0, max=0xFFFFFFFF)(value)
 

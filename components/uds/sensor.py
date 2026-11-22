@@ -72,10 +72,14 @@ def _counter_schema() -> cv.Schema:
     )
 
 
-VALUE_SCHEMA = sensor.sensor_schema(state_class=STATE_CLASS_MEASUREMENT).extend(BINDING_SCHEMA).extend(
-    # `never` is a first-class choice, not a mistake: identity DIDs and a wide capacity block are
-    # read on demand through `uds.read` and must not be polled (design §5).
-    cv.Schema({cv.Optional("update_interval", default="60s"): cv.update_interval})
+VALUE_SCHEMA = (
+    sensor.sensor_schema(state_class=STATE_CLASS_MEASUREMENT)
+    .extend(BINDING_SCHEMA)
+    .extend(
+        # `never` is a first-class choice, not a mistake: identity DIDs and a wide capacity block are
+        # read on demand through `uds.read` and must not be polled (design §5).
+        cv.Schema({cv.Optional("update_interval", default="60s"): cv.update_interval})
+    )
 )
 
 DIAGNOSTICS_SCHEMA = cv.All(
@@ -96,14 +100,17 @@ DIAGNOSTICS_SCHEMA = cv.All(
 )
 
 
-def CONFIG_SCHEMA(config):  # noqa: N802 - ESPHome's platform entry point
+def CONFIG_SCHEMA(config):  # ESPHome's platform entry point.
     if isinstance(config, dict) and CONF_FIELD in config:
         return VALUE_SCHEMA(config)
-    if isinstance(config, dict) and any(key in config for key in (*COUNTERS, CONF_LAST_NRC)):
+    if isinstance(config, dict) and any(
+        key in config for key in (*COUNTERS, CONF_LAST_NRC)
+    ):
         return DIAGNOSTICS_SCHEMA(config)
     raise cv.Invalid(
         "a 'platform: uds' sensor is either a decoded value — which needs 'field:' — or a block of "
-        "hub diagnostics, which needs at least one of: " + ", ".join((*COUNTERS, CONF_LAST_NRC))
+        "hub diagnostics, which needs at least one of: "
+        + ", ".join((*COUNTERS, CONF_LAST_NRC))
     )
 
 

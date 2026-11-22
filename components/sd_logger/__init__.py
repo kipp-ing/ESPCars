@@ -20,8 +20,9 @@ import logging
 import math
 import re
 
-from esphome import automation, core
+from esphome import automation, core, pins
 import esphome.codegen as cg
+from esphome.components import time
 from esphome.components.esp32 import (
     CONF_SDKCONFIG_OPTIONS,
     include_builtin_idf_component,
@@ -34,7 +35,6 @@ from esphome.components.logger import (
     LOG_LEVEL_SEVERITY,
     request_log_listener,
 )
-from esphome.components import time
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DATA,
@@ -49,12 +49,12 @@ from esphome.const import (
 )
 from esphome.core import CORE
 import esphome.final_validate as fv
-from esphome import pins
 
 _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@kipp-ing"]
 DEPENDENCIES = ["esp32"]
+DOMAIN = "sd_logger"
 
 # The native CAN tap (S2) layers on can_gateway, but sd_logger must keep working
 # without it: a user who pulls only `components: [sd_logger]` through
@@ -164,8 +164,8 @@ def _validate_clock(value):
     hz = int(cv.frequency(value))
     if not SDSPI_MIN_HZ <= hz <= SDSPI_MAX_HZ:
         raise cv.Invalid(
-            f"clock must be between 400kHz and 20MHz; SD-over-SPI on the ESP32-C6 "
-            f"is capped at SDMMC_FREQ_DEFAULT (20MHz)"
+            "clock must be between 400kHz and 20MHz; SD-over-SPI on the ESP32-C6 "
+            "is capped at SDMMC_FREQ_DEFAULT (20MHz)"
         )
     return hz
 
@@ -305,9 +305,7 @@ def _validate_max_file_seconds(value):
         # otherwise validate as a one-second rotation.
         raise _max_file_seconds_invalid(value)
     milliseconds = _max_file_seconds_milliseconds(value)
-    if not (
-        MAX_FILE_SECONDS_MIN * 1000 <= milliseconds <= MAX_FILE_SECONDS_MAX * 1000
-    ):
+    if not (MAX_FILE_SECONDS_MIN * 1000 <= milliseconds <= MAX_FILE_SECONDS_MAX * 1000):
         raise _max_file_seconds_invalid(value)
     if milliseconds % 1000:
         # Reached only from inside the range, so the message can be about precision
@@ -745,9 +743,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_CS_PIN): pins.internal_gpio_output_pin_number,
             cv.Optional(CONF_CLOCK, default="20MHz"): _validate_clock,
             cv.Optional(CONF_MOUNT_POINT, default="/sdcard"): cv.string_strict,
-            cv.Optional(
-                CONF_CARD_POWER_PIN
-            ): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_CARD_POWER_PIN): pins.internal_gpio_output_pin_number,
             cv.Optional(CONF_BUFFER_DEPTH, default=2048): _validate_buffer_depth,
             cv.Optional(
                 CONF_SYNC_INTERVAL, default="2s"
@@ -770,9 +766,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_TIME_ID): cv.ensure_list(cv.use_id(time.RealTimeClock)),
             cv.Optional(CONF_ORIGIN): cv.string,
             cv.Optional(CONF_CAN_PORTS): cv.All(
-                cv.ensure_list(
-                    cv.maybe_simple_value(CAN_PORT_SCHEMA, key=CONF_PORT)
-                ),
+                cv.ensure_list(cv.maybe_simple_value(CAN_PORT_SCHEMA, key=CONF_PORT)),
                 cv.Length(min=1),
                 _validate_can_ports,
             ),
@@ -906,7 +900,7 @@ def _validate_esphome_logs(config, full_config):
     simply has no `X` lines in the file, which reads exactly like a quiet run.
     """
     if (logs := config.get(CONF_ESPHOME_LOGS)) is None:
-        return
+        return None
 
     logger_config = full_config.get(CONF_LOGGER)
     # V15: without a `logger:` block, request_log_listener() is never called,
@@ -1153,7 +1147,11 @@ async def to_code(config):
         clock = await cg.get_variable(time_id)
         # on_time_sync() reads gettimeofday() itself, so the anchor keeps the µs a source like SNTP
         # supplies rather than truncating to `utcnow().timestamp` seconds (clock spec C7).
-        cg.add(clock.add_on_time_sync_callback(cg.RawExpression(f"[]() {{ {var}->on_time_sync(); }}")))
+        cg.add(
+            clock.add_on_time_sync_callback(
+                cg.RawExpression(f"[]() {{ {var}->on_time_sync(); }}")
+            )
+        )
 
     # M6 rotation and collection. Both keys are read by the firmware as of the
     # Phase A wiring: `max_file_seconds` is the second rotation bound (whichever
