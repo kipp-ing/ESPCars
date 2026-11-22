@@ -1442,7 +1442,7 @@ def test_v26_the_schema_default_matches_the_headers_own_fallback(
 ) -> None:
     """The two defaults have to be the same number, and nothing else would say so.
 
-    `SD_LOG_MAX_CHUNKS` is `#define`d in collection_policy.h behind `#ifndef`, and
+    `SD_LOG_MAX_CHUNKS` is a constexpr fallback in collection_policy.h behind `#ifndef`, and
     the schema's default is what `to_code()` emits over it. A firmware build always
     takes the schema's value, but the host tests in tests/host/ compile the header
     alone and take the fallback — so if the two drift, the index the C++ cases
@@ -1461,8 +1461,14 @@ def test_v26_the_schema_default_matches_the_headers_own_fallback(
 
     setup_c6(set_core_config)
     header = (Path(module.__file__).parent / "collection_policy.h").read_text()
-    match = re.search(r"^#define\s+SD_LOG_MAX_CHUNKS\s+(\d+)\s*$", header, re.MULTILINE)
-    assert match is not None, "collection_policy.h no longer defines SD_LOG_MAX_CHUNKS"
+    match = re.search(
+        r"^static\s+constexpr\s+\w+\s+SD_LOG_MAX_CHUNKS\s*=\s*(\d+)\s*;\s*$",
+        header,
+        re.MULTILINE,
+    )
+    assert match is not None, (
+        "collection_policy.h no longer declares the SD_LOG_MAX_CHUNKS constexpr fallback"
+    )
     schema_default = validate(sd_logger(collection=collection()))["collection"][
         "max_chunks"
     ]

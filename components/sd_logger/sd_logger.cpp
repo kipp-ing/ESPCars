@@ -83,7 +83,7 @@ static uint64_t gettimeofday_us() {
   return static_cast<uint64_t>(tv.tv_sec) * 1000000ULL + static_cast<uint64_t>(tv.tv_usec);
 }
 
-static const char *const TAG = "sd_logger";
+ESPHOME_LOG_TAG(TAG, "sd_logger");
 
 // Writer task cadence: it wakes at least this often to flush/rotate even when
 // the ring trickles. The ring absorbs bursts between wakes (spec D5).
@@ -510,8 +510,9 @@ void SdLogger::setup() {
   // so it costs the server rather than the run.
   this->index_mux_ = xSemaphoreCreateMutex();
   this->confirm_q_ = xQueueCreate(SD_LOGGER_CONFIRM_QUEUE_DEPTH, sizeof(uint32_t));
-  if (this->index_mux_ == nullptr || this->confirm_q_ == nullptr)
+  if (this->index_mux_ == nullptr || this->confirm_q_ == nullptr) {
     ESP_LOGE(TAG, "collection: index mutex/queue alloc failed — no server this run");
+  }
 #endif
 
   // Card power first, if a high-side switch is present (H5), and give the card
@@ -523,9 +524,12 @@ void SdLogger::setup() {
   }
 
   // Allocate the ring up front. Failure here is fatal to the component (no
-  // point running), but not to the rest of the firmware.
+  // point running), but not to the rest of the firmware. The ring and both buffers below
+  // retain their firmware lifetime; release transfers ownership to these raw members.
   this->ring_mask_ = this->buffer_depth_ - 1;
-  this->ring_ = new (std::nothrow) LogRecord[this->buffer_depth_];
+  this->ring_ = RAMAllocator<LogRecord>(RAMAllocator<LogRecord>::PREFER_INTERNAL)
+                    .make_unique_array_for_overwrite(this->buffer_depth_)
+                    .release();
   if (this->ring_ == nullptr) {
     ESP_LOGE(TAG, "ring alloc (%" PRIu32 " records) failed", this->buffer_depth_);
     this->mark_failed();
@@ -535,7 +539,8 @@ void SdLogger::setup() {
   // The writer's block buffer. Allocated rather than a member so the component
   // object stays small and the 4 KB shows up in the heap report where the RAM
   // budget of spec §9 is actually read.
-  this->block_storage_ = new (std::nothrow) char[BLOCK_BUF_SIZE];
+  this->block_storage_ =
+      RAMAllocator<char>(RAMAllocator<char>::PREFER_INTERNAL).make_unique_array_for_overwrite(BLOCK_BUF_SIZE).release();
   if (this->block_storage_ == nullptr) {
     ESP_LOGE(TAG, "write buffer alloc (%u B) failed", static_cast<unsigned>(BLOCK_BUF_SIZE));
     this->mark_failed();
@@ -546,7 +551,9 @@ void SdLogger::setup() {
   // Text ring for the ESPHome log capture (S4), only when it was configured.
   if (this->text_depth_ > 0) {
     this->text_mask_ = this->text_depth_ - 1;
-    this->text_ring_ = new (std::nothrow) TextRecord[this->text_depth_];
+    this->text_ring_ = RAMAllocator<TextRecord>(RAMAllocator<TextRecord>::PREFER_INTERNAL)
+                           .make_unique_array_for_overwrite(this->text_depth_)
+                           .release();
     if (this->text_ring_ == nullptr) {
       ESP_LOGW(TAG, "text ring alloc (%u slots) failed - esphome log capture disabled", this->text_depth_);
       this->text_depth_ = 0;
@@ -1099,8 +1106,9 @@ bool SdLogger::mount_card_(bool allow_format) {
   // with producers still gated on `mounted_`.
   if (this->collection_.enabled()) {
     uint8_t fill = 0;
-    if (this->card_fill_percent_(&fill))
+    if (this->card_fill_percent_(&fill)) {
       ESP_LOGI(TAG, "card %u%% full at mount (retention arms at %u%%)", fill, this->collection_.retention_percent());
+    }
   }
 #endif
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
@@ -1147,12 +1155,13 @@ bool SdLogger::run_capacity_self_test_(uint64_t *volume_bytes_out) {
     *volume_bytes_out = static_cast<uint64_t>(sector_count) * SD_LOGGER_CARD_SECTOR_BYTES;
   if (verdict == CapacitySelfTestVerdict::PASS)
     return true;
-  if (verdict == CapacitySelfTestVerdict::READ_ERROR)
+  if (verdict == CapacitySelfTestVerdict::READ_ERROR) {
     ESP_LOGE(TAG, "capacity self-test read error: %s", error);
-  else if (verdict == CapacitySelfTestVerdict::TARGET_CHANGED)
+  } else if (verdict == CapacitySelfTestVerdict::TARGET_CHANGED) {
     ESP_LOGE(TAG, "capacity self-test: high LBA %" PRIu32 " changed between reads", target_lba);
-  else
+  } else {
     ESP_LOGE(TAG, "capacity self-test: high LBA %" PRIu32 " echoed its preceding low-sector primer", target_lba);
+  }
   return false;
 }
 
@@ -1779,8 +1788,9 @@ void SdLogger::on_time_sync() {
   // from its first loop() whenever the clock already reads valid, i.e. after every warm reset and
   // every wake. Taking it would relabel a warm or slept clock `utc/sync` and lose the drift state.
   if (clock_unstepped_since(this->setup_clock_, utc_us, boot_us)) {
-    if (this->clock_unstepped_syncs_++ == 0)
+    if (this->clock_unstepped_syncs_++ == 0) {
       ESP_LOGI(TAG, "clock: a time-sync callback left the clock where it was — not a sync, the basis stands");
+    }
     return;
   }
   this->set_utc_anchor(utc_us, boot_us);
@@ -1961,11 +1971,12 @@ bool SdLogger::read_card_tails_(ClockPoint *end, uint32_t *seq_out) {
   // one allocation a fragmented heap is most likely to refuse.
   static const size_t READ_CHUNK = 4096;
   char *heap_buf = static_cast<char *>(malloc(READ_CHUNK));
-  ClockTailScanner *scanner = new (std::nothrow) ClockTailScanner(false);
+  auto scanner = RAMAllocator<ClockTailScanner>(RAMAllocator<ClockTailScanner>::PREFER_INTERNAL).make_unique(false);
   char stack_buf[256];
   const bool clock_ok = heap_buf != nullptr && scanner != nullptr;
-  if (!clock_ok)
+  if (!clock_ok) {
     ESP_LOGW(TAG, "clock: no memory for the card tail scan — no card floor this boot");
+  }
   char *buf = heap_buf != nullptr ? heap_buf : stack_buf;
   const size_t buf_len = heap_buf != nullptr ? READ_CHUNK : sizeof(stack_buf);
 
@@ -2011,8 +2022,9 @@ bool SdLogger::read_card_tails_(ClockPoint *end, uint32_t *seq_out) {
       };
       TornTailScanner tail;
       if (want_clock) {
-        if (!read_window(SD_LOG_CLOCK_TAIL_BYTES, scanner, &tail))
+        if (!read_window(SD_LOG_CLOCK_TAIL_BYTES, scanner.get(), &tail)) {
           ESP_LOGW(TAG, "clock: reading %s failed (errno %d) — using what was read", name, errno);
+        }
         if (scanner->end(end)) {
           *seq_out = seq;
           found = true;
@@ -2028,7 +2040,7 @@ bool SdLogger::read_card_tails_(ClockPoint *end, uint32_t *seq_out) {
     }
   }
   free(heap_buf);
-  delete scanner;
+  scanner.reset();
   return found;
 }
 
@@ -2131,7 +2143,7 @@ void SdLogger::learn_clock_() {
     ESP_LOGI(TAG, "clock: %s, no card floor (read in %" PRId64 " ms)", wake_kind_str(in.wake), took_ms);
   }
   ESP_LOGI(TAG, "clock: files state %s/%s%s", clock_basis_str(best.basis), clock_src_str(best.src),
-           synced ? " (a sync came first)" : "");
+           synced ? LOG_STR_LITERAL(" (a sync came first)") : "");
 }
 
 bool SdLogger::close_file_(const char *reason) {
@@ -2426,12 +2438,13 @@ void SdLogger::sample_writer_stack_() {
     return;
   this->writer_stack_min_free_.store(free_bytes, std::memory_order_relaxed);
   const StackHeadroom h = classify_stack_headroom(free_bytes);
-  if (h == StackHeadroom::OK)
+  if (h == StackHeadroom::OK) {
     ESP_LOGD(TAG, "writer stack: %" PRIu32 " B free of %" PRIu32 " B", free_bytes,
              static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
-  else
+  } else {
     ESP_LOGW(TAG, "writer stack %s: %" PRIu32 " B free of %" PRIu32 " B", stack_headroom_str(h), free_bytes,
              static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
+  }
 }
 
 void SdLogger::maybe_rotate_(uint64_t now64) {
@@ -3069,8 +3082,9 @@ bool SdLogger::discard_reserved_chunk_(uint32_t seq, uint64_t bytes, ChunkState 
     char sealed_name[SD_LOG_NAME_LEN];
     format_chunk_name(sealed_name, seq, ChunkState::SEALED);
     const std::string sealed_path = this->mount_point_ + "/" + sealed_name;
-    if (unlink(sealed_path.c_str()) == 0)
+    if (unlink(sealed_path.c_str()) == 0) {
       ESP_LOGW(TAG, "%s: %s was never renamed; reclaimed it as %s", reason, name, sealed_name);
+    }
   }
 #endif
   // ENOENT lands here too: the file is gone either way, and an entry naming a file that does not
@@ -3112,10 +3126,11 @@ bool SdLogger::discard_reserved_chunk_(uint32_t seq, uint64_t bytes, ChunkState 
                static_cast<uint32_t>(bytes / 1024), discarded_chunks);
     }
   } else {
-    if (have_fill)
+    if (have_fill) {
       ESP_LOGI(TAG, "%s: card %u%% full — deleted collected %s", reason, fill_percent, name);
-    else
+    } else {
       ESP_LOGI(TAG, "%s: deleted collected %s", reason, name);
+    }
   }
   return dropped;
 }
@@ -3718,8 +3733,9 @@ void SdLogger::sync_file_() {
     return;
   }
   const int64_t held_us = esp_timer_get_time() - t0;
-  if (held_us > STALL_WARN_US)
+  if (held_us > STALL_WARN_US) {
     ESP_LOGW(TAG, "fsync() held %" PRId64 " ms — card internally busy", held_us / 1000);
+  }
 }
 
 void SdLogger::writer_loop_() {
@@ -3827,8 +3843,8 @@ void SdLogger::writer_loop_() {
       // benches whose card_power_pin drove a header pin and nothing else; a line that names the
       // step it is about to take is checkable against what happens next.
       ESP_LOGW(TAG, "card recovery: attempt %" PRIu32 " (%s%sremount)", this->recovery_.attempts(),
-               this->recovery_power_cycle_ ? "power cycle + " : "",
-               this->recovery_.reset_due() ? "in-band reset + " : "");
+               this->recovery_power_cycle_ ? LOG_STR_LITERAL("power cycle + ") : "",
+               this->recovery_.reset_due() ? LOG_STR_LITERAL("in-band reset + ") : "");
       if (this->try_recover_()) {
         if (this->mounted_) {
           ESP_LOGI(TAG, "card recovered after %" PRIu32 " attempt(s) — logging to L%07" PRIu32 ".LOG",
@@ -3980,8 +3996,10 @@ void SdLogger::monitor_loop_() {
           // Say what was measured. The trip is one-way by design, so this line is the only
           // evidence of *why* logging stopped — and when the conversion was wrong, its absence is
           // what let a mis-scaled reading masquerade as a dying supply for two sessions.
-          ESP_LOGW(TAG, "VCC sag: rail %.2f V < threshold %.2f V (raw %d, %s) — closing the log", v_rail,
-                   this->vcc_threshold_v_, raw, this->adc_cali_ != nullptr ? "calibrated" : "UNCALIBRATED estimate");
+          ESP_LOGW(
+              TAG, "VCC sag: rail %.2f V < threshold %.2f V (raw %d, %s) — closing the log", v_rail,
+              this->vcc_threshold_v_, raw,
+              this->adc_cali_ != nullptr ? LOG_STR_LITERAL("calibrated") : LOG_STR_LITERAL("UNCALIBRATED estimate"));
           this->dying_.store(true, std::memory_order_release);
           this->monitor_task_ = nullptr;
           vTaskDelete(nullptr);
@@ -4055,10 +4073,12 @@ void SdLogger::loop() {
     ESP_LOGW(TAG, "  torn_unsealed=%" PRIu32 " — file(s) without #close the boot could not seal; see the boot log",
              this->torn_unsealed_.load(std::memory_order_relaxed));
   }
-  if (this->degraded_identification_)
+  if (this->degraded_identification_) {
     ESP_LOGW(TAG, "  card mounted with a latched idle bit masked — working, but still owed a power cycle");
-  if (this->capacity_degraded())
+  }
+  if (this->capacity_degraded()) {
     ESP_LOGE(TAG, "  capacity=%s — card remains mounted read-only for collection", this->capacity_status());
+  }
 #ifdef USE_SD_LOGGER_COLLECTION
   // Retention's lifetime loss, on its own line and only once it exists. `#gap` states deltas, so
   // unlike `#drop` it has no lifetime column a reader could fall back on — this is the running total
@@ -4090,12 +4110,13 @@ void SdLogger::dump_config() {
   ESP_LOGCONFIG(TAG, "  mount=%s buffer_depth=%" PRIu32 " sync_interval=%" PRIu32 "ms", this->mount_point_.c_str(),
                 this->buffer_depth_, this->sync_interval_ms_);
   ESP_LOGCONFIG(TAG, "  max_file_size=%" PRIu32 " B  mounted=%s", this->max_file_size_,
-                this->mounted_ ? "yes" : "NO (logging disabled)");
+                this->mounted_ ? LOG_STR_LITERAL("yes") : LOG_STR_LITERAL("NO (logging disabled)"));
   // The same values every file's `#ident` line carries (spec F1j), so a card can be matched to the
   // device it came from without pulling a file first.
   const uint8_t *mac = this->ident_.mac;
   ESP_LOGCONFIG(TAG, "  ident: mac=%02x:%02x:%02x:%02x:%02x:%02x elf=%s cfg=%08" PRIx32, mac[0], mac[1], mac[2], mac[3],
-                mac[4], mac[5], this->ident_.elf[0] != '\0' ? this->ident_.elf : "-", this->ident_.cfg);
+                mac[4], mac[5], this->ident_.elf[0] != '\0' ? this->ident_.elf : LOG_STR_LITERAL("-"),
+                this->ident_.cfg);
 #ifdef SD_LOG_CONFINE_BYTES
   ESP_LOGCONFIG(TAG, "  confine_bytes=%" PRIu64 " B (writer requires a volume at or below this cap)",
                 static_cast<uint64_t>(SD_LOG_CONFINE_BYTES));
@@ -4145,12 +4166,13 @@ void SdLogger::dump_config() {
     ESP_LOGCONFIG(TAG, "  clock: %s/%s (docs/sd_logger-clock-spec.md)", clock_basis_str(best.basis),
                   clock_src_str(best.src));
   }
-  if (this->card_power_pin_ >= 0)
+  if (this->card_power_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  card_power_pin=%d", this->card_power_pin_);
+  }
   if (this->recovery_.enabled()) {
     ESP_LOGCONFIG(TAG, "  recovery: retry in %" PRIu32 " ms, max_attempts=%" PRIu32 ", power_cycle=%s",
                   this->recovery_.delay_ms(), this->recovery_.attempts_limit(),
-                  this->recovery_power_cycle_ ? "yes" : "no");
+                  this->recovery_power_cycle_ ? LOG_STR_LITERAL("yes") : LOG_STR_LITERAL("no"));
     if (this->recovery_.in_band_reset()) {
       ESP_LOGCONFIG(TAG,
                     "  recovery: in-band reset from attempt 2, busy budget %" PRIu32 " ms doubling to %" PRIu32 " ms",
@@ -4204,22 +4226,28 @@ void SdLogger::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  fatfs: %" PRIu32 " volume slot(s) — a mount can only be registered this many times at once",
                 SD_FATFS_VOLUME_SLOTS);
-  if (this->vcc_adc_gpio_ >= 0)
-    ESP_LOGCONFIG(TAG, "  vcc_monitor: adc_gpio=%d threshold=%.2fV divider=%.2f (%s)", this->vcc_adc_gpio_,
-                  this->vcc_threshold_v_, this->vcc_divider_,
-                  this->adc_cali_ != nullptr ? "eFuse-calibrated" : "UNCALIBRATED estimate");
+  if (this->vcc_adc_gpio_ >= 0) {
+    ESP_LOGCONFIG(
+        TAG, "  vcc_monitor: adc_gpio=%d threshold=%.2fV divider=%.2f (%s)", this->vcc_adc_gpio_,
+        this->vcc_threshold_v_, this->vcc_divider_,
+        this->adc_cali_ != nullptr ? LOG_STR_LITERAL("eFuse-calibrated") : LOG_STR_LITERAL("UNCALIBRATED estimate"));
+  }
   ESP_LOGCONFIG(TAG, "  format: v%u (L#######.LOG)", SD_LOG_FORMAT_VERSION);
   // The same table each file re-emits as `#src` lines, so the console and the
   // card agree on what a label means.
-  for (uint8_t i = 0; i < this->sources_.size(); i++)
+  for (uint8_t i = 0; i < this->sources_.size(); i++) {
     ESP_LOGCONFIG(TAG, "  source %u -> %c,%s", this->sources_.at(i).tag, this->sources_.at(i).kind,
                   this->sources_.at(i).label);
-  if (this->text_depth_ > 0)
+  }
+  if (this->text_depth_ > 0) {
     ESP_LOGCONFIG(TAG, "  esphome_logs: level<=%u depth=%u", this->log_level_, this->text_depth_);
+  }
 #ifdef USE_SD_LOGGER_CAN_TAP
-  for (uint8_t i = 0; i < this->can_tap_count_; i++)
-    ESP_LOGCONFIG(TAG, "  can tap %u -> source %u '%s' (ring %s)", i, this->can_taps_[i].source,
-                  this->can_taps_[i].label, this->can_taps_[i].port->log_tap_ring() != nullptr ? "armed" : "NOT ARMED");
+  for (uint8_t i = 0; i < this->can_tap_count_; i++) {
+    ESP_LOGCONFIG(
+        TAG, "  can tap %u -> source %u '%s' (ring %s)", i, this->can_taps_[i].source, this->can_taps_[i].label,
+        this->can_taps_[i].port->log_tap_ring() != nullptr ? LOG_STR_LITERAL("armed") : LOG_STR_LITERAL("NOT ARMED"));
+  }
 #endif
 }
 
