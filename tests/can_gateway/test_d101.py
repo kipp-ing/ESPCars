@@ -25,6 +25,8 @@ def test_idle_flags(set_core_config, variant, enabled, version, framework):
             "-DCAN_GATEWAY_IDLE_NOTIFY",
             "-Wl,--wrap=xEventGroupCreateWithCaps",
             "-Wl,--wrap=xTimerPendFunctionCallFromISR",
+            "-Wl,-u,__wrap_xEventGroupCreateWithCaps",
+            "-Wl,-u,__wrap_xTimerPendFunctionCallFromISR",
         )
     else:
         assert flags == ()

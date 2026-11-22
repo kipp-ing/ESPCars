@@ -1370,10 +1370,14 @@ def idle_notify_build_flags() -> tuple[str, ...]:
         VARIANT_ESP32H2,
     }:
         return ()
+    # -u keeps idle_notify.o in the link: it lives in an archive, and when nothing else references it the
+    # TWAI library's __wrap_ references would stay undefined (seen with the test-disable build).
     return (
         "-DCAN_GATEWAY_IDLE_NOTIFY",
         "-Wl,--wrap=xEventGroupCreateWithCaps",
         "-Wl,--wrap=xTimerPendFunctionCallFromISR",
+        "-Wl,-u,__wrap_xEventGroupCreateWithCaps",
+        "-Wl,-u,__wrap_xTimerPendFunctionCallFromISR",
     )
 
 
