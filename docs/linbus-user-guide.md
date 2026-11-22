@@ -77,7 +77,7 @@ linbus:
 `tx_pin`/`rx_pin` are the only required keys. `mode: listener` is worth
 setting explicitly even though it's not the default: it's the one mode that
 is safe to leave on a bus you don't fully understand yet, since it can never
-answer a poll or drive a header (`onID()` returns immediately for a listener
+answer a poll or drive a header (`on_id()` returns immediately for a listener
 — it's not "answers nothing by omission", it's a mode the C++ special-cases).
 
 ### 3.2 Sniff traffic — `rx_ids:` and `on_frame:`
@@ -388,7 +388,7 @@ what you're answering or scheduling. Confirm what's actually flashed from the
 ## 8. Going deeper
 
 - `components/linbus/lin_protocol_handler.cpp` — the checksum algorithm
-  (`calculateChecksum`), the classic/enhanced runtime fallback, and why
+  (`calculate_checksum`), the classic/enhanced runtime fallback, and why
   diagnostic ids `0x3C`/`0x3D` are always classic.
 - `components/linbus/lin_communication.cpp` — schedule execution, response
   registration, and the self-test's fixed nine-id loopback table.

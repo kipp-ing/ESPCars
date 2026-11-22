@@ -52,7 +52,7 @@ class LinBusComponent : public Component {
   void set_cs_pin(GPIOPin *pin) { cs_pin_ = pin; }
   void set_uart_port_str(const std::string &port);
   void set_baud_rate(uint32_t baud) { baud_rate_ = baud; }
-  void set_mode(uint8_t mode) { mode_ = static_cast<lin_mode_t>(mode); }
+  void set_mode(uint8_t mode) { mode_ = static_cast<LinMode>(mode); }
 
   void add_schedule_item(uint8_t id, uint32_t interval_ms);
   void add_response(uint8_t id, const std::vector<uint8_t> &data, bool enhanced);
@@ -72,7 +72,7 @@ class LinBusComponent : public Component {
   // Statistics getters.
   //
   // These return the **10 s WINDOW**, not a lifetime total — the window is
-  // zeroed by updateStatistics(). On a steady bus they therefore sit at a
+  // zeroed by update_statistics(). On a steady bus they therefore sit at a
   // roughly constant value forever, which reads as a stuck counter and has been
   // mistaken for one. If you want a total that only ever climbs (an odometer,
   // a `STATE_CLASS_TOTAL_INCREASING` sensor, a reconciliation against another
@@ -111,7 +111,7 @@ class LinBusComponent : public Component {
   GPIOPin *cs_pin_{nullptr};
   uart_port_t uart_port_{UART_NUM_1};
   uint32_t baud_rate_{19200};
-  lin_mode_t mode_{LIN_MODE_COMMANDER};
+  LinMode mode_{LIN_MODE_COMMANDER};
 
   LINCommunication *lin_comm_{nullptr};
 

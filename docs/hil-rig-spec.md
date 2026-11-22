@@ -224,7 +224,7 @@ tests, build-yaml coverage, compile at least one affected target).
    Rig use: recorded as per-phase deltas; asserted == 0 only on *receiving-only*
    ports — a transmitter under flood legitimately accumulates arbitration-loss
    events.
-2. **`linbus`: self-test teardown.** Verified in code: `enableSelfTest(false)`
+2. **`linbus`: self-test teardown.** Verified in code: `enable_self_test(false)`
    (`components/linbus/LINCommunication.cpp:415-420`) only clears two flags; the 9
    synthetic schedule IDs and their responses installed by `selfTestInitIfNeeded()`
    (`:468`, `CASES[]` at `:474`) stay installed forever — permanently inflated LIN
