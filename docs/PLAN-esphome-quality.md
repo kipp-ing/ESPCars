@@ -317,6 +317,38 @@ with a deprecation warning, following [CONVENTIONS](CONVENTIONS.md)'s
 "Don't break released YAML schemas silently" rule. Update the linbus user guide,
 schema tests, and `tests/build/` YAMLs to use the new terms.
 
+**P4 implemented; compile and bench evidence pending:** all C++ declarations
+and definitions now use the C++17 namespace `esphome::linbus`; the seven mixed-case
+files have snake_case names and their includes are updated. Custom lint findings
+in linbus are **32 → 0** (namespace, tags, pragma, integer constants, bounded
+formatting, log literals and inclusive language). Integer logs use matching
+`PRIu32`/`PRId64` formats. The UART/FreeRTOS/`esp_timer_get_time()` timing
+expressions, read/write order, buffers, synchronization and timeouts are unchanged.
+The statistics clock is explicitly `esphome::millis()`; no Arduino dependency
+remains in linbus. In the three low-level sources, every former IDF W/I/D call
+is now `ESP_LOGV`: those calls were compiled out by `CONFIG_LOG_MAXIMUM_LEVEL=1`
+before P4 and remain compiled out at the default/test ESPHome DEBUG level.
+There are no dump/action exceptions. The six ERROR calls retain their level
+and now route through ESPHome instead of IDF; P9 checks that remaining behavior
+difference. `linbus.cpp` log levels are unchanged. VERBOSE explicitly enables
+the low-level diagnostics for diagnosis and can affect LIN timing.
+
+Canonical modes are `commander`/`responder`/`listener`; the default remains the
+same bus-driving role (enum value 0). Old mode spellings warn and normalize to
+the same validated configuration and generated code for one release cycle.
+The renamed `commander_requests` sensor likewise retains `master_requests` as
+a warning alias, rejecting simultaneous old/new keys. The guide, build YAMLs
+and schema/codegen tests use the new names except explicit compatibility cases.
+`tests/hil/` and `script/hil/` are deliberately unchanged until after P9.
+The operator reported all four configs (ESP32, ESP32 dual, ESP32-C3 and ESP32-C6)
+compiled with zero warnings before the logging-level correction. The available
+ESP32 build supports a scoped clang-tidy run on the corrected repository sources:
+89 findings, zero tool errors; cleanup remains P5. Compilation of the corrected
+sources and the full clang-tidy matrix remain operator gates; the sandbox cannot
+compile or reach the bench. The default `script/check.sh` tidy matrix stops at
+the absent isotp compilation database; all preceding gates pass. This does not
+change P4's completion gate below.
+
 **Done:** compiles on all three linbus targets. The LIN timing check is part
 of P9.
 
@@ -377,7 +409,7 @@ the same YAML on the same boards.
    - main-loop period and the longest loop iteration (blocking warnings)
    - RX ISR to forward latency, and the slot tracker counters
    - LIN frame timing: header break/sync and the response window, in
-     commander and listener mode
+     commander, responder and listener modes
    - cyclic-send interval jitter (issue #2 floor)
    - heap: free and largest block after setup, and during load
 3. sd_logger: the files written decode identically with `sdlog_decode`, and a
@@ -389,6 +421,11 @@ the same YAML on the same boards.
 | PR | Phase | What could differ | P9 check | Result |
 |---|---|---|---|---|
 | P3b-sd_logger | P3 step 2 | Five `new (std::nothrow)` allocations → RAMAllocator PREFER_INTERNAL (record ring, text ring, writer block, clock-tail scanner, collection serve block); same sizes and lifetimes, same region on the C6 (no PSRAM). On exhaustion the existing nullptr path now runs instead of an abort. | Compare heap free and largest block after setup and under load vs reference; decoded files identical; one rotation + collection run clean. Allocation failure is outside the design envelope (F-069): no allocation-failure checks or fault injection. | |
+| P4 | P4 | Commander timing after namespace/file/role renames and constant conversion; intended wire behavior unchanged, with no new low-level RX/TX/event-task log calls at DEBUG. | Compare break length (half-baud 0x00), sync/PID order, 20 ms TX completion timeout, schedule cadence/jitter, idle gate and inter-byte windows against reference at DEBUG; repeat during main-loop stalls. | |
+| P4 | P4 | Responder RX-to-TX path after namespace/file/role renames; intended response timing and payloads unchanged, with no new low-level RX/TX/event-task log calls at DEBUG. | Compare first-response-byte latency, response window, payload/checksum, length-hint and timeout finalization, echo/collision and framing recovery against reference at DEBUG. | |
+| P4 | P4 | Listener RX path after namespace/file/role renames and constant conversion; intended passive behavior unchanged, with no new low-level RX/TX/event-task log calls at DEBUG. | Confirm zero TX; compare decoded IDs/data/checksums, inter-byte finalization, hardware-break/error resynchronization and reboot-on-busy-bus recovery against reference at DEBUG. | |
+| P4 | P4 | The six existing low-level ERROR calls now route through ESPHome instead of IDF. All 28 former W/I/D calls are VERBOSE, compiled out at DEBUG; no dump/action exceptions. VERBOSE diagnosis deliberately adds logging cost. | At DEBUG, confirm no new low-level diagnostics during RX/TX/event-task traffic and no timing/counter regression; exercise existing initialization-error paths and compare reporting through ESPHome. Record any timing impact separately when explicitly enabling VERBOSE diagnosis. | |
+| P4 | P4 | YAML modes normalize old spellings with warnings; commander_requests keeps the released sensor spelling as an alias. | Build reference/new firmware from unchanged bench YAML; confirm mode/TX conditions, counters, sensor totals and self-test outcome match. Schema/codegen equivalence is also covered by pytest. | |
 
 **Done:** every row is checked off, with no regression against the reference
 outside what the rows allow.

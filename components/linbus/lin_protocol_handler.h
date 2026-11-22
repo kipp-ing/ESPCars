@@ -3,19 +3,21 @@
 #include <cstdint>
 #include <cstddef>
 #include "esp_timer.h"  // ensure own direct dependency
-#include "LinCommon.h"
+#include "lin_common.h"
 
 #include "driver/uart.h"
 #include "esp_intr_alloc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+namespace esphome::linbus {
+
 // Forward Declarations (to avoid circular dependencies)
 class LinSerial;
 
 // Constants for LIN protocol
-#define LIN_BREAK 0x00
-#define LIN_SYNC 0x55
+static constexpr uint8_t LIN_BREAK = 0x00;
+static constexpr uint8_t LIN_SYNC = 0x55;
 
 // LIN frame structure
 typedef struct {
@@ -37,7 +39,7 @@ typedef struct {
 typedef struct {
   uint8_t id;                  // ID
   uint32_t updateInterval;     // Send interval (ms); 0 marks a free slot
-  uint32_t last_send_time_ms;  // millis() of last send (unsigned; wrap-safe subtraction)
+  uint32_t last_send_time_ms;  // esp_timer_get_time() / 1000 at last send (unsigned; wrap-safe subtraction)
   bool sent_once;              // false until first send (replaces the ambiguous 0 sentinel)
 } lin_schedule_item_t;
 
@@ -53,14 +55,14 @@ typedef struct {
 // LIN Statistics structure (10-second rolling window)
 typedef struct {
   // Windowed counters (reset every 10 s; feed the per-second rate fields below)
-  uint32_t master_requests_sent;
+  uint32_t commander_requests_sent;
   uint32_t id_requests_answered;
   uint32_t data_bytes_received;
   uint32_t frames_received;  // accepted (checksum-valid) frames this window (N6)
   uint32_t unique_ids_seen;
 
   // Windowed error counters — one per distinct fault class (N6 root-cause taxonomy)
-  uint32_t master_send_failures;
+  uint32_t commander_send_failures;
   uint32_t pid_errors;
   uint32_t checksum_errors;
   uint32_t checksum_fallback;  // frame accepted with the *other* checksum mode (see UPGRADES.md C2)
@@ -70,12 +72,12 @@ typedef struct {
   uint32_t uart_breaks;        // UART_BREAK events actually delivered by the driver (HW-0b/HW-0c)
 
   // Lifetime totals (never reset -> safe for STATE_CLASS_TOTAL_INCREASING sensors, UPGRADES.md H4)
-  uint32_t master_requests_total;
+  uint32_t commander_requests_total;
   uint32_t id_requests_answered_total;
   uint32_t data_bytes_received_total;
   uint32_t frames_received_total;
   uint32_t checksum_errors_total;
-  uint32_t master_send_failures_total;
+  uint32_t commander_send_failures_total;
   uint32_t pid_errors_total;
   uint32_t frame_errors_total;
   uint32_t collisions_total;
@@ -88,7 +90,7 @@ typedef struct {
   int64_t stats_start_time;
 
   // Per-second rates (calculated values)
-  float master_reqs_per_sec;
+  float commander_reqs_per_sec;
   float id_answers_per_sec;
   float data_bytes_per_sec;
   float estimated_bus_load_percent;
@@ -120,7 +122,7 @@ class LinProtocolHandler {
   // Send the next due scheduled header (break + sync + PID). Called from the UART event
   // task on every wake (A5 off-loop tick), so the cadence is main-loop-independent (N8).
   // At most one header per call; returns the ID sent, or 0 if none was due / bus busy.
-  uint8_t master_send();
+  uint8_t commander_send();
 
   // Get data for a specific PID, returns length or 0 if not found
   size_t getDataForID(uint8_t id, uint8_t *dataBuf);
@@ -180,7 +182,7 @@ class LinProtocolHandler {
   // Pointer to schedule array and count (owned by LINCommunication)
   lin_schedule_item_t *schedule_;
 
-  // Rotating scan start for master_send() fairness: the off-loop tick calls it every ~2 ms,
+  // Rotating scan start for commander_send() fairness: the off-loop tick calls it every ~2 ms,
   // so a pathologically short interval in a low slot would otherwise win the from-zero scan
   // every time and starve later slots. Consecutive calls resume after the last-sent slot.
   // Touched only under lockData().
@@ -191,7 +193,7 @@ class LinProtocolHandler {
   // expected-echo FIFO holds what we just transmitted (ECHO_BREAK marks the break, whose echo
   // presentation varies — HW-0b vs HW-0c); receiveDecode() compares each incoming byte against
   // the front and counts a mismatch as a collision: a competing publisher overdrove us.
-  // Single-context by design: since the A5 event-task fold, ALL TX (master_send headers, onID
+  // Single-context by design: since the A5 event-task fold, ALL TX (commander_send headers, onID
   // responses) and ALL consumption (receiveDecode / onUartBreak / onInterByteTimeout /
   // onFrameError) run in the UART event task, so the FIFO itself needs no locking — only the
   // collision counter increments take the data mutex (like pid_errors). Static storage, no
@@ -238,3 +240,5 @@ class LinProtocolHandler {
  public:
   bool isBusIdle(uint32_t required_idle_bits = 3);
 };
+
+}  // namespace esphome::linbus

@@ -5,13 +5,12 @@
 #include "esphome/core/automation.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
-#include "LINCommunication.h"
+#include "lin_communication.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
 
-namespace esphome {
-namespace linbus {
+namespace esphome::linbus {
 
 // Forward declaration
 class LinBusComponent;
@@ -81,16 +80,16 @@ class LinBusComponent : public Component {
   // lifetime `*_total` fields. Semantics kept as-is rather than "fixed",
   // because these are callable from user lambdas and changing what they return
   // would break those silently.
-  uint32_t get_master_requests_sent() const;
+  uint32_t get_commander_requests_sent() const;
   uint32_t get_id_requests_answered() const;
   uint32_t get_data_bytes_received() const;
   uint32_t get_checksum_errors() const;
-  uint32_t get_master_send_failures() const;
+  uint32_t get_commander_send_failures() const;
   float get_bus_load_percent() const;
   float get_error_rate_percent() const;
 
   // Sensor registration
-  void set_master_requests_sensor(sensor::Sensor *sensor) { master_requests_sensor_ = sensor; }
+  void set_commander_requests_sensor(sensor::Sensor *sensor) { commander_requests_sensor_ = sensor; }
   void set_id_requests_answered_sensor(sensor::Sensor *sensor) { id_requests_answered_sensor_ = sensor; }
   void set_data_bytes_received_sensor(sensor::Sensor *sensor) { data_bytes_received_sensor_ = sensor; }
   void set_frames_received_sensor(sensor::Sensor *sensor) { frames_received_sensor_ = sensor; }
@@ -112,7 +111,7 @@ class LinBusComponent : public Component {
   GPIOPin *cs_pin_{nullptr};
   uart_port_t uart_port_{UART_NUM_1};
   uint32_t baud_rate_{19200};
-  lin_mode_t mode_{LIN_MODE_MASTER};
+  lin_mode_t mode_{LIN_MODE_COMMANDER};
 
   LINCommunication *lin_comm_{nullptr};
 
@@ -154,7 +153,7 @@ class LinBusComponent : public Component {
   uint32_t last_stats_log_{0};
 
   // Sensors for statistics
-  sensor::Sensor *master_requests_sensor_{nullptr};
+  sensor::Sensor *commander_requests_sensor_{nullptr};
   sensor::Sensor *id_requests_answered_sensor_{nullptr};
   sensor::Sensor *data_bytes_received_sensor_{nullptr};
   sensor::Sensor *frames_received_sensor_{nullptr};
@@ -213,5 +212,4 @@ template<typename... Ts> class RunSelfTestAction : public Action<Ts...> {
   LinBusComponent *parent_;
 };
 
-}  // namespace linbus
-}  // namespace esphome
+}  // namespace esphome::linbus

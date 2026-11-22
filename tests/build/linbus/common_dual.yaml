@@ -1,8 +1,8 @@
 # Two LIN segments on one chip — the CAN_LIN_ESP32 ("Mr. Purple") layout.
-# LIN0 slave on UART1, LIN1 listener on UART2, no shared pin, no shared UART.
+# LIN0 responder on UART1, LIN1 listener on UART2, no shared pin, no shared UART.
 # See docs/commissioning-mr-purple.md (W1, phase P3).
 #
-# This is also the shape of the P3 bring-up config: a slave that answers the C6
+# This is also the shape of the P3 bring-up config: a responder that answers the C6
 # partner's poll on 0x20, and a listener sniffing the same wire.
 
 linbus:
@@ -12,7 +12,7 @@ linbus:
     cs_pin: ${lin0_cs_pin}
     uart_port: UART_NUM_1
     baud_rate: 19200
-    mode: slave
+    mode: responder
     responses:
       - lin_id: 0x20
         data: [0x00, 0x00, 0x00, 0x01]
@@ -27,7 +27,7 @@ linbus:
         checksum: enhanced
         then:
           - lambda: |-
-              ESP_LOGD("lin0", "master frame 0x21: %02X %02X", data[0], data[1]);
+              ESP_LOGD("lin0", "commander frame 0x21: %02X %02X", data[0], data[1]);
     on_error:
       - then:
           - logger.log:

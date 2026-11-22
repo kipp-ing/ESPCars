@@ -117,7 +117,11 @@ def test_mode_validation_still_applies_per_instance(set_core_config) -> None:
     """Per-instance rules are untouched by MULTI_CONF."""
     setup_esp32(set_core_config)
 
-    with pytest.raises(cv.Invalid, match=r"schedule is only valid with mode: master"):
+    with pytest.raises(
+        cv.Invalid, match=r"schedule is only valid with mode: commander"
+    ):
         validate(
-            instance(LIN1, mode="slave", schedule=[{"lin_id": 4, "interval": "50ms"}])
+            instance(
+                LIN1, mode="responder", schedule=[{"lin_id": 4, "interval": "50ms"}]
+            )
         )

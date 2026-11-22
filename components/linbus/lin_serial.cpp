@@ -1,14 +1,15 @@
-#include "LinSerial.h"
+#include "lin_serial.h"
 #include "driver/uart.h"
 #include "esp_idf_version.h"
-#include "esp_log.h"
+#include "esphome/core/log.h"
 #include "freertos/FreeRTOS.h"
 #include <cstring>
-#include "esp_timer.h"  // For ets_delay_us or alternative delay
 
 #include "esp_intr_alloc.h"
 
-static const char *TAG = "LinSerial";
+namespace esphome::linbus {
+
+ESPHOME_LOG_TAG(TAG, "LinSerial");
 
 LinSerial::LinSerial(uart_port_t uart_num, int tx_pin, int rx_pin, int baud_rate)
     : uart_num_(uart_num), tx_pin_(tx_pin), rx_pin_(rx_pin), baud_rate_(baud_rate) {}
@@ -94,3 +95,5 @@ bool LinSerial::writeBytes(const uint8_t *data, size_t len) {
 }
 
 void LinSerial::flush() { uart_flush_input(uart_num_); }
+
+}  // namespace esphome::linbus

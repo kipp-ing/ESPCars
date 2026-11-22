@@ -1,11 +1,11 @@
 linbus:
-  id: lin_master
+  id: lin_commander
   tx_pin: ${tx_pin}
   rx_pin: ${rx_pin}
   cs_pin: ${cs_pin}
   baud_rate: 19200
   uart_port: UART_NUM_1
-  mode: master
+  mode: commander
   self_test: true
   schedule:
     - lin_id: 34
@@ -66,9 +66,9 @@ button:
 
 sensor:
   - platform: linbus
-    linbus_id: lin_master
-    master_requests:
-      name: LIN Master Requests
+    linbus_id: lin_commander
+    commander_requests:
+      name: LIN Commander Requests
     id_requests_answered:
       name: LIN ID Requests Answered
     data_bytes_received:
@@ -98,6 +98,6 @@ sensor:
 
 binary_sensor:
   - platform: linbus
-    linbus_id: lin_master
+    linbus_id: lin_commander
     self_test_pass:
       name: LIN Self-Test Pass

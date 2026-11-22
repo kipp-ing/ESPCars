@@ -1,16 +1,23 @@
-#include "LinProtocolHandler.h"
+#include "lin_protocol_handler.h"
 // Third-Party Library Headers
-#include "LinSerial.h"  // Explicit include for LinSerial
-#include "LinCommon.h"  // Explicit include for shared constants
-#include "esp_log.h"    // Explicit include for ESP_LOG* macros
-#include "esp_timer.h"  // Explicit include for esp_timer_get_time()
-#include <cstring>      // For memset
+#include "lin_serial.h"        // Explicit include for LinSerial
+#include "lin_common.h"        // Explicit include for shared constants
+#include "esphome/core/log.h"  // Explicit include for ESP_LOG* macros
+#include "esp_timer.h"         // Explicit include for esp_timer_get_time()
+#include <cstring>             // For memset
 
 #include "driver/uart.h"
 
 #include <cstring>
 
-static const char *TAG = "LinProt";
+#include <cinttypes>
+
+namespace esphome::linbus {
+
+ESPHOME_LOG_TAG(TAG, "LinProt");
+
+// The former IDF logger compiled non-error logs out (CONFIG_LOG_MAXIMUM_LEVEL=1).
+// Keep them at VERBOSE so DEBUG adds no logging work on LIN timing paths.
 
 LinProtocolHandler::LinProtocolHandler(LinSerial *serial, int baud_rate, lin_schedule_item_t *schedule,
                                        lin_discovered_id_t *discoveredIDs, lin_respond_data_t *responses,
@@ -125,7 +132,7 @@ void LinProtocolHandler::onData(uint8_t pid, const uint8_t *data, size_t len) {
       statistics_.checksum_fallback++;
       statistics_.checksum_fallback_total++;
     } else {
-      ESP_LOGD(TAG, "Checksum error for PID 0x%02X: got 0x%02X, expected 0x%02X", pid, data[len - 1], expectedChecksum);
+      ESP_LOGV(TAG, "Checksum error for PID 0x%02X: got 0x%02X, expected 0x%02X", pid, data[len - 1], expectedChecksum);
       statistics_.checksum_errors++;
       statistics_.checksum_errors_total++;
       unlockData();
@@ -166,7 +173,7 @@ void LinProtocolHandler::onData(uint8_t pid, const uint8_t *data, size_t len) {
       discoveredIDs_[i].dataLength = copyLen;
       discoveredIDs_[i].updateCount = 1;
       discoveredIDs_[i].lastUpdateTime = esp_timer_get_time();
-      ESP_LOGI(TAG, "Discovered new ID 0x%02X", id);
+      ESP_LOGV(TAG, "Discovered new ID 0x%02X", id);
       unlockData();
       return;
     }
@@ -180,7 +187,7 @@ void LinProtocolHandler::onData(uint8_t pid, const uint8_t *data, size_t len) {
     discoveredIDs_[oldest_idx].dataLength = copyLen;
     discoveredIDs_[oldest_idx].updateCount = 1;
     discoveredIDs_[oldest_idx].lastUpdateTime = esp_timer_get_time();
-    ESP_LOGD(TAG, "Overwrote oldest slot with ID 0x%02X", id);
+    ESP_LOGV(TAG, "Overwrote oldest slot with ID 0x%02X", id);
   }
   unlockData();
 }
@@ -189,8 +196,8 @@ void LinProtocolHandler::onData(uint8_t pid, const uint8_t *data, size_t len) {
 // onID(), so header and response bytes can never interleave on the wire. lockData(0) is
 // non-blocking: if the main loop holds the mutex (schedule/response mutation) this wake is
 // skipped and the next one (≤ ~2 ms later) retries; due-ness is not consumed by a skip.
-uint8_t LinProtocolHandler::master_send() {
-  if (mode_ != LIN_MODE_MASTER)
+uint8_t LinProtocolHandler::commander_send() {
+  if (mode_ != LIN_MODE_COMMANDER)
     return 0;
   if (!lockData(0))
     return 0;
@@ -222,14 +229,14 @@ uint8_t LinProtocolHandler::master_send() {
         }
       }
       if (sent) {
-        // Update statistics - master request sent
-        statistics_.master_requests_sent++;
-        statistics_.master_requests_total++;
+        // Update statistics - commander request sent
+        statistics_.commander_requests_sent++;
+        statistics_.commander_requests_total++;
         statistics_.total_bus_bytes += 3;  // break + sync + pid
       } else {
-        // Update statistics - real master send failure (TX error/timeout), see UPGRADES.md M2
-        statistics_.master_send_failures++;
-        statistics_.master_send_failures_total++;
+        // Update statistics - real commander send failure (TX error/timeout), see UPGRADES.md M2
+        statistics_.commander_send_failures++;
+        statistics_.commander_send_failures_total++;
       }
       schedule_[i].last_send_time_ms = current_time_ms;
       schedule_[i].sent_once = true;
@@ -451,7 +458,7 @@ lin_read_state_t LinProtocolHandler::receiveDecode(uint8_t readbyte, uint8_t com
     // TX readback (A6/N5): if we are expecting our own echo, compare-and-consume first. The
     // byte then ALWAYS continues through the state machine below — a mismatch counts a
     // collision but never corrupts decode state (B9). Empty FIFO (foreign traffic, the
-    // steady listener/slave-idle path) costs one comparison.
+    // steady listener/responder-idle path) costs one comparison.
     if (echo_count_ > 0)
       echoCompare(readbyte);
   }
@@ -587,14 +594,16 @@ void LinProtocolHandler::updateStatistics() {
   // Update every 10 seconds (10,000,000 microseconds)
   if (window_duration_us >= 10000000) {
     // Debug: Show raw counters before calculation
-    ESP_LOGD(TAG, "Stats window: master_reqs=%u, id_answers=%u, data_bytes=%u, errors=%u+%u+%u",
-             statistics_.master_requests_sent, statistics_.id_requests_answered, statistics_.data_bytes_received,
-             statistics_.master_send_failures, statistics_.pid_errors, statistics_.checksum_errors);
+    ESP_LOGV(TAG,
+             "Stats window: commander_reqs=%" PRIu32 ", id_answers=%" PRIu32 ", data_bytes=%" PRIu32 ", errors=%" PRIu32
+             "+%" PRIu32 "+%" PRIu32,
+             statistics_.commander_requests_sent, statistics_.id_requests_answered, statistics_.data_bytes_received,
+             statistics_.commander_send_failures, statistics_.pid_errors, statistics_.checksum_errors);
 
     // Calculate rates (per second)
     double window_duration_s = window_duration_us / 1000000.0;
 
-    statistics_.master_reqs_per_sec = statistics_.master_requests_sent / window_duration_s;
+    statistics_.commander_reqs_per_sec = statistics_.commander_requests_sent / window_duration_s;
     statistics_.id_answers_per_sec = statistics_.id_requests_answered / window_duration_s;
     statistics_.data_bytes_per_sec = statistics_.data_bytes_received / window_duration_s;
 
@@ -606,18 +615,18 @@ void LinProtocolHandler::updateStatistics() {
         (theoretical_max_bits > 0) ? (double) actual_bits / theoretical_max_bits * 100.0 : 0.0;
 
     // Calculate error rates
-    int64_t total_transactions = statistics_.master_requests_sent + statistics_.id_requests_answered;
-    int64_t total_errors = statistics_.master_send_failures + statistics_.pid_errors + statistics_.checksum_errors;
+    int64_t total_transactions = statistics_.commander_requests_sent + statistics_.id_requests_answered;
+    int64_t total_errors = statistics_.commander_send_failures + statistics_.pid_errors + statistics_.checksum_errors;
     statistics_.error_rate_percent =
         (total_transactions > 0) ? (double) total_errors / total_transactions * 100.0 : 0.0;
 
     // Reset for next window (windowed counters only; lifetime *_total fields never reset)
     statistics_.stats_start_time = now;
-    statistics_.master_requests_sent = 0;
+    statistics_.commander_requests_sent = 0;
     statistics_.id_requests_answered = 0;
     statistics_.data_bytes_received = 0;
     statistics_.frames_received = 0;
-    statistics_.master_send_failures = 0;
+    statistics_.commander_send_failures = 0;
     statistics_.pid_errors = 0;
     statistics_.checksum_errors = 0;
     statistics_.checksum_fallback = 0;
@@ -640,12 +649,14 @@ const lin_statistics_t &LinProtocolHandler::getStatistics() const {
 
 void LinProtocolHandler::logStatistics() const {
   const lin_statistics_t &stats = getStatistics();
-  ESP_LOGI(TAG, "LIN Statistics (10s window):");
-  ESP_LOGI(TAG, "  Master requests: %.1f/s", stats.master_reqs_per_sec);
-  ESP_LOGI(TAG, "  ID responses: %.1f/s", stats.id_answers_per_sec);
-  ESP_LOGI(TAG, "  Data bytes: %.1f/s", stats.data_bytes_per_sec);
-  ESP_LOGI(TAG, "  Unique IDs seen: %u", stats.unique_ids_seen);
-  ESP_LOGI(TAG, "  Bus load: %.1f%%", stats.estimated_bus_load_percent);
-  ESP_LOGI(TAG, "  Error rate: %.1f%%", stats.error_rate_percent);
-  ESP_LOGI(TAG, "  Stats window: %lld ms", (esp_timer_get_time() - stats.stats_start_time) / 1000);
+  ESP_LOGV(TAG, "LIN Statistics (10s window):");
+  ESP_LOGV(TAG, "  Commander requests: %.1f/s", stats.commander_reqs_per_sec);
+  ESP_LOGV(TAG, "  ID responses: %.1f/s", stats.id_answers_per_sec);
+  ESP_LOGV(TAG, "  Data bytes: %.1f/s", stats.data_bytes_per_sec);
+  ESP_LOGV(TAG, "  Unique IDs seen: %" PRIu32, stats.unique_ids_seen);
+  ESP_LOGV(TAG, "  Bus load: %.1f%%", stats.estimated_bus_load_percent);
+  ESP_LOGV(TAG, "  Error rate: %.1f%%", stats.error_rate_percent);
+  ESP_LOGV(TAG, "  Stats window: %" PRId64 " ms", (esp_timer_get_time() - stats.stats_start_time) / 1000);
 }
+
+}  // namespace esphome::linbus
