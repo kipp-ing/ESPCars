@@ -53,8 +53,9 @@ offline. Every PR is therefore one of two kinds:
 
 - **mechanical**: the gates `script/check.sh` and the CI compile matrix are
   enough to merge.
-- **bench-pending**: `[bench-pending]` in the title, not merged before
-  `verify.py` exits 0.
+- **bench-pending**: `[bench-pending]` in the title. It is merged once the
+  review and CI are green, and gets a row in the P9 ledger below. Its bench
+  check happens in P9, not per PR (decided 2026-11-22).
 
 These must stay **exactly** the same, and any change to them is bench-pending:
 
@@ -162,6 +163,95 @@ coverage. The port documents its two upstream scanner corrections (offset-zero
 matches and the extension check's empty-suffix wildcard) and every omitted check.
 Clang-tidy remains P1b; clang-format's upgrade remains the P3 reformat-only PR.
 
+#### P1b reproducible clang-tidy baseline
+
+Reference: esphome/esphome dev at
+`03eebae7b6e4cc81058f36a00a7f8c0c98eba341`; clang-tidy **23.1.4** from
+upstream `requirements_dev.txt`. `.clang-tidy` preserves upstream's complete
+check selections and options, adding only the external-component header filter.
+No additional checks are disabled.
+
+Compile the seven YAMLs printed by
+`.venv/bin/python script/clang_tidy.py --list-targets`, then run
+`.venv/bin/python script/clang_tidy.py --report-only -j 6`.
+The native ESP-IDF CMake databases supply flags and toolchain paths. The runner
+ports upstream's GCC flag filtering, target handling, toolchain/multilib include
+probes, C++20 and module options. Xtensa explicitly selects i386 so upstream's
+32-bit x86 fallback also works on ARM hosts. GCC's CMake PCH is omitted.
+
+Repository C++ sources and headers are analyzed directly using the matching
+build-copy TU's flags. Temporary include symlinks take precedence over generated
+component copies. A Clang VFS overlay also redirects copied component paths to
+repository files, covering quoted includes resolved relative to generated build
+headers before `-I` search paths. A synthetic `clang++ -E -H` regression test
+uses divergent repo/build files to verify both current headers and the generated
+core headers/defines, without compiling firmware or modifying the build copies.
+
+Existing C++ source/header edits do not require refreshing copies. The runner
+fails with the target's `esphome compile` command if any active component's
+C/C++ file is absent from its build copy (including new headers/TUs), generated
+`src/esphome/core/defines.h` is missing, or its timestamp predates an active
+component's `__init__.py`. Header-only dependencies are checked too. Python and
+assets are not build-copyable C++ files; YAML/codegen/define changes still need
+`esphome compile`. The timestamp check is conservative, not a content hash.
+Each target also analyzes a TU including every header of its
+active repository components, equivalent to upstream `--all-headers`. The seven
+prepared builds cover all 11 repository C++ TUs and 33 headers: 15 ordinary TU
+invocations (including dependencies) plus seven header TUs, **22 invocations**.
+This baseline covers the enabled branches of these seven configs, not every
+optional branch in the full compile matrix.
+
+Measured before and after P1b, with no changes under `components/`: **266 → 266**
+findings, **zero `clang-diagnostic-error`**, zero tool errors. A finding is unique
+by repository path, line, column, check and message across all TUs/targets.
+Diagnostics naming several checks count once per named check; notes do not count.
+
+| Check | Before | After |
+|---|---:|---:|
+| bugprone-branch-clone | 1 | 1 |
+| bugprone-incorrect-roundings | 2 | 2 |
+| bugprone-not-null-terminated-result | 1 | 1 |
+| clang-analyzer-core.BitwiseShift | 1 | 1 |
+| clang-analyzer-deadcode.DeadStores | 1 | 1 |
+| clang-analyzer-optin.performance.Padding | 1 | 1 |
+| clang-diagnostic-unused-private-field | 1 | 1 |
+| cppcoreguidelines-avoid-non-const-global-variables | 5 | 5 |
+| cppcoreguidelines-no-malloc | 6 | 6 |
+| modernize-concat-nested-namespaces | 18 | 18 |
+| modernize-loop-convert | 10 | 10 |
+| modernize-raw-string-literal | 64 | 64 |
+| modernize-use-using | 6 | 6 |
+| readability-braces-around-statements | 45 | 45 |
+| readability-duplicate-include | 1 | 1 |
+| readability-identifier-naming | 96 | 96 |
+| readability-inconsistent-ifelse-braces | 3 | 3 |
+| readability-redundant-control-flow | 1 | 1 |
+| readability-simplify-boolean-expr | 3 | 3 |
+| **Total** | **266** | **266** |
+
+| Component | Before | After |
+|---|---:|---:|
+| can_gateway | 7 | 7 |
+| ccp | 1 | 1 |
+| isotp | 1 | 1 |
+| linbus | 93 | 93 |
+| portal | 35 | 35 |
+| sd_logger | 121 | 121 |
+| uds | 8 | 8 |
+
+P5 keeps its risk-based order: the counts support starting with ccp/isotp,
+then uds/portal before the larger linbus/sd_logger work. can_gateway remains
+last despite its small count because its ISR and lock-free contracts dominate
+risk. No finding fixes belong in P1b.
+
+`lint_report.py` includes clang-tidy and explicitly skips it when no local CMake
+build exists; a partial local build set is an error naming the compile command
+needed. The separate `clang-tidy (report-only)` CI job compiles these same seven
+configs, caches native ESP-IDF/ccache as well as PlatformIO, and writes per-check
+and per-component tables to the step summary. It is absent from Required checks.
+Tool/compiler errors fail even in report-only mode. The P1a tool counts above
+remain unchanged after adding this infrastructure.
+
 ### P2 — Python cleanup · mechanical
 
 One PR each for `components/`, `script/`, `tests/` and `custom_components/`.
@@ -201,12 +291,14 @@ with a deprecation warning, following [CONVENTIONS](CONVENTIONS.md)'s
 "Don't break released YAML schemas silently" rule. Update the linbus user guide,
 schema tests, and `tests/build/` YAMLs to use the new terms.
 
-**Done:** compiles on all three linbus targets; `verify.py` exit 0 once the
-bench is back.
+**Done:** compiles on all three linbus targets. The LIN timing check is part
+of P9.
 
 ### P5 — clang-tidy down to zero · one PR per component
 
 Order by risk: ccp → isotp → uds → portal → linbus → sd_logger → can_gateway.
+The P1b baseline supports this order (1/1/8/35/93/121/7 findings respectively);
+can_gateway stays last because of its ISR and lock-free contracts.
 
 - Naming and readability fixes are mechanical.
 - Memory work is bench-pending wherever it touches the paths listed under
@@ -245,6 +337,34 @@ it is up to date.
 Upstream rejects PRs over ~1000 lines outside `tests/`, and takes a hub plus one
 platform first. Plan the split for can_gateway and isotp. sd_logger (~12k
 lines) and portal may stay external. Decide that when P8 is scheduled.
+
+### P9 — Hardware verification with ESP timing · after P7, on the bench
+
+This is the one bench gate for everything above (decided 2026-11-22). It runs
+the firmware from the end of P7 against the reference, which is `main` at
+`cb0db60`: P0 merged, before any component code changed. Both builds come from
+the same YAML on the same boards.
+
+1. `selftest.py`, then `verify.py --seconds 45 --min-laps 75`: exit 0, zero
+   errors, laps/s no worse than the reference (baseline 19.4).
+2. ESP timing, reference vs. now, on each affected board:
+   - main-loop period and the longest loop iteration (blocking warnings)
+   - RX ISR to forward latency, and the slot tracker counters
+   - LIN frame timing: header break/sync and the response window, in
+     commander and listener mode
+   - cyclic-send interval jitter (issue #2 floor)
+   - heap: free and largest block after setup, and during load
+3. sd_logger: the files written decode identically with `sdlog_decode`, and a
+   rotation and a collection run are clean.
+4. Each ledger row below is checked off with its evidence, or it gets a fix PR.
+
+**Ledger of merged bench-pending PRs**
+
+| PR | Phase | What could differ | P9 check | Result |
+|---|---|---|---|---|
+
+**Done:** every row is checked off, with no regression against the reference
+outside what the rows allow.
 
 ## Recurring
 
