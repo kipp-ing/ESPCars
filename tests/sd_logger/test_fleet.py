@@ -71,6 +71,7 @@ class Runner:
         self.codes = codes or {}
         self.default = default
         self.calls: list[list[str]] = []
+        self.by_url: dict[str, int] = {}  # wins over codes: one device, several ways (F21)
         self.delay: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -80,7 +81,7 @@ class Runner:
             self.calls.append(argv)
         if name in self.delay:
             time.sleep(self.delay[name])
-        code = self.codes.get(name, self.default)
+        code = self.by_url.get(argv[3], self.codes.get(name, self.default))
         if isinstance(code, BaseException):
             raise code
         return code, f"{name}: 1 fetched (1.0 KB), 1 confirmed\n"
@@ -182,6 +183,14 @@ def test_config_loads_the_example() -> None:
         ({}, device_toml("a", push="not a url"), "push_url"),
         ({}, device_toml("a") + 'token_file = "relative/token"\n', "token_file"),
         ({}, device_toml("a") + "token_file = 5\n", "token_file"),
+        ({}, device_toml("a") + '[[device.via]]\nurl = "http://192.0.2.2"\n', "not both"),
+        ({}, '[[device]]\nname = "a"\nvia = []\n', "at least one way"),
+        ({}, '[[device]]\nname = "a"\n[[device.via]]\ntoken_file = "/t"\n', "url is required"),
+        ({}, '[[device]]\nname = "a"\n[[device.via]]\nurl = "http://192.0.2.2"\nbogus = 1\n', "bogus"),
+        ({}, '[[device]]\nname = "a"\n[[device.via]]\nurl = "ftp://192.0.2.2"\n', "url"),
+        ({}, '[[device]]\nname = "a"\n[[device.via]]\nurl = "http://192.0.2.2"\ntoken_file = "rel"\n', "token_file"),
+        ({}, '[[device]]\nname = "a"\n[[device.via]]\nurl = "http://192.0.2.2"\n[[device.via]]\nurl = "http://192.0.2.2"\n', "duplicate url"),
+        ({}, '[[device]]\nname = "a"\n', "url"),
     ],
 )
 def test_config_rejects(tmp_path: Path, top: dict, devices_toml: str, needle: str) -> None:
@@ -293,7 +302,9 @@ def test_a_refusal_locks_the_device(tmp_path: Path) -> None:
     assert results["mr-green"].result == "error"
     beat = heartbeat(tmp_path, "mr-green")
     assert beat["verdict"] == "error"
-    assert beat["auth_locked"] == {"at": T0.isoformat(), "credential": f"{token}@{token.stat().st_mtime_ns}"}
+    relay = "http://192.0.2.20:8123/api/sdlog_relay/mr-green"
+    assert beat["auth_locked"] == {relay: {"at": T0.isoformat(), "credential": f"{token}@{token.stat().st_mtime_ns}"}}
+    assert beat["url"] == relay
     assert pusher.last()["status"] == "down"
 
 
@@ -364,6 +375,103 @@ def test_end_to_end_a_wrong_token_costs_one_refusal(devices, tmp_path: Path) -> 
     assert third["mr-green"].result == "ok"
     assert archived(tmp_path, "mr-green") == [name]
     assert fake.confirmed == [name]
+
+
+# ------------------------------------------------------------- F21 several ways
+
+HOME = "http://192.0.2.12:8080"
+RELAY = "http://192.0.2.20:8123/api/sdlog_relay/mr-pink"
+
+
+def ways_fleet(tmp_path: Path, runner: Runner, token: Path | None = None, pusher: Pusher | None = None, clock=None):
+    toml = '[[device]]\nname = "mr-pink"\npush_url = "http://kuma.example:3001/api/push/mr-pink"\n'
+    toml += f'[[device.via]]\nurl = "{HOME}"\n[[device.via]]\nurl = "{RELAY}"\n'
+    if token is not None:
+        toml += f'token_file = "{token}"\n'
+    config = sdlog_fleet.load_config(write_config(tmp_path, toml + "\n"))
+    return sdlog_fleet.Fleet(config, runner=runner, now=clock or Clock(), pusher=pusher or Pusher(),
+                             disk_free=lambda _path: 10**12)
+
+
+@pytest.mark.parametrize(
+    ("home", "relay", "result", "asked"),
+    [
+        (0, 0, "ok", [HOME]),
+        (75, 0, "ok", [HOME, RELAY]),
+        (1, 0, "error", [HOME]),
+        (3, 0, "error", [HOME]),
+        (75, 1, "error", [HOME, RELAY]),
+        (75, 75, "offline", [HOME, RELAY]),
+    ],
+)
+def test_ways_are_tried_in_order_until_one_answers(tmp_path: Path, home, relay, result, asked) -> None:
+    """F21. Offline passes to the next way; anything else ends the pass."""
+    runner = Runner()
+    runner.by_url = {HOME: home, RELAY: relay}
+    results = ways_fleet(tmp_path, runner, write_token(tmp_path)).run_once()
+
+    assert results["mr-pink"].result == result
+    assert [argv[3] for argv in runner.calls] == asked
+    assert heartbeat(tmp_path, "mr-pink")["url"] == asked[-1]
+    relay_argv = [argv for argv in runner.calls if argv[3] == RELAY]
+    home_argv = [argv for argv in runner.calls if argv[3] == HOME]
+    assert all("--token-file" in argv for argv in relay_argv)
+    assert all("--token-file" not in argv for argv in home_argv)
+
+
+def test_a_locked_way_does_not_stop_another_way(tmp_path: Path) -> None:
+    """F18/F19/F21. The relay refuses while the car is away from home: that way
+    locks, the device alarms. Home still collects, the relay is never asked, and
+    the alarm holds until the relay's token file changes."""
+    token = write_token(tmp_path)
+    runner = Runner()
+    runner.by_url = {HOME: 75, RELAY: 77}
+    pusher = Pusher()
+    clock = Clock()
+    fleet = ways_fleet(tmp_path, runner, token, pusher, clock)
+
+    assert fleet.run_once()["mr-pink"].result == "error"
+    assert list(heartbeat(tmp_path, "mr-pink")["auth_locked"]) == [RELAY]
+
+    clock.advance(minutes=5)
+    assert fleet.run_once()["mr-pink"].result == "locked"  # car still away: home offline, relay skipped
+    assert [argv[3] for argv in runner.calls].count(RELAY) == 1
+
+    runner.by_url[HOME] = 0
+    clock.advance(minutes=5)
+    assert fleet.run_once()["mr-pink"].result == "ok"  # car home
+    beat = heartbeat(tmp_path, "mr-pink")
+    assert beat["verdict"] == "ok" and list(beat["auth_locked"]) == [RELAY]
+    assert pusher.last()["status"] == "down" and "auth locked" in pusher.last()["msg"]
+    assert [argv[3] for argv in runner.calls].count(RELAY) == 1
+
+    bump_mtime(token)
+    clock.advance(minutes=5)
+    fleet.run_once()
+    assert "auth_locked" not in heartbeat(tmp_path, "mr-pink")
+    assert pusher.last()["status"] == "up"
+
+
+def test_end_to_end_the_second_way_collects_when_the_first_is_away(devices, tmp_path: Path) -> None:
+    """F21 with the real collector: home does not answer, the relay way (with a
+    token) collects, and the archive does not care which way the bytes came."""
+    home = devices("mr-pink")
+    home_url = home.url
+    home.stop()
+    relay = devices("mr-pink")
+    relay.token = "s3cret"
+    name = relay.add(431)
+    token = write_token(tmp_path)
+    toml = (f'[[device]]\nname = "mr-pink"\n[[device.via]]\nurl = "{home_url}"\n'
+            f'[[device.via]]\nurl = "{relay.url}"\ntoken_file = "{token}"\n\n')
+    fleet = sdlog_fleet.Fleet(sdlog_fleet.load_config(write_config(tmp_path, toml, retries=1)), pusher=Pusher())
+
+    results = fleet.run_once()
+
+    assert results["mr-pink"].result == "ok"
+    assert archived(tmp_path, "mr-pink") == [name]
+    assert relay.confirmed == [name]
+    assert heartbeat(tmp_path, "mr-pink")["url"] == relay.url
 
 
 def test_a_hung_pass_is_killed_and_is_an_error(tmp_path: Path) -> None:

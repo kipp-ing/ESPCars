@@ -20,8 +20,10 @@ WHAT IT DOES PER DEVICE, EACH PASS
 
     flock <state>/<name>.lock      held → "busy", skip quietly
     disk pre-flight                under min_free_mb → error, no pull
-    auth lock                      refused before, same token file → "locked", no pull
-    sdlog_collect.py pull <url> --into <archive> --expect <name> [--token-file <file>]
+    per way, in order (F21)        url, or several [[device.via]]
+      auth lock                    refused before, same token file → skip this way
+      sdlog_collect.py pull <url> --into <archive> --expect <name> [--token-file <file>]
+      offline (75)                 → next way; anything else ends the pass
     <state>/<name>.json            heartbeat, replaced atomically
     GET push_url?status=up|down&msg=…   optional, e.g. an Uptime Kuma push monitor
 
@@ -91,7 +93,8 @@ _TOP_KEYS = {
     "backoff",
     "device",
 }
-_DEVICE_KEYS = {"name", "url", "push_url", "token_file"}
+_DEVICE_KEYS = {"name", "url", "push_url", "token_file", "via"}
+_VIA_KEYS = {"url", "token_file"}
 
 
 class ConfigError(Exception):
@@ -99,11 +102,22 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class Via:
+    """One way to reach a device: its own URL, its own token file (F21)."""
+
+    url: str
+    token_file: str | None = None
+
+
+@dataclass(frozen=True)
 class Device:
     name: str
-    url: str
+    vias: tuple[Via, ...]
     push_url: str | None = None
-    token_file: str | None = None
+
+    @property
+    def url(self) -> str:
+        return self.vias[0].url
 
 
 @dataclass(frozen=True)
@@ -129,6 +143,7 @@ class PassResult:
     summary: str | None = None
     torn: list[tuple[str, str]] = field(default_factory=list)  # (name, reason), collector C12
     refused: bool = False  # collector exit 77 (F18)
+    via: str | None = None  # the way that gave this result (F21)
 
 
 @dataclass
@@ -159,6 +174,40 @@ def _http_url(value, key: str, where: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ConfigError(f"{where}: {key} must be an http(s) URL, not {value!r}")
     return value
+
+
+def _token_file(value, where: str) -> str | None:
+    if value is not None and (not isinstance(value, str) or not os.path.isabs(value)):
+        raise ConfigError(f"{where}: token_file must be an absolute path, not {value!r}")
+    return value
+
+
+def _vias(entry: dict, where: str) -> tuple[Via, ...]:
+    """``url``/``token_file`` is one way; ``[[device.via]]`` is several (F21)."""
+    if "via" not in entry:
+        if "url" not in entry:
+            raise ConfigError(f"{where}: url (or [[device.via]]) is required")
+        return (Via(_http_url(entry["url"], "url", where), _token_file(entry.get("token_file"), where)),)
+    if "url" in entry or "token_file" in entry:
+        raise ConfigError(f"{where}: use either url/token_file or [[device.via]], not both")
+    entries = entry["via"]
+    if not isinstance(entries, list) or not entries:
+        raise ConfigError(f"{where}: via must list at least one way")
+    vias: list[Via] = []
+    for number, way in enumerate(entries, start=1):
+        at = f"{where} via #{number}"
+        if not isinstance(way, dict):
+            raise ConfigError(f"{at} is not a table")
+        unknown = sorted(set(way) - _VIA_KEYS)
+        if unknown:
+            raise ConfigError(f"{at}: unknown key(s): {', '.join(unknown)}")
+        if "url" not in way:
+            raise ConfigError(f"{at}: url is required")
+        url = _http_url(way["url"], "url", at)
+        if any(v.url == url for v in vias):
+            raise ConfigError(f"{at}: duplicate url {url}")
+        vias.append(Via(url, _token_file(way.get("token_file"), at)))
+    return tuple(vias)
 
 
 def load_config(path: Path | str) -> Config:
@@ -200,16 +249,10 @@ def load_config(path: Path | str) -> Config:
         if name in seen:
             raise ConfigError(f"{where}: duplicate name")
         seen.add(name)
-        if "url" not in entry:
-            raise ConfigError(f"{where}: url is required")
-        url = _http_url(entry["url"], "url", where)
         push = entry.get("push_url")
         if push is not None:
             push = _http_url(push, "push_url", where)
-        token = entry.get("token_file")
-        if token is not None and (not isinstance(token, str) or not os.path.isabs(token)):
-            raise ConfigError(f"{where}: token_file must be an absolute path, not {token!r}")
-        devices.append(Device(name=name, url=url, push_url=push, token_file=token))
+        devices.append(Device(name=name, vias=_vias(entry, where), push_url=push))
 
     retries = raw.get("retries")
     if retries is not None and (isinstance(retries, bool) or not isinstance(retries, int) or retries < 1):
@@ -278,15 +321,15 @@ def _human_age(days: float) -> str:
     return f"{days:.1f} d"
 
 
-def credential_of(device: Device) -> str:
-    """What the auth lock is keyed on (F18): the token file and its state. A
-    replaced or touched file, or a token_file added or removed, is a new key."""
-    if device.token_file is None:
+def credential_of(via: Via) -> str:
+    """What a way's auth lock is keyed on (F18): its token file and the file's
+    state. A replaced or touched file, or a token_file added or removed, is a new key."""
+    if via.token_file is None:
         return "none"
     try:
-        return f"{device.token_file}@{os.stat(device.token_file).st_mtime_ns}"
+        return f"{via.token_file}@{os.stat(via.token_file).st_mtime_ns}"
     except OSError:
-        return f"{device.token_file}@missing"
+        return f"{via.token_file}@missing"
 
 
 def run_subprocess(argv: list[str], timeout: float) -> tuple[int, str]:
@@ -390,30 +433,61 @@ class Fleet:
             # this process dies, so a crash never leaves a device locked out.
             at = self.now()
             # Keyed before the pass: a token replaced while it runs unlocks the next one.
-            credential = credential_of(device)
-            locked = ((self._load(device.name) or {}).get("auth_locked") or {})
+            credentials = {via.url: credential_of(via) for via in device.vias}
+            locks = self._current_locks(device, credentials)
             if blocked is not None:
                 result = PassResult(device.name, "error", reason=blocked)
-            elif locked.get("credential") == credential:
-                # Refused before with these credentials: asking again would only
-                # be another failed login against the relay (F19).
-                result = PassResult(
-                    device.name,
-                    "locked",
-                    reason=f"refused at {locked.get('at')}; not asking until the token file changes",
-                )
             else:
-                result = self._collect(device)
-            state = self._record(device, result, at, credential)
+                result = self._try_ways(device, locks)
+            state = self._record(device, result, at, locks, credentials)
             self._push(device, state, result, at)
             return result
 
-    def _argv(self, device: Device) -> list[str]:
+    def _current_locks(self, device: Device, credentials: dict[str, str]) -> dict[str, dict]:
+        """The auth locks that still hold. A lock whose way is gone or whose
+        token file changed is dropped here, so the way is asked again (F19)."""
+        stored = (self._load(device.name) or {}).get("auth_locked")
+        if not isinstance(stored, dict):
+            return {}
+        return {
+            url: lock
+            for url, lock in stored.items()
+            if isinstance(lock, dict) and lock.get("credential") == credentials.get(url)
+        }
+
+    def _try_ways(self, device: Device, locks: dict[str, dict]) -> PassResult:
+        """Each way in order (F21): offline or locked passes to the next, any
+        other result is the pass's result."""
+        offline: PassResult | None = None
+        skipped: list[str] = []
+        for via in device.vias:
+            if via.url in locks:
+                # Refused before with these credentials: asking again would only
+                # be another failed login against the relay (F19).
+                skipped.append(via.url)
+                continue
+            result = self._collect(device, via)
+            result.via = via.url
+            if result.result != "offline":
+                return result
+            offline = result
+        if skipped:
+            since = locks[skipped[0]].get("at")
+            return PassResult(
+                device.name,
+                "locked",
+                reason=f"refused at {since}; not asking {', '.join(skipped)} until its token file changes",
+                via=skipped[0],
+            )
+        assert offline is not None  # a device has at least one way
+        return offline
+
+    def _argv(self, device: Device, via: Via) -> list[str]:
         argv = [
             sys.executable,
             str(self.collector),
             "pull",
-            device.url,
+            via.url,
             "--into",
             str(self.config.archive),
             "--expect",
@@ -423,14 +497,14 @@ class Fleet:
             argv += ["--retries", str(self.config.retries)]
         if self.config.backoff is not None:
             argv += ["--backoff", f"{self.config.backoff:g}"]
-        if device.token_file is not None:
-            argv += ["--token-file", device.token_file]
+        if via.token_file is not None:
+            argv += ["--token-file", via.token_file]
         return argv
 
-    def _collect(self, device: Device) -> PassResult:
+    def _collect(self, device: Device, via: Via) -> PassResult:
         timeout = self.config.timeout_s
         try:
-            code, output = self.runner(self._argv(device), timeout)
+            code, output = self.runner(self._argv(device, via), timeout)
         except subprocess.TimeoutExpired:
             # Killed. A partial it left resumes next run, but a pass that never
             # ends is not the car driving away: somebody should look.
@@ -468,7 +542,9 @@ class Fleet:
             return None
         return state if isinstance(state, dict) else None
 
-    def _record(self, device: Device, result: PassResult, at: datetime, credential: str) -> dict:
+    def _record(
+        self, device: Device, result: PassResult, at: datetime, locks: dict[str, dict], credentials: dict[str, str]
+    ) -> dict:
         state = self._load(device.name) or {
             "device": device.name,
             "created": at.isoformat(),
@@ -477,7 +553,7 @@ class Fleet:
             "last_error": None,
             "summary": None,
         }
-        state["url"] = device.url
+        state["url"] = result.via or device.url
         state["last_run"] = at.isoformat()
         state["last_result"] = result.result
         state["last_exit"] = result.exit
@@ -485,9 +561,13 @@ class Fleet:
             state["last_success"] = at.isoformat()
             state["verdict"] = "ok"
             state["summary"] = result.summary
+            locks.pop(result.via, None)
+        if result.refused and result.via is not None:
+            locks[result.via] = {"at": at.isoformat(), "credential": credentials[result.via]}
+        if locks:
+            state["auth_locked"] = locks
+        else:
             state.pop("auth_locked", None)
-        if result.refused:
-            state["auth_locked"] = {"at": at.isoformat(), "credential": credential}
         if result.torn:
             state["torn_accepted"] = int(state.get("torn_accepted") or 0) + len(result.torn)
             name, reason = result.torn[-1]
@@ -519,7 +599,7 @@ class Fleet:
             return DeviceStatus(name, None, alarm=False, age_days=None)
         since = _parse_time(state.get("last_success")) or _parse_time(state.get("created")) or at
         age = (at - since).total_seconds() / 86400
-        alarm = state.get("verdict") == "error" or age > self.config.stale_after_days
+        alarm = state.get("verdict") == "error" or age > self.config.stale_after_days or bool(state.get("auth_locked"))
         return DeviceStatus(name, state, alarm=alarm, age_days=age)
 
     def statuses(self) -> list[DeviceStatus]:
@@ -544,6 +624,9 @@ class Fleet:
             last_error = (status.state or {}).get("last_error") or {}
             if status.state and status.state.get("verdict") == "error":
                 parts.append(f"unresolved error: {last_error.get('reason')}")
+        locked = (status.state or {}).get("auth_locked") or {}
+        if locked and result.result != "locked":
+            parts.append(f"auth locked: {', '.join(locked)}")
         return _compact("; ".join(parts), PUSH_MSG_MAX)
 
     def _push(self, device: Device, state: dict, result: PassResult, at: datetime) -> None:
@@ -604,8 +687,8 @@ def print_status(fleet: Fleet) -> int:
         )
         if state.get("verdict") == "error":
             line += f"; error: {(state.get('last_error') or {}).get('reason')}"
-        if state.get("auth_locked"):
-            line += f"; auth locked since {state['auth_locked'].get('at')}"
+        for url, lock in (state.get("auth_locked") or {}).items():
+            line += f"; auth locked {url} since {lock.get('at')}"
         print(line)
     return 1 if alarm else 0
 
