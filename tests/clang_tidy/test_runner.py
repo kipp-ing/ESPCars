@@ -382,6 +382,74 @@ def test_partial_builds_analyze_available_targets(
     assert "INCOMPLETE" in content
 
 
+@pytest.mark.parametrize("reason", ["missing", "stale"])
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("analyze_linbus", [False, True])
+@pytest.mark.parametrize("findings", [0, 1])
+def test_component_table_distinguishes_skips_from_measured_zero(
+    tree, monkeypatch, capsys, reason, strict, analyze_linbus, findings
+):
+    linbus = tree / "components/linbus"
+    linbus.mkdir()
+    (linbus / "linbus.h").write_text("#pragma once\n", encoding="utf-8")
+    ready = "tests/build/demo/ready.yaml"
+    skipped = "tests/build/linbus/skipped.yaml"
+    measured = "tests/build/linbus/ready.yaml"
+    databases = {
+        target: database(tree, name)
+        for target, name in (
+            (ready, "ready"),
+            (skipped, "skipped"),
+            (measured, "measured"),
+        )
+    }
+    # A dependency's presence in another build must not turn its skipped
+    # dedicated target into a measured zero.
+    for db in databases.values():
+        copied = db.parent.parent / "src/esphome/components/linbus"
+        copied.mkdir()
+        shutil.copyfile(linbus / "linbus.h", copied / "linbus.h")
+    if reason == "missing":
+        databases[skipped].unlink()
+    else:
+        generated = databases[skipped].parent.parent / "src/esphome/core/defines.h"
+        os.utime(generated, ns=(500_000_000, 500_000_000))
+
+    from esphome import config
+    from esphome.core import CORE
+
+    def read_config(*args):
+        CORE.build_path = str(
+            databases[str(CORE.config_path.relative_to(tree))].parent.parent
+        )
+        return {}
+
+    monkeypatch.setattr(config, "read_config", read_config)
+    finding = tidy.Finding("components/demo/demo.cpp", 2, 1, "check-a", "details")
+    monkeypatch.setattr(
+        tidy, "run_tidy", lambda *args: {finding} if findings else set()
+    )
+    summary_file = tree / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    targets = [ready, skipped, *([measured] if analyze_linbus else [])]
+    assert tidy.main([*targets, "--summary", *(["--strict"] if strict else [])]) == (
+        2 if strict else findings
+    )
+    output = capsys.readouterr().out
+    summary = summary_file.read_text(encoding="utf-8")
+    assert f"    demo: {findings}\n" in output
+    assert f"| demo | {findings} |" in summary
+    expected = "0" if analyze_linbus else f"skipped ({reason})"
+    assert f"    linbus: {expected}\n" in output
+    assert f"| linbus | {expected} |" in summary
+    if not analyze_linbus:
+        assert "    linbus: 0\n" not in output
+        assert "| linbus | 0 |" not in summary
+    assert f"  TOTAL: {findings}\n" in output
+    assert f"Total: **{findings}**" in summary
+    assert "INCOMPLETE" in output and "INCOMPLETE" in summary
+
+
 @pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("installed", [False, True])
 def test_missing_or_wrong_version_is_a_tool_error(
