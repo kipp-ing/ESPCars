@@ -32,8 +32,7 @@
 static constexpr int SD_LOG_MAX_SOURCES = 16;
 #endif
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// Written into the `#sdlog` header line. Bump it when a reader would have to change.
 ///
@@ -738,7 +737,7 @@ inline size_t format_pad(char *out, size_t room, uint64_t offset) {
     len += SD_LOG_SECTOR;
   if (room < len)
     return 0;
-  std::memcpy(out, "#pad,", 5);
+  std::memcpy(out, "#pad,", 5);  // NOLINT(bugprone-not-null-terminated-result) Fixed-width on-card prefix; no NUL.
   std::memset(out + 5, ' ', len - min_len);
   out[len - 1] = '\n';
   return len;
@@ -1067,5 +1066,4 @@ inline bool drop_marker_due(uint32_t total, uint32_t marked, uint32_t *delta) {
   return true;
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

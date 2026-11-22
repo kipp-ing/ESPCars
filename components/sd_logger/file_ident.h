@@ -15,8 +15,7 @@
 #include "clock_basis.h"
 #include "log_format.h"
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// Hex digits of the ELF SHA-256 the line carries. 64 bits: enough to tell any two builds apart. The
 /// boot log's `ELF file SHA256` line shows a shorter prefix of the same digest (9 digits by default).
@@ -166,10 +165,11 @@ inline size_t format_ident(char *out, size_t room, const FileIdent &ident, const
   }
 
   w.str(",build=");
-  if (ident.build_s != 0)
+  if (ident.build_s != 0) {
     write_iso8601_utc(w, ident.build_s);
-  else
+  } else {
     w.ch('-');
+  }
 
   w.str(",elf=");
   size_t elf_len = 0;
@@ -178,16 +178,18 @@ inline size_t format_ident(char *out, size_t room, const FileIdent &ident, const
   while (elf_len < SD_LOG_IDENT_ELF_CHARS && ident.elf[elf_len] != '\0' &&
          std::strchr(ident_detail::LOWER_HEX, ident.elf[elf_len]) != nullptr)
     elf_len++;
-  if (elf_len > 0)
+  if (elf_len > 0) {
     w.raw(ident.elf, elf_len);
-  else
+  } else {
     w.ch('-');
+  }
 
   w.str(",cfg=");
-  if (ident.has_cfg)
+  if (ident.has_cfg) {
     hex_fixed(w, ident.cfg, 8);
-  else
+  } else {
     w.ch('-');
+  }
 
   if (ident.project != nullptr && ident.project[0] != '\0') {
     w.str(",project=");
@@ -209,5 +211,4 @@ inline size_t format_ident(char *out, size_t room, const FileIdent &ident, const
   return w.finish();
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

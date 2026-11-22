@@ -9,8 +9,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 static constexpr uint32_t SD_RAW_READ_MAX_SECTORS = 128;
 static constexpr uint32_t SD_CHAIN_PAGE_MAX_LINKS = 20;
@@ -421,5 +420,4 @@ inline const char *stack_headroom_str(StackHeadroom h) {
   }
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

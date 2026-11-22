@@ -41,8 +41,7 @@ extern "C" {
 #include "ff.h"
 }
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 // Whether the system clock is a reading or has run through a deep sleep since its last sync (clock
 // spec §3). RTC memory, not NVS: it must survive exactly what the RTC timer survives — deep sleep
@@ -210,19 +209,19 @@ class ScopedTaskWatchdogPause {
   bool paused_{false};
 };
 
-uint16_t read_le16_(const uint8_t *p) { return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8); }
+uint16_t read_le16(const uint8_t *p) { return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8); }
 
-uint32_t read_le32_(const uint8_t *p) {
+uint32_t read_le32(const uint8_t *p) {
   return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
-bool fat_bpb_cluster_bytes_(const uint8_t *boot, uint32_t *sector_bytes_out, uint32_t *cluster_bytes_out) {
+bool fat_bpb_cluster_bytes(const uint8_t *boot, uint32_t *sector_bytes_out, uint32_t *cluster_bytes_out) {
   // A valid BPB is enough here. We do not need to reimplement FatFs's mount parser — only report
   // the geometry it mounted — but the power-of-two checks avoid mistaking an MBR for a BPB.
   if (boot[510] != 0x55 || boot[511] != 0xAA)
     return false;
-  const uint16_t sector_bytes = read_le16_(boot + 11);
+  const uint16_t sector_bytes = read_le16(boot + 11);
   const uint8_t sectors_per_cluster = boot[13];
   if ((sector_bytes != 512 && sector_bytes != 1024 && sector_bytes != 2048 && sector_bytes != 4096) ||
       sectors_per_cluster == 0 || (sectors_per_cluster & (sectors_per_cluster - 1)) != 0)
@@ -232,7 +231,7 @@ bool fat_bpb_cluster_bytes_(const uint8_t *boot, uint32_t *sector_bytes_out, uin
   return true;
 }
 
-bool mounted_volume_bounds_(sdmmc_card_t *card, uint32_t *first_lba_out, uint32_t *sector_count_out) {
+bool mounted_volume_bounds(sdmmc_card_t *card, uint32_t *first_lba_out, uint32_t *sector_count_out) {
   if (card == nullptr || first_lba_out == nullptr || sector_count_out == nullptr ||
       card->csd.sector_size != SD_LOGGER_CARD_SECTOR_BYTES)
     return false;
@@ -242,16 +241,16 @@ bool mounted_volume_bounds_(sdmmc_card_t *card, uint32_t *first_lba_out, uint32_
   uint32_t first_lba = 0;
   uint32_t sector_bytes = 0;
   uint32_t cluster_bytes = 0;
-  if (!fat_bpb_cluster_bytes_(boot, &sector_bytes, &cluster_bytes)) {
+  if (!fat_bpb_cluster_bytes(boot, &sector_bytes, &cluster_bytes)) {
     bool found = false;
     for (size_t i = 0; i < FAT_PARTITION_COUNT; i++) {
       const uint8_t *entry = boot + FAT_PARTITION_TABLE_OFFSET + i * FAT_PARTITION_ENTRY_BYTES;
-      const uint32_t candidate = read_le32_(entry + 8);
+      const uint32_t candidate = read_le32(entry + 8);
       if (entry[4] == 0 || candidate == 0 || candidate >= card->csd.capacity)
         continue;
       if (sdmmc_read_sectors(card, boot, candidate, 1) != ESP_OK)
         return false;
-      if (fat_bpb_cluster_bytes_(boot, &sector_bytes, &cluster_bytes)) {
+      if (fat_bpb_cluster_bytes(boot, &sector_bytes, &cluster_bytes)) {
         first_lba = candidate;
         found = true;
         break;
@@ -262,7 +261,7 @@ bool mounted_volume_bounds_(sdmmc_card_t *card, uint32_t *first_lba_out, uint32_
   }
   if (sector_bytes != SD_LOGGER_CARD_SECTOR_BYTES)
     return false;
-  const uint32_t sectors = read_le16_(boot + 19) != 0 ? read_le16_(boot + 19) : read_le32_(boot + 32);
+  const uint32_t sectors = read_le16(boot + 19) != 0 ? read_le16(boot + 19) : read_le32(boot + 32);
   if (sectors < 3 || static_cast<uint64_t>(first_lba) + sectors > card->csd.capacity)
     return false;
   *first_lba_out = first_lba;
@@ -270,7 +269,7 @@ bool mounted_volume_bounds_(sdmmc_card_t *card, uint32_t *first_lba_out, uint32_
   return true;
 }
 
-void log_fat_geometry_(sdmmc_card_t *card) {
+void log_fat_geometry(sdmmc_card_t *card) {
   if (card == nullptr || card->csd.sector_size != SD_LOGGER_CARD_SECTOR_BYTES) {
     const unsigned card_sector_bytes = card == nullptr ? 0u : static_cast<unsigned>(card->csd.sector_size);
     ESP_LOGW(TAG, "mounted FAT: cannot read BPB from a %u B card sector", card_sector_bytes);
@@ -287,7 +286,7 @@ void log_fat_geometry_(sdmmc_card_t *card) {
   uint32_t sector_bytes = 0;
   uint32_t cluster_bytes = 0;
   uint32_t volume_lba = 0;
-  if (!fat_bpb_cluster_bytes_(boot, &sector_bytes, &cluster_bytes)) {
+  if (!fat_bpb_cluster_bytes(boot, &sector_bytes, &cluster_bytes)) {
     // The mounted volume has a partition table in LBA 0. Inspect every primary entry because
     // FatFs's automatic partition search is not restricted to the first slot.
     bool found = false;
@@ -295,11 +294,11 @@ void log_fat_geometry_(sdmmc_card_t *card) {
       const uint8_t *entry = boot + FAT_PARTITION_TABLE_OFFSET + i * FAT_PARTITION_ENTRY_BYTES;
       if (entry[4] == 0)
         continue;
-      const uint32_t candidate_lba = read_le32_(entry + 8);
+      const uint32_t candidate_lba = read_le32(entry + 8);
       if (candidate_lba == 0 || candidate_lba >= card->csd.capacity)
         continue;
       err = sdmmc_read_sectors(card, boot, candidate_lba, 1);
-      if (err == ESP_OK && fat_bpb_cluster_bytes_(boot, &sector_bytes, &cluster_bytes)) {
+      if (err == ESP_OK && fat_bpb_cluster_bytes(boot, &sector_bytes, &cluster_bytes)) {
         volume_lba = candidate_lba;
         found = true;
         break;
@@ -334,7 +333,7 @@ struct RawFat32Geometry {
   uint32_t data_lba;
 };
 
-bool raw_read_sector_(sdmmc_card_t *card, uint32_t lba, uint8_t *out, char *error, size_t error_size) {
+bool raw_read_sector(sdmmc_card_t *card, uint32_t lba, uint8_t *out, char *error, size_t error_size) {
   const esp_err_t err = sdmmc_read_sectors(card, out, lba, 1);
   if (err == ESP_OK)
     return true;
@@ -342,19 +341,19 @@ bool raw_read_sector_(sdmmc_card_t *card, uint32_t lba, uint8_t *out, char *erro
   return false;
 }
 
-bool parse_raw_fat32_bpb_(const uint8_t *boot, uint32_t volume_lba, RawFat32Geometry *geometry, char *error,
-                          size_t error_size) {
+bool parse_raw_fat32_bpb(const uint8_t *boot, uint32_t volume_lba, RawFat32Geometry *geometry, char *error,
+                         size_t error_size) {
   if (boot[510] != 0x55 || boot[511] != 0xAA) {
     snprintf(error, error_size, "volume LBA %" PRIu32 " has no BPB signature", volume_lba);
     return false;
   }
-  const uint16_t bytes_per_sector = read_le16_(boot + 11);
+  const uint16_t bytes_per_sector = read_le16(boot + 11);
   const uint8_t sectors_per_cluster = boot[13];
-  const uint16_t reserved_sectors = read_le16_(boot + 14);
+  const uint16_t reserved_sectors = read_le16(boot + 14);
   const uint8_t fat_count = boot[16];
-  const uint16_t root_entries = read_le16_(boot + 17);
-  const uint32_t fat_sectors = read_le32_(boot + 36);
-  const uint32_t root_cluster = read_le32_(boot + 44);
+  const uint16_t root_entries = read_le16(boot + 17);
+  const uint32_t fat_sectors = read_le32(boot + 36);
+  const uint32_t root_cluster = read_le32(boot + 44);
   if (bytes_per_sector != SD_LOGGER_CARD_SECTOR_BYTES || sectors_per_cluster == 0 || reserved_sectors == 0 ||
       fat_count == 0 || fat_sectors == 0 || root_entries != 0 || root_cluster < 2) {
     snprintf(error, error_size, "volume LBA %" PRIu32 " is not a readable FAT32/512 BPB", volume_lba);
@@ -372,7 +371,7 @@ bool parse_raw_fat32_bpb_(const uint8_t *boot, uint32_t volume_lba, RawFat32Geom
   return true;
 }
 
-bool load_raw_fat32_geometry_(sdmmc_card_t *card, RawFat32Geometry *geometry, char *error, size_t error_size) {
+bool load_raw_fat32_geometry(sdmmc_card_t *card, RawFat32Geometry *geometry, char *error, size_t error_size) {
   if (card == nullptr) {
     snprintf(error, error_size, "card is not mounted");
     return false;
@@ -383,35 +382,35 @@ bool load_raw_fat32_geometry_(sdmmc_card_t *card, RawFat32Geometry *geometry, ch
     return false;
   }
   uint8_t boot[SD_LOGGER_CARD_SECTOR_BYTES];
-  if (!raw_read_sector_(card, 0, boot, error, error_size))
+  if (!raw_read_sector(card, 0, boot, error, error_size))
     return false;
-  if (parse_raw_fat32_bpb_(boot, 0, geometry, error, error_size))
+  if (parse_raw_fat32_bpb(boot, 0, geometry, error, error_size))
     return true;
   for (size_t i = 0; i < FAT_PARTITION_COUNT; i++) {
     const uint8_t *entry = boot + FAT_PARTITION_TABLE_OFFSET + i * FAT_PARTITION_ENTRY_BYTES;
-    const uint32_t volume_lba = read_le32_(entry + 8);
+    const uint32_t volume_lba = read_le32(entry + 8);
     if (entry[4] == 0 || volume_lba == 0 || volume_lba >= card->csd.capacity)
       continue;
-    if (!raw_read_sector_(card, volume_lba, boot, error, error_size))
+    if (!raw_read_sector(card, volume_lba, boot, error, error_size))
       return false;
-    if (parse_raw_fat32_bpb_(boot, volume_lba, geometry, error, error_size))
+    if (parse_raw_fat32_bpb(boot, volume_lba, geometry, error, error_size))
       return true;
   }
   snprintf(error, error_size, "no readable FAT32/512 BPB found");
   return false;
 }
 
-uint32_t raw_cluster_lba_(const RawFat32Geometry &geometry, uint32_t cluster) {
+uint32_t raw_cluster_lba(const RawFat32Geometry &geometry, uint32_t cluster) {
   return geometry.data_lba + (cluster - 2) * static_cast<uint32_t>(geometry.sectors_per_cluster);
 }
 
-bool raw_fat_link_(sdmmc_card_t *card, const RawFat32Geometry &geometry, uint32_t cluster, uint32_t *next, char *error,
-                   size_t error_size) {
+bool raw_fat_link(sdmmc_card_t *card, const RawFat32Geometry &geometry, uint32_t cluster, uint32_t *next, char *error,
+                  size_t error_size) {
   const uint32_t byte_offset = cluster * 4;
   uint8_t sector[SD_LOGGER_CARD_SECTOR_BYTES];
-  if (!raw_read_sector_(card, geometry.fat_lba + byte_offset / SD_LOGGER_CARD_SECTOR_BYTES, sector, error, error_size))
+  if (!raw_read_sector(card, geometry.fat_lba + byte_offset / SD_LOGGER_CARD_SECTOR_BYTES, sector, error, error_size))
     return false;
-  *next = read_le32_(sector + byte_offset % SD_LOGGER_CARD_SECTOR_BYTES) & 0x0FFFFFFFu;
+  *next = read_le32(sector + byte_offset % SD_LOGGER_CARD_SECTOR_BYTES) & 0x0FFFFFFFu;
   return true;
 }
 
@@ -422,9 +421,9 @@ enum class RawDirectoryResult : uint8_t {
   ERROR,
 };
 
-RawDirectoryResult raw_find_chunk_directory_(sdmmc_card_t *card, const RawFat32Geometry &geometry, const char *name,
-                                             uint32_t *start_cluster, uint32_t *file_size, uint16_t *sectors_scanned,
-                                             char *error, size_t error_size) {
+RawDirectoryResult raw_find_chunk_directory(sdmmc_card_t *card, const RawFat32Geometry &geometry, const char *name,
+                                            uint32_t *start_cluster, uint32_t *file_size, uint16_t *sectors_scanned,
+                                            char *error, size_t error_size) {
   char short_name[11];
   std::memcpy(short_name, name, 8);
   std::memcpy(short_name + 8, name + 9, 3);
@@ -435,11 +434,11 @@ RawDirectoryResult raw_find_chunk_directory_(sdmmc_card_t *card, const RawFat32G
   *sectors_scanned = 0;
   while (!found && !root_end && *sectors_scanned < FSDEBUG_ROOT_SECTOR_LIMIT && root_chain_cluster >= 2 &&
          root_chain_cluster < 0x0FFFFFF8u) {
-    const uint32_t root_lba = raw_cluster_lba_(geometry, root_chain_cluster);
+    const uint32_t root_lba = raw_cluster_lba(geometry, root_chain_cluster);
     for (uint8_t i = 0;
          i < geometry.sectors_per_cluster && !found && !root_end && *sectors_scanned < FSDEBUG_ROOT_SECTOR_LIMIT;
          i++, (*sectors_scanned)++) {
-      if (!raw_read_sector_(card, root_lba + i, sector, error, error_size))
+      if (!raw_read_sector(card, root_lba + i, sector, error, error_size))
         return RawDirectoryResult::ERROR;
       for (size_t offset = 0; offset < sizeof(sector); offset += 32) {
         const uint8_t *entry = sector + offset;
@@ -451,8 +450,8 @@ RawDirectoryResult raw_find_chunk_directory_(sdmmc_card_t *card, const RawFat32G
           continue;
         if (std::memcmp(entry, short_name, sizeof(short_name)) != 0)
           continue;
-        *start_cluster = (static_cast<uint32_t>(read_le16_(entry + 20)) << 16) | read_le16_(entry + 26);
-        *file_size = read_le32_(entry + 28);
+        *start_cluster = (static_cast<uint32_t>(read_le16(entry + 20)) << 16) | read_le16(entry + 26);
+        *file_size = read_le32(entry + 28);
         found = true;
         break;
       }
@@ -460,7 +459,7 @@ RawDirectoryResult raw_find_chunk_directory_(sdmmc_card_t *card, const RawFat32G
     if (found || root_end || *sectors_scanned >= FSDEBUG_ROOT_SECTOR_LIMIT)
       break;
     uint32_t root_next = 0;
-    if (!raw_fat_link_(card, geometry, root_chain_cluster, &root_next, error, error_size))
+    if (!raw_fat_link(card, geometry, root_chain_cluster, &root_next, error, error_size))
       return RawDirectoryResult::ERROR;
     root_chain_cluster = root_next;
   }
@@ -469,12 +468,12 @@ RawDirectoryResult raw_find_chunk_directory_(sdmmc_card_t *card, const RawFat32G
   return *sectors_scanned >= FSDEBUG_ROOT_SECTOR_LIMIT ? RawDirectoryResult::LIMIT : RawDirectoryResult::NOT_FOUND;
 }
 
-void raw_hex16_(char *out, const uint8_t *data) {
+void raw_hex16(char *out, const uint8_t *data) {
   for (size_t i = 0; i < 16; i++)
     snprintf(out + i * 2, 3, "%02X", static_cast<unsigned>(data[i]));
 }
 
-bool append_json_(char *out, size_t out_size, size_t *used, const char *format, ...) {
+bool append_json(char *out, size_t out_size, size_t *used, const char *format, ...) {
   if (*used >= out_size)
     return false;
   va_list args;
@@ -720,8 +719,11 @@ namespace {
 /// True while a card has PROVED it works but its ACMD41 handshake is latched. See
 /// `sd_forced_do_transaction()`. File-scope because `sdmmc_host_t.do_transaction` is a plain
 /// function pointer with no user context; one flag is enough because a board has one SPI card.
-std::atomic<bool> g_idle_bit_override{false};
-SdSpiTraceRing g_sdspi_trace;
+struct SdSpiState {
+  static std::atomic<bool> idle_bit_override;
+};
+std::atomic<bool> SdSpiState::idle_bit_override{false};
+SdSpiTraceRing g_sdspi_trace;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables) /sdlog/spitrace hook.
 
 /// ACMD41 and CMD13. Spelled out rather than pulled from ESP-IDF's `sd_protocol_defs.h`, which is
 /// a private header of the sdmmc component.
@@ -736,7 +738,7 @@ struct SdspiMountAttempt {
   sdmmc_card_t **card;
 };
 
-esp_err_t mount_sdspi_once_(void *context) {
+esp_err_t mount_sdspi_once(void *context) {
   auto *attempt = static_cast<SdspiMountAttempt *>(context);
   return esp_vfs_fat_sdspi_mount(attempt->mount_point, attempt->host, attempt->device_config, attempt->mount_config,
                                  attempt->card);
@@ -745,7 +747,7 @@ esp_err_t mount_sdspi_once_(void *context) {
 // vfs_fat_sdmmc.c's failed-mount path already calls its host cleanup before returning. Keeping this
 // callback explicit makes the shared recovery helper's bus-ownership contract visible at the call
 // site rather than assuming the two initialisers happen to tear down alike.
-void vfs_mount_failure_is_already_clean_(void *) {}
+void vfs_mount_failure_is_already_clean(void *) {}
 
 struct SdspiDirectCardAttempt {
   enum class Step : uint8_t {
@@ -760,7 +762,7 @@ struct SdspiDirectCardAttempt {
   Step step{Step::DEVICE};
 };
 
-esp_err_t init_sdspi_card_once_(void *context) {
+esp_err_t init_sdspi_card_once(void *context) {
   auto *attempt = static_cast<SdspiDirectCardAttempt *>(context);
   attempt->handle = -1;
   attempt->step = SdspiDirectCardAttempt::Step::DEVICE;
@@ -773,7 +775,7 @@ esp_err_t init_sdspi_card_once_(void *context) {
   return sdmmc_card_init(attempt->host, attempt->card);
 }
 
-void release_sdspi_direct_device_(void *context) {
+void release_sdspi_direct_device(void *context) {
   auto *attempt = static_cast<SdspiDirectCardAttempt *>(context);
   if (attempt->handle >= 0) {
     sdspi_host_remove_device(attempt->handle);
@@ -782,7 +784,7 @@ void release_sdspi_direct_device_(void *context) {
   // The direct formatter's card session ends with its device. A following VFS mount must take the
   // ordinary path first and re-earn the mask with a fresh OCR/read probe, just as unmount_card_()
   // requires for every other mount.
-  g_idle_bit_override.store(false, std::memory_order_release);
+  SdSpiState::idle_bit_override.store(false, std::memory_order_release);
 }
 
 /// Suppress the one stale bit that stops ESP-IDF using a working card, and nothing else.
@@ -824,7 +826,7 @@ esp_err_t sd_forced_do_transaction(int slot, sdmmc_command_t *cmdinfo) {
   }
   const esp_err_t err = sdspi_host_do_transaction(slot, cmdinfo);
   trace.err = static_cast<int32_t>(err);
-  if (err == ESP_OK && cmdinfo != nullptr && g_idle_bit_override.load(std::memory_order_acquire) &&
+  if (err == ESP_OK && cmdinfo != nullptr && SdSpiState::idle_bit_override.load(std::memory_order_acquire) &&
       (cmdinfo->opcode == SD_SPI_OPCODE_APP_OP_COND || cmdinfo->opcode == SD_SPI_OPCODE_SEND_STATUS)) {
     trace.response_raw = cmdinfo->response[0];
     cmdinfo->response[0] &= ~1u;
@@ -867,13 +869,13 @@ esp_err_t SdLogger::init_card_with_latched_idle_recovery_(esp_err_t (*attempt)(v
   // This remains armed after a successful retry: CMD13 is the write-path latch site, so clearing it
   // after initialization would permit a read-only mount and let f_fdisk/f_mkfs fail mid-operation.
   // unmount_card_() disarms it, so every later mount must re-earn the exception.
-  g_idle_bit_override.store(true, std::memory_order_release);
+  SdSpiState::idle_bit_override.store(true, std::memory_order_release);
   err = attempt(context);
   if (err == ESP_OK) {
     this->degraded_identification_ = true;
     ESP_LOGW(TAG, "initialized a latched card without a power cycle — evidence is being written again");
   } else {
-    g_idle_bit_override.store(false, std::memory_order_release);
+    SdSpiState::idle_bit_override.store(false, std::memory_order_release);
     ESP_LOGE(TAG, "idle-bit override did not help: %s", esp_err_to_name(err));
   }
   return err;
@@ -948,7 +950,7 @@ void SdLogger::unmount_card_() {
   // The override belongs to a mounted card, not to the board. The next mount re-earns it by
   // running the readiness probe again — which is what makes a genuine power cycle silently return
   // the logger to the ordinary path.
-  g_idle_bit_override.store(false, std::memory_order_release);
+  SdSpiState::idle_bit_override.store(false, std::memory_order_release);
   this->degraded_identification_ = false;
 }
 
@@ -1011,7 +1013,7 @@ bool SdLogger::mount_card_(bool allow_format) {
   mount_cfg.allocation_unit_size = 16 * 1024;
 
   SdspiMountAttempt mount_attempt{this->mount_point_.c_str(), &host, &dev_cfg, &mount_cfg, &this->card_};
-  err = this->init_card_with_latched_idle_recovery_(&mount_sdspi_once_, &vfs_mount_failure_is_already_clean_,
+  err = this->init_card_with_latched_idle_recovery_(&mount_sdspi_once, &vfs_mount_failure_is_already_clean,
                                                     &mount_attempt);
 
   if (err != ESP_OK) {
@@ -1065,7 +1067,7 @@ bool SdLogger::mount_card_(bool allow_format) {
   this->mounted_volume_sectors_ = 0;
   uint32_t mounted_first_lba = 0;
   uint32_t mounted_sector_count = 0;
-  if (mounted_volume_bounds_(this->card_, &mounted_first_lba, &mounted_sector_count)) {
+  if (mounted_volume_bounds(this->card_, &mounted_first_lba, &mounted_sector_count)) {
     this->mounted_volume_first_lba_ = mounted_first_lba;
     this->mounted_volume_sectors_ = mounted_sector_count;
   }
@@ -1097,7 +1099,7 @@ bool SdLogger::mount_card_(bool allow_format) {
   // This distinguishes a true cluster boundary from a 16-bit offset symptom in collection serving.
   // It is safe here: the mount succeeded, no writer exists on the initial path, and the recovery
   // path has closed the serving gate before it remounts.
-  log_fat_geometry_(this->card_);
+  log_fat_geometry(this->card_);
 #ifdef USE_SD_LOGGER_COLLECTION
   // Read the fill once, here, while nothing is being logged yet: the *first* f_getfree walks the
   // whole FAT — seconds on a 32 GB card — and is maintained incrementally afterwards. Paying that
@@ -1129,7 +1131,7 @@ bool SdLogger::run_capacity_self_test_(uint64_t *volume_bytes_out) {
     *volume_bytes_out = 0;
   uint32_t first_lba = 0;
   uint32_t sector_count = 0;
-  if (!mounted_volume_bounds_(this->card_, &first_lba, &sector_count)) {
+  if (!mounted_volume_bounds(this->card_, &first_lba, &sector_count)) {
     ESP_LOGE(TAG, "capacity: cannot locate a 512-byte mounted-volume boundary for self-test");
     return false;
   }
@@ -1143,12 +1145,12 @@ bool SdLogger::run_capacity_self_test_(uint64_t *volume_bytes_out) {
   // read that returns ESP_OK without touching its destination then becomes an
   // exact, deterministic echo of A/B instead of whatever happened to be on a
   // fresh stack buffer.
-  bool reads_ok = raw_read_sector_(this->card_, first_lba, target_first, error, sizeof(error));
+  bool reads_ok = raw_read_sector(this->card_, first_lba, target_first, error, sizeof(error));
   std::memcpy(primer_a, target_first, sizeof(primer_a));
-  reads_ok = reads_ok && raw_read_sector_(this->card_, target_lba, target_first, error, sizeof(error));
-  reads_ok = reads_ok && raw_read_sector_(this->card_, first_lba + 1, target_second, error, sizeof(error));
+  reads_ok = reads_ok && raw_read_sector(this->card_, target_lba, target_first, error, sizeof(error));
+  reads_ok = reads_ok && raw_read_sector(this->card_, first_lba + 1, target_second, error, sizeof(error));
   std::memcpy(primer_b, target_second, sizeof(primer_b));
-  reads_ok = reads_ok && raw_read_sector_(this->card_, target_lba, target_second, error, sizeof(error));
+  reads_ok = reads_ok && raw_read_sector(this->card_, target_lba, target_second, error, sizeof(error));
   const CapacitySelfTestVerdict verdict = capacity_self_test_verdict(reads_ok, primer_a, target_first, primer_b,
                                                                      target_second, SD_LOGGER_CARD_SECTOR_BYTES);
   if (volume_bytes_out != nullptr)
@@ -1276,13 +1278,12 @@ void SdLogger::confine_format(const std::string &confirmation) {
   dev_cfg.wait_for_miso = 127;
   sdmmc_card_t card = {};
   SdspiDirectCardAttempt card_attempt{&host, &dev_cfg, -1, &card, SdspiDirectCardAttempt::Step::DEVICE};
-  err =
-      this->init_card_with_latched_idle_recovery_(&init_sdspi_card_once_, &release_sdspi_direct_device_, &card_attempt);
+  err = this->init_card_with_latched_idle_recovery_(&init_sdspi_card_once, &release_sdspi_direct_device, &card_attempt);
   if (err != ESP_OK) {
     const char *step =
         card_attempt.step == SdspiDirectCardAttempt::Step::DEVICE ? "sdspi_host_init_device" : "sdmmc_card_init";
     ESP_LOGE(TAG, "confine format failed at %s: %s", step, esp_err_to_name(err));
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
@@ -1297,7 +1298,7 @@ void SdLogger::confine_format(const std::string &confirmation) {
              ", the card has %" PRIu64 " (largest confine_bytes for this card: %" PRIu64 ")",
              sectors, SD_CONFINE_FIRST_LBA, card_sectors,
              card_sectors > SD_CONFINE_FIRST_LBA ? (card_sectors - SD_CONFINE_FIRST_LBA) * SD_CONFINE_SECTOR_BYTES : 0);
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
@@ -1308,7 +1309,7 @@ void SdLogger::confine_format(const std::string &confirmation) {
   BYTE pdrv = 0xFF;
   if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == 0xFF || pdrv >= FF_VOLUMES || pdrv > 9) {
     ESP_LOGE(TAG, "confine format failed: no usable FatFs physical drive");
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
@@ -1323,18 +1324,20 @@ void SdLogger::confine_format(const std::string &confirmation) {
   if (pdrv == 0xFF) {
     ESP_LOGE(TAG, "confine format failed: registered card has no FatFs physical drive");
     ff_diskio_unregister(registered_pdrv);
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
     this->confine_format_in_progress_.store(false, std::memory_order_release);
     return;
   }
-  void *workbuf = std::malloc(CONFINE_FORMAT_WORKBUF_BYTES);
+  // RAMAllocator selects explicit INTERNAL/SPIRAM + 8BIT caps instead of malloc's default
+  // region policy. Keep that policy, ordinary malloc alignment, and the nullable failure path.
+  void *workbuf = std::malloc(CONFINE_FORMAT_WORKBUF_BYTES);  // NOLINT(cppcoreguidelines-no-malloc) Keep malloc caps.
   if (workbuf == nullptr) {
     ESP_LOGE(TAG, "confine format failed: work buffer allocation");
     ff_diskio_unregister(pdrv);
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
@@ -1351,9 +1354,9 @@ void SdLogger::confine_format(const std::string &confirmation) {
   }
   if (result != FR_OK) {
     ESP_LOGE(TAG, "confine format failed at f_fdisk: %d", static_cast<int>(result));
-    std::free(workbuf);
+    std::free(workbuf);  // NOLINT(cppcoreguidelines-no-malloc) Pair with malloc.
     ff_diskio_unregister(pdrv);
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
@@ -1363,12 +1366,12 @@ void SdLogger::confine_format(const std::string &confirmation) {
   uint8_t mbr[SD_LOGGER_CARD_SECTOR_BYTES];
   const bool mbr_ok = sdmmc_read_sectors(&card, mbr, 0, 1) == ESP_OK && mbr[510] == 0x55 && mbr[511] == 0xAA &&
                       mbr[FAT_PARTITION_TABLE_OFFSET + 4] != 0xEE &&
-                      read_le32_(mbr + FAT_PARTITION_TABLE_OFFSET + 12) == sectors;
+                      read_le32(mbr + FAT_PARTITION_TABLE_OFFSET + 12) == sectors;
   if (!mbr_ok) {
     ESP_LOGE(TAG, "confine format failed: f_fdisk did not create the expected MBR partition");
-    std::free(workbuf);
+    std::free(workbuf);  // NOLINT(cppcoreguidelines-no-malloc) Pair with malloc.
     ff_diskio_unregister(pdrv);
-    release_sdspi_direct_device_(&card_attempt);
+    release_sdspi_direct_device(&card_attempt);
     spi_bus_free(host_slot);
     this->mounted_ = false;
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
@@ -1391,9 +1394,9 @@ void SdLogger::confine_format(const std::string &confirmation) {
     result = f_mkfs(drv, &options, workbuf, CONFINE_FORMAT_WORKBUF_BYTES);
   }
   VolToPart[pdrv] = saved_mapping;
-  std::free(workbuf);
+  std::free(workbuf);  // NOLINT(cppcoreguidelines-no-malloc) Pair with malloc.
   ff_diskio_unregister(pdrv);
-  release_sdspi_direct_device_(&card_attempt);
+  release_sdspi_direct_device(&card_attempt);
   this->degraded_identification_ = false;
   spi_bus_free(host_slot);
   if (result != FR_OK) {
@@ -1443,7 +1446,6 @@ void SdLogger::confine_format(const std::string &confirmation) {
   }
   ESP_LOGI(TAG, "confine format complete: %" PRIu64 " B volume; self-test passed", total);
   this->confine_format_in_progress_.store(false, std::memory_order_release);
-  return;
 
 #endif
 }
@@ -1970,7 +1972,9 @@ bool SdLogger::read_card_tails_(ClockPoint *end, uint32_t *seq_out) {
   // no card floor, but the seal still runs, off a 256-byte stack buffer — F2c must not hinge on the
   // one allocation a fragmented heap is most likely to refuse.
   static const size_t READ_CHUNK = 4096;
-  char *heap_buf = static_cast<char *>(malloc(READ_CHUNK));
+  // Keep malloc's default region policy and alignment, as for the formatter work buffer.
+  // RAMAllocator's explicit caps can change which allocation succeeds and whether we use stack_buf.
+  char *heap_buf = static_cast<char *>(malloc(READ_CHUNK));  // NOLINT(cppcoreguidelines-no-malloc) Keep malloc caps.
   auto scanner = RAMAllocator<ClockTailScanner>(RAMAllocator<ClockTailScanner>::PREFER_INTERNAL).make_unique(false);
   char stack_buf[256];
   const bool clock_ok = heap_buf != nullptr && scanner != nullptr;
@@ -2039,7 +2043,7 @@ bool SdLogger::read_card_tails_(ClockPoint *end, uint32_t *seq_out) {
       break;  // one name per seq exists; the other extension is not a second file
     }
   }
-  free(heap_buf);
+  free(heap_buf);  // NOLINT(cppcoreguidelines-no-malloc) Pair with malloc; keep release before scanner.reset().
   scanner.reset();
   return found;
 }
@@ -2127,10 +2131,11 @@ void SdLogger::learn_clock_() {
   portEXIT_CRITICAL(&this->utc_mux_);
 
   // A wake carries drift until the next sync — and so does any warm reset before that sync.
-  if (!synced && d.best.basis == ClockBasis::DRIFT)
+  if (!synced && d.best.basis == ClockBasis::DRIFT) {
     s_clock_state = CLOCK_STATE_DRIFTED;
-  else if (in.wake == WakeKind::POWER_ON && !synced)
+  } else if (in.wake == WakeKind::POWER_ON && !synced) {
     s_clock_state = 0;
+  }
 
   if (d.sys_rejected) {
     ESP_LOGW(TAG, "clock: system clock after a %s is not plausible (%" PRIu64 " s) — using the %s floor",
@@ -3365,7 +3370,7 @@ SdLogger::FsDebugResult SdLogger::collection_fs_debug(const char *name, char *ou
   uint32_t seq = 0;
   ChunkState named_state = ChunkState::NONE;
   if (name == nullptr || !parse_chunk_name(name, &seq, &named_state)) {
-    snprintf(out, out_size, "{\"error\":\"invalid chunk name\"}");
+    snprintf(out, out_size, R"({"error":"invalid chunk name"})");
     return FsDebugResult::NOT_INDEXED;
   }
 
@@ -3376,19 +3381,19 @@ SdLogger::FsDebugResult SdLogger::collection_fs_debug(const char *name, char *ou
     // sectors are sampled. SDSPI serializes each raw command with the writer below this layer.
     IndexLock lock(this->index_mux_);
     if (!this->serving_open_ || this->card_ == nullptr) {
-      snprintf(out, out_size, "{\"error\":\"card is unavailable\"}");
+      snprintf(out, out_size, R"({"error":"card is unavailable"})");
       return FsDebugResult::UNAVAILABLE;
     }
     const ChunkEntry *entry = this->collection_.find(seq);
     char indexed_name[SD_LOG_NAME_LEN];
     if (entry == nullptr) {
-      snprintf(out, out_size, "{\"error\":\"chunk is not in the index\"}");
+      snprintf(out, out_size, R"({"error":"chunk is not in the index"})");
       return FsDebugResult::NOT_INDEXED;
     }
     format_chunk_name(indexed_name, seq, entry->state);
     if (std::strcmp(name, indexed_name) != 0 || this->collection_.is_serving(seq) ||
         !this->collection_.mark_serving(seq)) {
-      snprintf(out, out_size, "{\"error\":\"chunk is not available for debug\"}");
+      snprintf(out, out_size, R"({"error":"chunk is not available for debug"})");
       return FsDebugResult::NOT_INDEXED;
     }
     reserved = true;
@@ -3405,29 +3410,29 @@ SdLogger::FsDebugResult SdLogger::collection_fs_debug(const char *name, char *ou
 
   char error[112] = {};
   RawFat32Geometry geometry{};
-  if (!load_raw_fat32_geometry_(this->card_, &geometry, error, sizeof(error))) {
-    snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+  if (!load_raw_fat32_geometry(this->card_, &geometry, error, sizeof(error))) {
+    snprintf(out, out_size, R"({"error":"%s"})", error);
     return finish(FsDebugResult::UNAVAILABLE);
   }
 
   uint32_t start_cluster = 0;
   uint32_t file_size = 0;
   uint16_t root_sectors_scanned = 0;
-  const RawDirectoryResult directory = raw_find_chunk_directory_(
-      this->card_, geometry, name, &start_cluster, &file_size, &root_sectors_scanned, error, sizeof(error));
+  const RawDirectoryResult directory = raw_find_chunk_directory(this->card_, geometry, name, &start_cluster, &file_size,
+                                                                &root_sectors_scanned, error, sizeof(error));
   if (directory == RawDirectoryResult::ERROR) {
-    snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+    snprintf(out, out_size, R"({"error":"%s"})", error);
     return finish(FsDebugResult::UNAVAILABLE);
   }
   if (directory == RawDirectoryResult::LIMIT) {
     snprintf(out, out_size,
-             "{\"name\":\"%s\",\"directory\":{\"found\":false,\"sectors_scanned\":%u,\"sector_limit\":%u},"
-             "\"error\":\"root directory scan limit reached\"}",
+             R"({"name":"%s","directory":{"found":false,"sectors_scanned":%u,"sector_limit":%u},)"
+             R"("error":"root directory scan limit reached"})",
              name, static_cast<unsigned>(root_sectors_scanned), static_cast<unsigned>(FSDEBUG_ROOT_SECTOR_LIMIT));
     return finish(FsDebugResult::OK);
   }
   if (directory != RawDirectoryResult::FOUND || start_cluster < 2) {
-    snprintf(out, out_size, "{\"error\":\"directory entry not found after %u root sectors\"}",
+    snprintf(out, out_size, R"({"error":"directory entry not found after %u root sectors"})",
              static_cast<unsigned>(root_sectors_scanned));
     return finish(FsDebugResult::UNAVAILABLE);
   }
@@ -3439,8 +3444,8 @@ SdLogger::FsDebugResult SdLogger::collection_fs_debug(const char *name, char *ou
   uint32_t cluster = start_cluster;
   while (chain_count < FSDEBUG_CHAIN_LINKS && cluster >= 2 && cluster < 0x0FFFFFF8u) {
     chain[chain_count] = cluster;
-    if (!raw_fat_link_(this->card_, geometry, cluster, &next[chain_count], error, sizeof(error))) {
-      snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+    if (!raw_fat_link(this->card_, geometry, cluster, &next[chain_count], error, sizeof(error))) {
+      snprintf(out, out_size, R"({"error":"%s"})", error);
       return finish(FsDebugResult::UNAVAILABLE);
     }
     cluster = next[chain_count++];
@@ -3449,35 +3454,37 @@ SdLogger::FsDebugResult SdLogger::collection_fs_debug(const char *name, char *ou
   char cluster_hex[FSDEBUG_CLUSTER_SAMPLES][33] = {};
   const uint8_t sample_count = chain_count < FSDEBUG_CLUSTER_SAMPLES ? chain_count : FSDEBUG_CLUSTER_SAMPLES;
   for (uint8_t i = 0; i < sample_count; i++) {
-    if (!raw_read_sector_(this->card_, raw_cluster_lba_(geometry, chain[i]), sector, error, sizeof(error))) {
-      snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+    if (!raw_read_sector(this->card_, raw_cluster_lba(geometry, chain[i]), sector, error, sizeof(error))) {
+      snprintf(out, out_size, R"({"error":"%s"})", error);
       return finish(FsDebugResult::UNAVAILABLE);
     }
-    raw_hex16_(cluster_hex[i], sector);
+    raw_hex16(cluster_hex[i], sector);
   }
 
   size_t used = 0;
-  bool complete = append_json_(
+  bool complete = append_json(
       out, out_size, &used,
-      "{\"name\":\"%s\",\"bpb\":{\"bytes_per_sector\":%u,\"sectors_per_cluster\":%u,"
-      "\"reserved_sectors\":%u,\"fat_count\":%u,\"fat_sectors\":%" PRIu32 ",\"root_cluster\":%" PRIu32
-      ",\"data_lba\":%" PRIu32 ",\"cluster_bytes\":%" PRIu32 "},\"directory\":{\"start_cluster\":%" PRIu32
-      ",\"size\":%" PRIu32 "},\"chain\":[",
+      R"({"name":"%s","bpb":{"bytes_per_sector":%u,"sectors_per_cluster":%u,)"
+      R"("reserved_sectors":%u,"fat_count":%u,"fat_sectors":%)" PRIu32 R"(,"root_cluster":%)" PRIu32
+      R"(,"data_lba":%)" PRIu32 R"(,"cluster_bytes":%)" PRIu32 R"(},"directory":{"start_cluster":%)" PRIu32
+      R"(,"size":%)" PRIu32 R"(},"chain":[)",
       name, static_cast<unsigned>(geometry.bytes_per_sector), static_cast<unsigned>(geometry.sectors_per_cluster),
       static_cast<unsigned>(geometry.reserved_sectors), static_cast<unsigned>(geometry.fat_count), geometry.fat_sectors,
       geometry.root_cluster, geometry.data_lba,
       static_cast<uint32_t>(geometry.bytes_per_sector) * geometry.sectors_per_cluster, start_cluster, file_size);
-  for (uint8_t i = 0; complete && i < chain_count; i++)
+  for (uint8_t i = 0; complete && i < chain_count; i++) {
     complete =
-        append_json_(out, out_size, &used, "%s{\"cluster\":%" PRIu32 ",\"next\":%" PRIu32 ",\"lba\":%" PRIu32 "}",
-                     i == 0 ? "" : ",", chain[i], next[i], raw_cluster_lba_(geometry, chain[i]));
-  complete = complete && append_json_(out, out_size, &used, "],\"cluster_samples\":[");
-  for (uint8_t i = 0; complete && i < sample_count; i++)
-    complete = append_json_(out, out_size, &used, "%s{\"cluster\":%" PRIu32 ",\"lba\":%" PRIu32 ",\"first16\":\"%s\"}",
-                            i == 0 ? "" : ",", chain[i], raw_cluster_lba_(geometry, chain[i]), cluster_hex[i]);
-  complete = complete && append_json_(out, out_size, &used, "]}");
+        append_json(out, out_size, &used, R"(%s{"cluster":%)" PRIu32 R"(,"next":%)" PRIu32 R"(,"lba":%)" PRIu32 "}",
+                    i == 0 ? "" : ",", chain[i], next[i], raw_cluster_lba(geometry, chain[i]));
+  }
+  complete = complete && append_json(out, out_size, &used, R"(],"cluster_samples":[)");
+  for (uint8_t i = 0; complete && i < sample_count; i++) {
+    complete = append_json(out, out_size, &used, R"(%s{"cluster":%)" PRIu32 R"(,"lba":%)" PRIu32 R"(,"first16":"%s"})",
+                           i == 0 ? "" : ",", chain[i], raw_cluster_lba(geometry, chain[i]), cluster_hex[i]);
+  }
+  complete = complete && append_json(out, out_size, &used, "]}");
   if (!complete) {
-    snprintf(out, out_size, "{\"error\":\"fsdebug response exceeded its fixed buffer\"}");
+    snprintf(out, out_size, R"({"error":"fsdebug response exceeded its fixed buffer"})");
     return finish(FsDebugResult::UNAVAILABLE);
   }
   return finish(FsDebugResult::OK);
@@ -3505,7 +3512,7 @@ SdLogger::RawReadResult SdLogger::collection_begin_raw_read(uint32_t lba, uint32
 }
 
 bool SdLogger::collection_raw_read_sector(uint32_t lba, uint8_t *out, char *error, size_t error_size) {
-  return raw_read_sector_(this->card_, lba, out, error, error_size);
+  return raw_read_sector(this->card_, lba, out, error, error_size);
 }
 
 void SdLogger::collection_end_raw_read() { this->transfers_in_flight_.fetch_sub(1, std::memory_order_release); }
@@ -3519,7 +3526,7 @@ SdLogger::FsDebugResult SdLogger::collection_chain_debug(const char *name, uint3
   uint32_t seq = 0;
   ChunkState named_state = ChunkState::NONE;
   if (name == nullptr || !parse_chunk_name(name, &seq, &named_state)) {
-    snprintf(out, out_size, "{\"error\":\"invalid chunk name\"}");
+    snprintf(out, out_size, R"({"error":"invalid chunk name"})");
     return FsDebugResult::NOT_INDEXED;
   }
 
@@ -3527,19 +3534,19 @@ SdLogger::FsDebugResult SdLogger::collection_chain_debug(const char *name, uint3
   {
     IndexLock lock(this->index_mux_);
     if (!this->serving_open_ || this->card_ == nullptr) {
-      snprintf(out, out_size, "{\"error\":\"card is unavailable\"}");
+      snprintf(out, out_size, R"({"error":"card is unavailable"})");
       return FsDebugResult::UNAVAILABLE;
     }
     const ChunkEntry *entry = this->collection_.find(seq);
     char indexed_name[SD_LOG_NAME_LEN];
     if (entry == nullptr) {
-      snprintf(out, out_size, "{\"error\":\"chunk is not in the index\"}");
+      snprintf(out, out_size, R"({"error":"chunk is not in the index"})");
       return FsDebugResult::NOT_INDEXED;
     }
     format_chunk_name(indexed_name, seq, entry->state);
     if (std::strcmp(name, indexed_name) != 0 || this->collection_.is_serving(seq) ||
         !this->collection_.mark_serving(seq)) {
-      snprintf(out, out_size, "{\"error\":\"chunk is not available for debug\"}");
+      snprintf(out, out_size, R"({"error":"chunk is not available for debug"})");
       return FsDebugResult::NOT_INDEXED;
     }
     reserved = true;
@@ -3556,21 +3563,21 @@ SdLogger::FsDebugResult SdLogger::collection_chain_debug(const char *name, uint3
 
   char error[112] = {};
   RawFat32Geometry geometry{};
-  if (!load_raw_fat32_geometry_(this->card_, &geometry, error, sizeof(error))) {
-    snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+  if (!load_raw_fat32_geometry(this->card_, &geometry, error, sizeof(error))) {
+    snprintf(out, out_size, R"({"error":"%s"})", error);
     return finish(FsDebugResult::UNAVAILABLE);
   }
   uint32_t start_cluster = 0;
   uint32_t file_size = 0;
   uint16_t root_sectors_scanned = 0;
-  const RawDirectoryResult directory = raw_find_chunk_directory_(
-      this->card_, geometry, name, &start_cluster, &file_size, &root_sectors_scanned, error, sizeof(error));
+  const RawDirectoryResult directory = raw_find_chunk_directory(this->card_, geometry, name, &start_cluster, &file_size,
+                                                                &root_sectors_scanned, error, sizeof(error));
   if (directory == RawDirectoryResult::ERROR) {
-    snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+    snprintf(out, out_size, R"({"error":"%s"})", error);
     return finish(FsDebugResult::UNAVAILABLE);
   }
   if (directory != RawDirectoryResult::FOUND || start_cluster < 2) {
-    snprintf(out, out_size, "{\"error\":\"directory entry not found\"}");
+    snprintf(out, out_size, R"({"error":"directory entry not found"})");
     return finish(FsDebugResult::UNAVAILABLE);
   }
 
@@ -3578,40 +3585,40 @@ SdLogger::FsDebugResult SdLogger::collection_chain_debug(const char *name, uint3
   const uint32_t chain_length =
       static_cast<uint32_t>((static_cast<uint64_t>(file_size) + cluster_bytes - 1) / cluster_bytes);
   if (from > chain_length) {
-    snprintf(out, out_size, "{\"error\":\"chain index exceeds file size\"}");
+    snprintf(out, out_size, R"({"error":"chain index exceeds file size"})");
     return finish(FsDebugResult::NOT_INDEXED);
   }
   uint32_t cluster = start_cluster;
   for (uint32_t index = 0; index < from; index++) {
     if (cluster < 2 || cluster >= 0x0FFFFFF8u ||
-        !raw_fat_link_(this->card_, geometry, cluster, &cluster, error, sizeof(error))) {
-      snprintf(out, out_size, "{\"error\":\"%s\"}", error[0] == '\0' ? "FAT chain ended early" : error);
+        !raw_fat_link(this->card_, geometry, cluster, &cluster, error, sizeof(error))) {
+      snprintf(out, out_size, R"({"error":"%s"})", error[0] == '\0' ? "FAT chain ended early" : error);
       return finish(FsDebugResult::UNAVAILABLE);
     }
   }
 
   size_t used = 0;
-  bool complete = append_json_(out, out_size, &used,
-                               "{\"name\":\"%s\",\"from\":%" PRIu32 ",\"count\":%" PRIu32 ",\"cluster_bytes\":%" PRIu32
-                               ",\"links\":[",
-                               name, from, count, cluster_bytes);
+  bool complete = append_json(out, out_size, &used,
+                              R"({"name":"%s","from":%)" PRIu32 R"(,"count":%)" PRIu32 R"(,"cluster_bytes":%)" PRIu32
+                              R"(,"links":[)",
+                              name, from, count, cluster_bytes);
   uint32_t emitted = 0;
   while (complete && emitted < count && from + emitted < chain_length && cluster >= 2 && cluster < 0x0FFFFFF8u) {
     uint32_t next = 0;
-    if (!raw_fat_link_(this->card_, geometry, cluster, &next, error, sizeof(error))) {
-      snprintf(out, out_size, "{\"error\":\"%s\"}", error);
+    if (!raw_fat_link(this->card_, geometry, cluster, &next, error, sizeof(error))) {
+      snprintf(out, out_size, R"({"error":"%s"})", error);
       return finish(FsDebugResult::UNAVAILABLE);
     }
     complete =
-        append_json_(out, out_size, &used,
-                     "%s{\"index\":%" PRIu32 ",\"cluster\":%" PRIu32 ",\"next\":%" PRIu32 ",\"lba\":%" PRIu32 "}",
-                     emitted == 0 ? "" : ",", from + emitted, cluster, next, raw_cluster_lba_(geometry, cluster));
+        append_json(out, out_size, &used,
+                    R"(%s{"index":%)" PRIu32 R"(,"cluster":%)" PRIu32 R"(,"next":%)" PRIu32 R"(,"lba":%)" PRIu32 "}",
+                    emitted == 0 ? "" : ",", from + emitted, cluster, next, raw_cluster_lba(geometry, cluster));
     cluster = next;
     emitted++;
   }
-  complete = complete && append_json_(out, out_size, &used, "]}");
+  complete = complete && append_json(out, out_size, &used, "]}");
   if (!complete) {
-    snprintf(out, out_size, "{\"error\":\"chain response exceeded its fixed buffer\"}");
+    snprintf(out, out_size, R"({"error":"chain response exceeded its fixed buffer"})");
     return finish(FsDebugResult::UNAVAILABLE);
   }
   return finish(FsDebugResult::OK);
@@ -4251,5 +4258,4 @@ void SdLogger::dump_config() {
 #endif
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

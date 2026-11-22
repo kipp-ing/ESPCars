@@ -35,8 +35,7 @@
 #error "sd_logger collection server requires FreeRTOS method-2 stack-overflow canaries"
 #endif
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 ESPHOME_LOG_TAG(TAG, "sd_logger.collect");
 
@@ -335,14 +334,14 @@ bool CollectionServer::start(uint16_t port) {
   // make this file depend on an sdkconfig option it has no business having an opinion about.
   // Everything omitted is value-initialised.
   const httpd_uri_t routes[] = {
-      {.uri = ROUTE_INDEX, .method = HTTP_GET, .handler = &CollectionServer::index_route_, .user_ctx = this},
-      {.uri = ROUTE_STATUS, .method = HTTP_GET, .handler = &CollectionServer::status_route_, .user_ctx = this},
-      {.uri = ROUTE_FSDEBUG, .method = HTTP_GET, .handler = &CollectionServer::fsdebug_route_, .user_ctx = this},
-      {.uri = ROUTE_RAW, .method = HTTP_GET, .handler = &CollectionServer::raw_route_, .user_ctx = this},
-      {.uri = ROUTE_CHAIN, .method = HTTP_GET, .handler = &CollectionServer::chain_route_, .user_ctx = this},
-      {.uri = ROUTE_SPI_TRACE, .method = HTTP_GET, .handler = &CollectionServer::spitrace_route_, .user_ctx = this},
-      {.uri = "/sdlog/f/*", .method = HTTP_GET, .handler = &CollectionServer::chunk_route_, .user_ctx = this},
-      {.uri = "/sdlog/done/*", .method = HTTP_POST, .handler = &CollectionServer::done_route_, .user_ctx = this},
+      {.uri = ROUTE_INDEX, .method = HTTP_GET, .handler = &CollectionServer::index_route, .user_ctx = this},
+      {.uri = ROUTE_STATUS, .method = HTTP_GET, .handler = &CollectionServer::status_route, .user_ctx = this},
+      {.uri = ROUTE_FSDEBUG, .method = HTTP_GET, .handler = &CollectionServer::fsdebug_route, .user_ctx = this},
+      {.uri = ROUTE_RAW, .method = HTTP_GET, .handler = &CollectionServer::raw_route, .user_ctx = this},
+      {.uri = ROUTE_CHAIN, .method = HTTP_GET, .handler = &CollectionServer::chain_route, .user_ctx = this},
+      {.uri = ROUTE_SPI_TRACE, .method = HTTP_GET, .handler = &CollectionServer::spitrace_route, .user_ctx = this},
+      {.uri = "/sdlog/f/*", .method = HTTP_GET, .handler = &CollectionServer::chunk_route, .user_ctx = this},
+      {.uri = "/sdlog/done/*", .method = HTTP_POST, .handler = &CollectionServer::done_route, .user_ctx = this},
   };
   for (const httpd_uri_t &route : routes) {
     const esp_err_t reg = httpd_register_uri_handler(handle, &route);
@@ -376,28 +375,28 @@ void CollectionServer::stop() {
 
 // -------------------------------------------------------------------------------- trampolines
 
-esp_err_t CollectionServer::index_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::index_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_index_(req);
 }
-esp_err_t CollectionServer::chunk_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::chunk_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_chunk_(req);
 }
-esp_err_t CollectionServer::done_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::done_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_done_(req);
 }
-esp_err_t CollectionServer::status_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::status_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_status_(req);
 }
-esp_err_t CollectionServer::fsdebug_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::fsdebug_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_fsdebug_(req);
 }
-esp_err_t CollectionServer::raw_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::raw_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_raw_(req);
 }
-esp_err_t CollectionServer::chain_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::chain_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_chain_(req);
 }
-esp_err_t CollectionServer::spitrace_route_(httpd_req_t *req) {
+esp_err_t CollectionServer::spitrace_route(httpd_req_t *req) {
   return static_cast<CollectionServer *>(req->user_ctx)->serve_spitrace_(req);
 }
 
@@ -445,7 +444,7 @@ esp_err_t CollectionServer::serve_index_(httpd_req_t *req) {
   // past the buffer — an entry is ~52 B against 96, so this can only fire if someone widens a
   // field, which is exactly when a silent overrun would be hardest to find.
   char buf[96];
-  int n = snprintf(buf, sizeof(buf), "{\"device\":\"%s\",\"chunks\":[", this->device_);
+  int n = snprintf(buf, sizeof(buf), R"({"device":"%s","chunks":[)", this->device_);
   if (n < 0 || static_cast<size_t>(n) >= sizeof(buf))
     return ESP_FAIL;
   if (httpd_resp_send_chunk(req, buf, n) != ESP_OK)
@@ -480,7 +479,7 @@ esp_err_t CollectionServer::serve_index_(httpd_req_t *req) {
     // `#sdlog` header at index time would put card I/O on the httpd path for a display nicety
     // (§11.1, option 1). The keys are optional — the client's `_opt_int(None)` accepts their
     // absence and only `sdlog_collect.py index` notices, printing `span=-`.
-    n = snprintf(buf, sizeof(buf), "%s{\"name\":\"%s\",\"seq\":%" PRIu32 ",\"bytes\":%" PRIu32 "}", first ? "" : ",",
+    n = snprintf(buf, sizeof(buf), R"(%s{"name":"%s","seq":%)" PRIu32 R"(,"bytes":%)" PRIu32 "}", first ? "" : ",",
                  name, entry.seq, entry.bytes);
     if (n < 0 || static_cast<size_t>(n) >= sizeof(buf))
       return ESP_FAIL;
@@ -500,7 +499,7 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
   char name[SD_LOG_NAME_LEN];
   uint32_t seq = 0;
   if (!decode_chunk_name(req->uri, PREFIX_CHUNK, name, &seq))
-    return reply_json(req, "404 Not Found", "{\"error\":\"no such chunk\"}");
+    return reply_json(req, "404 Not Found", R"({"error":"no such chunk"})");
 
   uint32_t indexed_bytes = 0;
   ChunkState state = ChunkState::NONE;
@@ -513,10 +512,10 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
     // and 409 is what tells the client "not this one, keep going". Confirming the open file would
     // make the live file deletable.
     if (state == ChunkState::OPEN)
-      return reply_json(req, "409 Conflict", "{\"error\":\"open\"}");
+      return reply_json(req, "409 Conflict", R"({"error":"open"})");
     // CONFIRMED, discarded by retention, never tracked because the index was full, or simply not a
     // chunk. All 404: the client reports the chunk failed and the run continues.
-    return reply_json(req, "404 Not Found", "{\"error\":\"no such chunk\"}");
+    return reply_json(req, "404 Not Found", R"({"error":"no such chunk"})");
   }
   ServingGuard serving(this->parent_, seq);
 
@@ -527,7 +526,7 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
   char path[128];
   const int path_len = snprintf(path, sizeof(path), "%s/%s", this->parent_->mount_point().c_str(), on_card);
   if (path_len <= 0 || static_cast<size_t>(path_len) >= sizeof(path))
-    return reply_json(req, "500 Internal Server Error", "{\"error\":\"path\"}");
+    return reply_json(req, "500 Internal Server Error", R"({"error":"path"})");
 
   // Read-only `open()`/`read()`/`close()` from the httpd task is what §8 explicitly permits; every
   // mutation (rename, unlink) stays on the writer. The invariant that makes this survivable is
@@ -539,20 +538,20 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
     // transient fault and 5xx is the only status the client retries. A 404 here would tell the
     // operator "wrong firmware".
     ESP_LOGW(TAG, "open %s failed (errno %d)", path, errno);
-    return reply_json(req, "500 Internal Server Error", "{\"error\":\"card\"}");
+    return reply_json(req, "500 Internal Server Error", R"({"error":"card"})");
   }
   FdGuard fd_guard(fd);
 
   struct stat st;
   if (::fstat(fd, &st) != 0 || st.st_size < 0)
-    return reply_json(req, "500 Internal Server Error", "{\"error\":\"card\"}");
+    return reply_json(req, "500 Internal Server Error", R"({"error":"card"})");
   // The size on the card, not the size in the index. They agree — `seal()` records the final size
   // and refuses a second seal precisely so the number the collector was given cannot be rewritten —
   // but `Content-Length` is a promise about the bytes this response will actually produce, so it is
   // taken from the thing that produces them. `off_t` is 32-bit here and no file this component
   // writes reaches 2 GiB; a stranger that large is refused rather than served with a wrapped length.
   if (st.st_size > 0x7FFFFFFF)
-    return reply_json(req, "500 Internal Server Error", "{\"error\":\"too large\"}");
+    return reply_json(req, "500 Internal Server Error", R"({"error":"too large"})");
   const uint32_t total = static_cast<uint32_t>(st.st_size);
   // An empty file is not a chunk, and it is answered here — before the Range block — because every
   // answer available further down is wrong for it. `want_start >= total` is `0 >= 0`, so a zero-byte
@@ -571,7 +570,7 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
   // retention still reclaims it as a (0 KB) discard.
   if (total == 0) {
     ESP_LOGW(TAG, "%s is 0 B on the card — not a chunk, refusing to serve it", on_card);
-    return reply_json(req, "404 Not Found", "{\"error\":\"no such chunk\"}");
+    return reply_json(req, "404 Not Found", R"({"error":"no such chunk"})");
   }
   if (total != indexed_bytes) {
     // Not fatal — what is served is what is on the card, and it is served honestly — but the index
@@ -643,7 +642,7 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
                         body);
   }
   if (head_len <= 0 || static_cast<size_t>(head_len) >= sizeof(head))
-    return reply_json(req, "500 Internal Server Error", "{\"error\":\"headers\"}");
+    return reply_json(req, "500 Internal Server Error", R"({"error":"headers"})");
   if (!this->send_all_(req, head, static_cast<size_t>(head_len)))
     return ESP_FAIL;  // the peer is already gone; nothing else to say to it
 
@@ -723,7 +722,7 @@ esp_err_t CollectionServer::serve_done_(httpd_req_t *req) {
   char name[SD_LOG_NAME_LEN];
   uint32_t seq = 0;
   if (!decode_chunk_name(req->uri, PREFIX_DONE, name, &seq))
-    return reply_json(req, "404 Not Found", "{\"error\":\"no such chunk\"}");
+    return reply_json(req, "404 Not Found", R"({"error":"no such chunk"})");
 
   // Answered from the index, by seq, never from the filesystem. After the first confirm the writer
   // renames `.LOG` -> `.UPL`, so a handler that `stat()`ed the name would 404 the retry — and the
@@ -735,15 +734,15 @@ esp_err_t CollectionServer::serve_done_(httpd_req_t *req) {
       // yes": a 204 — the tempting choice for an empty ack — is reported as `confirm: HTTP 204` and
       // the chunk is left uncollected forever. The body is never read.
       char body[48];
-      snprintf(body, sizeof(body), "{\"confirmed\":\"%s\"}", name);
+      snprintf(body, sizeof(body), R"({"confirmed":"%s"})", name);
       return reply_json(req, "200 OK", body);
     }
     case SdLogger::ConfirmResult::IS_OPEN:
-      return reply_json(req, "409 Conflict", "{\"error\":\"open\"}");
+      return reply_json(req, "409 Conflict", R"({"error":"open"})");
     case SdLogger::ConfirmResult::BUSY:
       // The writer's intent queue is full, which on a healthy board means it has not run for a
       // while. 503 is retryable and the confirm is idempotent, so a retry costs nothing.
-      return reply_json(req, "503 Service Unavailable", "{\"error\":\"busy\"}");
+      return reply_json(req, "503 Service Unavailable", R"({"error":"busy"})");
     case SdLogger::ConfirmResult::NOT_TRACKED:
     default:
       // Unpinned by the contract — the fake can never reach it (§11.5). 404 for both readings:
@@ -751,7 +750,7 @@ esp_err_t CollectionServer::serve_done_(httpd_req_t *req) {
       // the file appeared and the firmware cannot rename what it is not tracking. Neither can lose
       // data: the client reports the chunk failed while holding good verified bytes, and the chunk
       // is not in the next index either, so it is never re-fetched.
-      return reply_json(req, "404 Not Found", "{\"error\":\"no such chunk\"}");
+      return reply_json(req, "404 Not Found", R"({"error":"no such chunk"})");
   }
 }
 
@@ -768,10 +767,11 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
     ChunkEntry entry{};
     if (!this->parent_->collection_entry_at(i, &entry))
       break;
-    if (entry.state == ChunkState::SEALED)
+    if (entry.state == ChunkState::SEALED) {
       sealed++;
-    else if (entry.state == ChunkState::CONFIRMED)
+    } else if (entry.state == ChunkState::CONFIRMED) {
       confirmed++;
+    }
   }
   uint32_t oldest = 0;
   // The status object is deliberately roomy: it is the remote view during card failures, so new
@@ -828,7 +828,7 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
   };
   const int n = format_status_json(body, sizeof(body), fields);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(body))
-    return reply_json(req, "500 Internal Server Error", "{\"error\":\"status\"}");
+    return reply_json(req, "500 Internal Server Error", R"({"error":"status"})");
   return reply_json(req, "200 OK", body);
 }
 
@@ -839,12 +839,12 @@ esp_err_t CollectionServer::serve_fsdebug_(httpd_req_t *req) {
   char name[SD_LOG_NAME_LEN];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
       httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK)
-    return reply_json(req, "404 Not Found", "{\"error\":\"name is required\"}");
+    return reply_json(req, "404 Not Found", R"({"error":"name is required"})");
 
   uint32_t seq = 0;
   ChunkState ignored_state = ChunkState::NONE;
   if (!parse_chunk_name(name, &seq, &ignored_state))
-    return reply_json(req, "404 Not Found", "{\"error\":\"invalid chunk name\"}");
+    return reply_json(req, "404 Not Found", R"({"error":"invalid chunk name"})");
 
   const SdLogger::FsDebugResult result = this->parent_->collection_fs_debug(name, this->block_, SD_LOG_SERVE_BLOCK);
   if (result == SdLogger::FsDebugResult::NOT_INDEXED)
@@ -860,15 +860,15 @@ esp_err_t CollectionServer::serve_raw_(httpd_req_t *req) {
   char query[64];
   RawSectorRequest request{};
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK || !parse_raw_sector_query(query, &request))
-    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"lba uint32 and count 1..128 are required\"}");
+    return reply_json(req, STATUS_BAD_REQUEST, R"({"error":"lba uint32 and count 1..128 are required"})");
 
   char error[96] = {};
   const SdLogger::RawReadResult begin =
       this->parent_->collection_begin_raw_read(request.lba, request.count, error, sizeof(error));
   if (begin == SdLogger::RawReadResult::INVALID)
-    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"raw LBA range is outside the card\"}");
+    return reply_json(req, STATUS_BAD_REQUEST, R"({"error":"raw LBA range is outside the card"})");
   if (begin != SdLogger::RawReadResult::OK) {
-    snprintf(this->block_, SD_LOG_SERVE_BLOCK, "{\"error\":\"%s\"}", error);
+    snprintf(this->block_, SD_LOG_SERVE_BLOCK, R"({"error":"%s"})", error);
     return reply_json(req, "503 Service Unavailable", this->block_);
   }
   RawReadGuard guard(this->parent_);
@@ -890,12 +890,12 @@ esp_err_t CollectionServer::serve_chain_(httpd_req_t *req) {
   char query[80];
   ChainPageRequest page{};
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK || !parse_chain_page_query(query, &page))
-    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"name is required; from defaults to 0; count is 1..20\"}");
+    return reply_json(req, STATUS_BAD_REQUEST, R"({"error":"name is required; from defaults to 0; count is 1..20"})");
 
   uint32_t seq = 0;
   ChunkState ignored_state = ChunkState::NONE;
   if (!parse_chunk_name(page.name, &seq, &ignored_state))
-    return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"invalid chunk name\"}");
+    return reply_json(req, STATUS_BAD_REQUEST, R"({"error":"invalid chunk name"})");
 
   const SdLogger::FsDebugResult result =
       this->parent_->collection_chain_debug(page.name, page.from, page.count, this->block_, SD_LOG_SERVE_BLOCK);
@@ -915,7 +915,7 @@ esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
     char value[2];
     if (httpd_query_key_value(query, "clear", value, sizeof(value)) == ESP_OK) {
       if (std::strcmp(value, "1") != 0)
-        return reply_json(req, STATUS_BAD_REQUEST, "{\"error\":\"clear must be 1\"}");
+        return reply_json(req, STATUS_BAD_REQUEST, R"({"error":"clear must be 1"})");
       clear = true;
     }
   }
@@ -958,7 +958,6 @@ esp_err_t CollectionServer::serve_spitrace_(httpd_req_t *req) {
   return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger
 
 #endif  // USE_SD_LOGGER_COLLECTION_SERVER

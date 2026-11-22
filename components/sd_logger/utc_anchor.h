@@ -7,8 +7,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 struct UtcAnchor {
   uint64_t utc_us{0};
@@ -34,5 +33,4 @@ inline bool resolve_utc_us(const UtcAnchor &anchor, uint64_t record_boot_us, uin
   return true;
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

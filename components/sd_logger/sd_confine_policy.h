@@ -8,8 +8,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 static constexpr uint32_t SD_CONFINE_SECTOR_BYTES = 512;
 static constexpr uint64_t SD_CONFINE_MIN_BYTES = 1ull * 1024 * 1024;
@@ -72,5 +71,4 @@ inline CapacitySelfTestVerdict capacity_self_test_verdict(bool reads_ok, const u
   return CapacitySelfTestVerdict::PASS;
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

@@ -5,8 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// The complete, additive wire view of `GET /sdlog/status`.
 ///
@@ -137,5 +136,4 @@ inline int format_status_json(char *out, size_t len, const StatusFields &fields)
       fields.last_write_heap_dma_free, fields.last_write_heap_dma_largest, fields.writer_stack_free);
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

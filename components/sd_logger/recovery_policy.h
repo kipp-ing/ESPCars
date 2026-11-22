@@ -22,8 +22,7 @@
 
 #include <cstdint>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// `max_attempts: 0` means "keep trying for as long as the board runs".
 static const uint32_t SD_LOG_RECOVERY_UNLIMITED = 0;
@@ -157,5 +156,4 @@ class RecoveryPolicy {
   uint32_t busy_timeout_ms_{2000};
 };
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

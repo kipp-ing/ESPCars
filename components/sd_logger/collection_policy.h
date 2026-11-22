@@ -70,8 +70,7 @@
 static constexpr int SD_LOG_MAX_CHUNKS = 256;
 #endif
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// The filename carries 7 digits, so the sequence space is [0, 9999999] and it *wraps* — at ~4 MB a
 /// chunk that is 40 TB of logging away, but the wrap is one modulo and the alternative is an
@@ -681,5 +680,4 @@ class CollectionPolicy {
   uint64_t discarded_bytes_{0};
 };
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger
