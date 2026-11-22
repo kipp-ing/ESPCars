@@ -33,8 +33,8 @@ struct ExchangeResult {
   IsoTpError rx_error{IsoTpError::NONE};
   uint16_t delivered{0};
   bool bytes_ok{false};
-  uint32_t fc_count{0};   // flow controls the receiver issued
-  uint32_t frames{0};     // data frames the sender put on the "wire"
+  uint32_t fc_count{0};  // flow controls the receiver issued
+  uint32_t frames{0};    // data frames the sender put on the "wire"
   uint32_t elapsed_ms{0};
 };
 

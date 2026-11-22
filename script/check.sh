@@ -22,8 +22,8 @@ echo "== host tests =="
 make -C tests/host
 
 echo "== clang-format =="
-find components -name '*.cpp' -o -name '*.h' -o -name '*.tcc' | \
-  xargs .venv/bin/clang-format --dry-run --Werror
+# Share pre-commit's full C/C++ scope and byte-exact exclusions.
+"$PY" script/lint_report.py --only clang-format --summary
 
 # HA glue for custom_components/sdlog_relay needs its own venv (a pinned HA);
 # CI always runs it, locally only when .venv-ha exists.

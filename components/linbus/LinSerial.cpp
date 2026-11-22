@@ -14,19 +14,16 @@ LinSerial::LinSerial(uart_port_t uart_num, int tx_pin, int rx_pin, int baud_rate
     : uart_num_(uart_num), tx_pin_(tx_pin), rx_pin_(rx_pin), baud_rate_(baud_rate) {}
 
 esp_err_t LinSerial::init() {
-  uart_config_t uart_config = {
-    .baud_rate = baud_rate_,
-    .data_bits = UART_DATA_8_BITS,
-    .parity = UART_PARITY_DISABLE,
-    .stop_bits = UART_STOP_BITS_1,
-    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-    .rx_flow_ctrl_thresh = 0,
+  uart_config_t uart_config = {.baud_rate = baud_rate_,
+                               .data_bits = UART_DATA_8_BITS,
+                               .parity = UART_PARITY_DISABLE,
+                               .stop_bits = UART_STOP_BITS_1,
+                               .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+                               .rx_flow_ctrl_thresh = 0,
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    .source_clk = UART_SCLK_DEFAULT
-  };
+                               .source_clk = UART_SCLK_DEFAULT};
 #else
-    .source_clk = UART_SCLK_APB
-  };
+                               .source_clk = UART_SCLK_APB};
 #endif
 
   esp_err_t err = uart_param_config(uart_num_, &uart_config);

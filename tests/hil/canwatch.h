@@ -50,9 +50,7 @@ inline uint32_t g_overflow = 0;
 inline uint32_t g_last_rx_ms = 0;
 
 /// True if any frame arrived within the last `window_ms` — drives the LED.
-inline bool rx_recent(uint32_t window_ms) {
-  return g_last_rx_ms != 0 && (millis() - g_last_rx_ms) <= window_ms;
-}
+inline bool rx_recent(uint32_t window_ms) { return g_last_rx_ms != 0 && (millis() - g_last_rx_ms) <= window_ms; }
 
 /// Hex payload with a '*' after every byte that moved since the last report:
 /// "01 5A* 00 ..." — the moving bytes are usually the counter/signal and the

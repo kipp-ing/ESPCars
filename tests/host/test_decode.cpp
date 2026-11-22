@@ -339,9 +339,8 @@ TEST(decode_sna_all_ones_per_width) {
   // the DBC widths the evidence sampled (2, 10), the byte-aligned widths, and
   // the 32-bit edge where the shift would overflow.
   const Row rows[] = {
-      {1, 0x00000001},  {2, 0x00000003},  {3, 0x00000007},  {4, 0x0000000F},  {8, 0x000000FF},
-      {10, 0x000003FF}, {12, 0x00000FFF}, {16, 0x0000FFFF}, {24, 0x00FFFFFF}, {31, 0x7FFFFFFF},
-      {32, 0xFFFFFFFF},
+      {1, 0x00000001},  {2, 0x00000003},  {3, 0x00000007},  {4, 0x0000000F},  {8, 0x000000FF},  {10, 0x000003FF},
+      {12, 0x00000FFF}, {16, 0x0000FFFF}, {24, 0x00FFFFFF}, {31, 0x7FFFFFFF}, {32, 0xFFFFFFFF},
   };
   for (const Row &row : rows) {
     std::string where = std::string("width=") + std::to_string(row.width);
@@ -489,7 +488,8 @@ TEST(decode_bits_motorola_vectors) {
     uint8_t start, length;
     uint32_t expected;
   };
-  const Row rows[] = {{4, 13, 0x0123}, {11, 12, 0x345}, {7, 16, 0x0123}, {7, 32, 0x01234567}, {63, 8, 0xEF}, {62, 3, 6}};
+  const Row rows[] = {{4, 13, 0x0123},     {11, 12, 0x345}, {7, 16, 0x0123},
+                      {7, 32, 0x01234567}, {63, 8, 0xEF},   {62, 3, 6}};
   for (const Row &row : rows) {
     uint32_t got = extract_bits_be(PAYLOAD, 8, row.start, row.length);
     CHECK_EQ_MSG(got, row.expected, tag("extract_bits_be", 8, row.start, row.length));

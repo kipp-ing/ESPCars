@@ -22,11 +22,29 @@ using esphome::sd_logger::StatusFields;
 namespace {
 
 StatusFields representative_fields(uint32_t writer_stack_free = 47) {
-  return StatusFields{"mr-orange", 3u,  2u,  41u, 7u,  9ull, true, 123u, 11u, 13u, true, false,
-                      "healthy",   17u, 19u, 23u, 29u, 31u,  37u,  41u,  43u,
-                      "retrying", 53u, "retry_recovery", 5, -1, 736u, 700u, 0, 1248u, 512u, 42u,
-                      100u, 103u, 3u, 3u, 0u, -7, 62500000u, 63u, 62499937u,
-                      1000u, 900u, 800u, 700u, writer_stack_free};
+  return StatusFields{"mr-orange", 3u,
+                      2u,          41u,
+                      7u,          9ull,
+                      true,        123u,
+                      11u,         13u,
+                      true,        false,
+                      "healthy",   17u,
+                      19u,         23u,
+                      29u,         31u,
+                      37u,         41u,
+                      43u,         "retrying",
+                      53u,         "retry_recovery",
+                      5,           -1,
+                      736u,        700u,
+                      0,           1248u,
+                      512u,        42u,
+                      100u,        103u,
+                      3u,          3u,
+                      0u,          -7,
+                      62500000u,   63u,
+                      62499937u,   1000u,
+                      900u,        800u,
+                      700u,        writer_stack_free};
 }
 
 size_t occurrences(const char *text, const char *needle) {

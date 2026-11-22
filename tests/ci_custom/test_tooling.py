@@ -120,7 +120,7 @@ def report_environment(monkeypatch):
             "prek": "0.5.11",
             "pre-commit-hooks": "5.0.0",
             "identify": "2.6.20",
-            "clang-format": "13.0.1",
+            "clang-format": "23.1.3",
             "clang-tidy": "23.1.4",
         }[package],
     )
