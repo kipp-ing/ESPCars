@@ -9,7 +9,7 @@
 
 namespace esphome::portal {
 
-static const char *const TAG = "portal";
+ESPHOME_LOG_TAG(TAG, "portal");
 
 // ---- tree construction (called from generated setup code) ------------------------------------
 
@@ -185,7 +185,7 @@ void Portal::dump_config() {
                 this->base_ != nullptr ? this->base_->get_port() : 0, static_cast<unsigned>(this->node_count_),
                 static_cast<unsigned>(this->value_count_), static_cast<unsigned>(this->action_count_),
                 static_cast<unsigned>(this->web_asset_size_),
-                this->auth_enabled_ ? "digest (POST actions only)" : "none");
+                this->auth_enabled_ ? LOG_STR_LITERAL("digest (POST actions only)") : LOG_STR_LITERAL("none"));
 }
 
 void Portal::mark_published_(size_t index) {

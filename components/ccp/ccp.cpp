@@ -5,7 +5,7 @@
 
 namespace esphome::ccp {
 
-static const char *const TAG = "ccp";
+ESPHOME_LOG_TAG(TAG, "ccp");
 
 void CcpHub::setup() { this->port_->subscribe_consumer(this->response_id_, false, this); }
 
@@ -24,8 +24,9 @@ void CcpHub::dump_config() {
   ESP_LOGCONFIG(TAG, "  CRO: 0x%03X, DTO: 0x%03X, station: 0x%04X", static_cast<unsigned>(this->command_id_),
                 static_cast<unsigned>(this->response_id_), this->station_address_);
   ESP_LOGCONFIG(TAG, "  Byte order: %s, response timeout: %u ms, writes: %s",
-                this->byte_order_ == ByteOrder::LITTLE ? "little" : "big",
-                static_cast<unsigned>(this->response_timeout_), this->allow_write_ ? "enabled" : "disabled");
+                this->byte_order_ == ByteOrder::LITTLE ? LOG_STR_LITERAL("little") : LOG_STR_LITERAL("big"),
+                static_cast<unsigned>(this->response_timeout_),
+                this->allow_write_ ? LOG_STR_LITERAL("enabled") : LOG_STR_LITERAL("disabled"));
 }
 
 bool CcpHub::write_allowed_(uint8_t command) const {

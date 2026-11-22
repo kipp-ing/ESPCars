@@ -7,7 +7,7 @@
 
 namespace esphome::uds {
 
-static const char *const TAG = "uds";
+ESPHOME_LOG_TAG(TAG, "uds");
 
 // -------------------------------------------------------------------------------------------
 // Allocation — all of it, once, from codegen statements that run ahead of App.setup()
@@ -85,7 +85,7 @@ void UdsHub::setup() {
     // or stale catalog is a flashing mistake, and the failure mode has to be "no data", never a
     // decode against bytes we do not understand.
     ESP_LOGE(TAG, "%s: catalog unavailable: %s — this hub will not transmit and its entities stay unavailable",
-             this->log_name_, this->catalog_error_ != nullptr ? this->catalog_error_ : "unknown");
+             this->log_name_, this->catalog_error_ != nullptr ? this->catalog_error_ : LOG_STR_LITERAL("unknown"));
     this->mark_all_unavailable_();
     return;
   }
@@ -244,9 +244,10 @@ void UdsHub::build_poll_table_() {
           e.interval_ms < interval)
         interval = e.interval_ms;
     }
-    if (!this->sched_.add(b.group_index, interval, now))
+    if (!this->sched_.add(b.group_index, interval, now)) {
       ESP_LOGW(TAG, "%s: poll table full at %u groups; '%s' will not be polled", this->log_name_,
                this->sched_.capacity(), b.group_name);
+    }
   }
 }
 
@@ -554,7 +555,7 @@ void UdsHub::note_uncovered_(UdsBinding &b) {
   if (!b.uncovered_logged) {
     b.uncovered_logged = true;
     ESP_LOGW(TAG, "%s: field '%s'%s is past the end of what this ECU answers for group '%s' — unavailable",
-             this->log_name_, b.field_name, b.element != 0 ? " (an array element)" : "", b.group_name);
+             this->log_name_, b.field_name, b.element != 0 ? LOG_STR_LITERAL(" (an array element)") : "", b.group_name);
   }
 }
 
@@ -733,7 +734,7 @@ void UdsHub::set_enabled(bool enabled) {
   if (this->enabled_ == enabled)
     return;
   this->enabled_ = enabled;
-  ESP_LOGI(TAG, "%s: polling %s", this->log_name_, enabled ? "enabled" : "disabled");
+  ESP_LOGI(TAG, "%s: polling %s", this->log_name_, enabled ? LOG_STR_LITERAL("enabled") : LOG_STR_LITERAL("disabled"));
 }
 
 // -------------------------------------------------------------------------------------------
@@ -743,7 +744,8 @@ void UdsHub::set_enabled(bool enabled) {
 void UdsHub::dump_config() {
   ESP_LOGCONFIG(TAG, "UDS client '%s':", this->log_name_);
   if (!this->catalog_.is_open()) {
-    ESP_LOGE(TAG, "  Catalog UNAVAILABLE: %s", this->catalog_error_ != nullptr ? this->catalog_error_ : "unknown");
+    ESP_LOGE(TAG, "  Catalog UNAVAILABLE: %s",
+             this->catalog_error_ != nullptr ? this->catalog_error_ : LOG_STR_LITERAL("unknown"));
     ESP_LOGE(TAG, "  This hub sends nothing and every entity stays unavailable.");
     return;
   }
@@ -767,7 +769,7 @@ void UdsHub::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  ECU: '%s', request 0x%03" PRIX32 ", response 0x%03" PRIX32 "%s", this->ecu_.name,
                 this->ecu_.request_id, this->ecu_.response_id,
-                (this->ecu_.flags & ECU_FLAG_EXTENDED_ID) != 0 ? " (29-bit)" : "");
+                (this->ecu_.flags & ECU_FLAG_EXTENDED_ID) != 0 ? LOG_STR_LITERAL(" (29-bit)") : "");
   ESP_LOGCONFIG(TAG, "  Timing: P2 %u ms, P2* %u ms; catalog suggests block size %u, STmin raw 0x%02X", this->p2_ms_,
                 this->p2_ext_ms_, this->ecu_.block_size, this->ecu_.st_min_raw);
   ESP_LOGCONFIG(TAG, "  Catalog holds %u groups and %u fields", this->catalog_.group_count(),
@@ -777,26 +779,30 @@ void UdsHub::dump_config() {
   for (uint8_t i = 0; i < this->sched_.size(); i++) {
     const PollEntry &e = this->sched_.entry(i);
     GroupView g;
-    if (this->catalog_.group(e.group_index, &g))
+    if (this->catalog_.group(e.group_index, &g)) {
       ESP_LOGCONFIG(TAG, "    '%s' (DID 0x%04X, response >= %u B) every %" PRIu32 " ms", g.name, g.did, g.resp_min_len,
                     e.interval_ms);
+    }
   }
   uint16_t uncovered = 0;
   for (uint16_t i = 0; i < this->binding_count_; i++) {
     const UdsBinding &b = this->bindings_[i];
-    if (!b.resolved)
+    if (!b.resolved) {
       ESP_LOGE(TAG, "  UNRESOLVED: field '%s' in group '%s' — this entity stays unavailable", b.field_name,
                b.group_name);
+    }
     if (b.uncovered)
       uncovered = static_cast<uint16_t>(uncovered + 1);
   }
   // Reported even though it is not an error: a config that reads array elements the ECU does not
   // send should say so on every boot, or "unavailable" looks like a wiring fault.
-  if (this->partial_responses_ != 0 || uncovered != 0)
+  if (this->partial_responses_ != 0 || uncovered != 0) {
     ESP_LOGCONFIG(TAG, "  Partial responses: %" PRIu32 " (%u binding(s) never covered)", this->partial_responses_,
                   uncovered);
+  }
   ESP_LOGCONFIG(TAG, "  Max consecutive failures: %u", this->max_failures_);
-  ESP_LOGCONFIG(TAG, "  Active services: %s", this->allow_active_services_ ? "ALLOWED" : "refused");
+  ESP_LOGCONFIG(TAG, "  Active services: %s",
+                this->allow_active_services_ ? LOG_STR_LITERAL("ALLOWED") : LOG_STR_LITERAL("refused"));
 }
 
 #ifdef USE_SENSOR

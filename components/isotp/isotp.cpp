@@ -5,7 +5,7 @@
 
 namespace esphome::isotp {
 
-static const char *const TAG = "isotp";
+ESPHOME_LOG_TAG(TAG, "isotp");
 
 static const char *error_to_string(IsoTpError error) {
   switch (error) {
@@ -108,7 +108,8 @@ void IsoTpProtocol::loop() {
 bool IsoTpProtocol::send(const uint8_t *data, uint16_t size) {
   if (!this->tx_.begin(data, size, millis())) {
     ESP_LOGW(TAG, "%s: send rejected: %s", this->log_name_,
-             this->tx_.is_busy() ? "a transfer is already in flight" : "message exceeds max_message_size");
+             this->tx_.is_busy() ? LOG_STR_LITERAL("a transfer is already in flight")
+                                 : LOG_STR_LITERAL("message exceeds max_message_size"));
     return false;
   }
   return true;
@@ -139,10 +140,12 @@ void IsoTpProtocol::report_error_(IsoTpError error) {
 
 void IsoTpProtocol::dump_config() {
   ESP_LOGCONFIG(TAG, "ISO-TP '%s':", this->log_name_);
-  ESP_LOGCONFIG(TAG, "  Request ID: 0x%03" PRIX32 " (%s)", this->tx_id_, this->extended_ ? "29-bit" : "11-bit");
+  ESP_LOGCONFIG(TAG, "  Request ID: 0x%03" PRIX32 " (%s)", this->tx_id_,
+                this->extended_ ? LOG_STR_LITERAL("29-bit") : LOG_STR_LITERAL("11-bit"));
   ESP_LOGCONFIG(TAG, "  Response ID: 0x%03" PRIX32, this->rx_id_);
-  if (this->cfg_.address_extension_len != 0)
+  if (this->cfg_.address_extension_len != 0) {
     ESP_LOGCONFIG(TAG, "  Extended addressing, target 0x%02X", this->cfg_.target_address);
+  }
   ESP_LOGCONFIG(TAG, "  Max message size: %u bytes", this->cfg_.max_message_size);
   ESP_LOGCONFIG(TAG, "  Block size granted: %u frames", this->cfg_.block_size);
   ESP_LOGCONFIG(TAG, "  STmin requested: %" PRIu32 " ms (raw 0x%02X)", st_min_to_ms(this->cfg_.st_min_raw),
