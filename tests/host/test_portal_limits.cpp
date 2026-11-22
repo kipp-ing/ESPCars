@@ -197,7 +197,8 @@ TEST(portal_value_emits_level_after_the_v2_keys) {
   CHECK(has(o.json, "\"key\":\"plain\",\"label\":\"plain\",\"unit\":null,\"value\":1,\"raw\":1,\"raw_hex\":null,"
                     "\"classification\":\"real\",\"state\":\"ok\",\"why\":null,\"level\":null}"));
   // no reading: level null whatever the limits
-  CHECK(has(o.json, "\"code\":\"value_not_available\",\"detail\":null,\"since_ms\":null,\"evidence\":{}},\"level\":null}"));
+  CHECK(has(o.json,
+            "\"code\":\"value_not_available\",\"detail\":null,\"since_ms\":null,\"evidence\":{}},\"level\":null}"));
 }
 
 // --- node `limit` (PS-M6-05) ---------------------------------------------------------------
@@ -213,7 +214,8 @@ TEST(portal_limit_degrades_the_node_with_value_level_reading_and_bound_evidence)
                     "\"evidence\":{\"value\":\"rec\",\"level\":\"bad\",\"reading\":129,\"bound\":{\"above\":127}}}"));
   // the root is upgraded as for any non-ok child
   CHECK_EQ(o.states[0], State::DEGRADED);
-  CHECK(has(o.json, "\"code\":\"child_degraded\",\"detail\":null,\"since_ms\":null,\"evidence\":{\"children\":{\"bus\":\"degraded\"}}"));
+  CHECK(has(o.json, "\"code\":\"child_degraded\",\"detail\":null,\"since_ms\":null,\"evidence\":{\"children\":{\"bus\":"
+                    "\"degraded\"}}"));
 }
 
 TEST(portal_limit_worst_value_wins_and_a_tie_goes_to_the_first) {
@@ -248,15 +250,18 @@ TEST(portal_limit_evidence_bound_uses_the_shortest_decimals_and_bool_uses_when) 
     NodeDef nodes[] = {lnode("car", NO_PARENT, 0, 0), lnode("dev", 0, 0, 1)};
     Out o;
     run(lsnap(nodes, 2, values, 1), o);
-    CHECK(has(o.json, "\"evidence\":{\"value\":\"vcc\",\"level\":\"bad\",\"reading\":11.23,\"bound\":{\"below\":11.5}}"));
+    CHECK(
+        has(o.json, "\"evidence\":{\"value\":\"vcc\",\"level\":\"bad\",\"reading\":11.23,\"bound\":{\"below\":11.5}}"));
   }
   {
     ValueSample values[] = {lbool("bus_off", true, &off)};
     NodeDef nodes[] = {lnode("car", NO_PARENT, 0, 0), lnode("bus", 0, 0, 1)};
     Out o;
     run(lsnap(nodes, 2, values, 1), o);
-    CHECK(has(o.json, "\"evidence\":{\"value\":\"bus_off\",\"level\":\"bad\",\"reading\":true,\"bound\":{\"when\":true}}"));
-    CHECK(has(o.json, "\"value\":true,\"raw\":null,\"raw_hex\":null,\"classification\":\"real\",\"state\":\"ok\",\"why\":null,\"level\":\"bad\"}"));
+    CHECK(has(o.json,
+              "\"evidence\":{\"value\":\"bus_off\",\"level\":\"bad\",\"reading\":true,\"bound\":{\"when\":true}}"));
+    CHECK(has(o.json, "\"value\":true,\"raw\":null,\"raw_hex\":null,\"classification\":\"real\",\"state\":\"ok\","
+                      "\"why\":null,\"level\":\"bad\"}"));
   }
 }
 
@@ -327,7 +332,9 @@ TEST(portal_on_demand_node_without_any_reading_is_unknown_not_requested_and_quie
   run(lsnap(nodes, 3, values, 3), o);
   CHECK_EQ(o.states[2], State::UNKNOWN);
   CHECK(!o.known[2]);
-  CHECK(has(o.json, "\"state\":\"unknown\",\"why\":{\"code\":\"not_requested\",\"detail\":null,\"since_ms\":null,\"evidence\":{}}"));
+  CHECK(has(
+      o.json,
+      "\"state\":\"unknown\",\"why\":{\"code\":\"not_requested\",\"detail\":null,\"since_ms\":null,\"evidence\":{}}"));
   // no child_degraded upward: parent and root stay ok
   CHECK_EQ(o.states[1], State::OK);
   CHECK_EQ(o.states[0], State::OK);

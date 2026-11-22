@@ -59,11 +59,11 @@ class FakeCard : public CardResetIo {
     /// OR'd into every R1 except CMD0's. 0x01 models the real fault: a card that keeps saying
     /// "in idle state" to everything while answering all of it correctly.
     uint8_t r1_extra{0};
-    bool answers_cmd8{true};       ///< false: CMD8 is rejected as an illegal command
-    bool answers_cmd58{true};      ///< false: no OCR at all
-    uint32_t ocr{0xC0FF8000};      ///< bit 31 power-up done, bit 30 CCS, 2.7-3.6 V window
-    bool block_readable{true};     ///< false: CMD17 is refused
-    bool block_signature{true};    ///< false: the block is real but does not end in 0x55AA
+    bool answers_cmd8{true};     ///< false: CMD8 is rejected as an illegal command
+    bool answers_cmd58{true};    ///< false: no OCR at all
+    uint32_t ocr{0xC0FF8000};    ///< bit 31 power-up done, bit 30 CCS, 2.7-3.6 V window
+    bool block_readable{true};   ///< false: CMD17 is refused
+    bool block_signature{true};  ///< false: the block is real but does not end in 0x55AA
   };
 
   explicit FakeCard(Config cfg) : cfg_(cfg), open_write_(cfg.open_write), busy_until_(cfg.busy_ms) {}

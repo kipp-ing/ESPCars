@@ -121,8 +121,7 @@ jobs:
       - name: Check clang-format
         run: |
           pip install -r requirements_lint.txt
-          find components -name '*.cpp' -o -name '*.h' -o -name '*.tcc' | \
-            xargs clang-format --dry-run --Werror
+          python script/lint_report.py --only clang-format --summary
 
   upstream-lint:
     name: Upstream lint (report-only)

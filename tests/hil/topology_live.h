@@ -135,8 +135,9 @@ inline void observe(const char *port_name, uint8_t bus, uint32_t can_id, const u
       continue;
     }
     if (peer.can_id == can_id && std::memcmp(peer.mac, data, 6) != 0) {
-      ESP_LOGE(TAG, "%s ! id=0x%03X carries two MACs (%02X:%02X:%02X:%02X:%02X:%02X vs "
-                    "%02X:%02X:%02X:%02X:%02X:%02X) - they corrupt each other, change one board",
+      ESP_LOGE(TAG,
+               "%s ! id=0x%03X carries two MACs (%02X:%02X:%02X:%02X:%02X:%02X vs "
+               "%02X:%02X:%02X:%02X:%02X:%02X) - they corrupt each other, change one board",
                port_name, static_cast<unsigned>(can_id), peer.mac[0], peer.mac[1], peer.mac[2], peer.mac[3],
                peer.mac[4], peer.mac[5], data[0], data[1], data[2], data[3], data[4], data[5]);
       return;
@@ -168,8 +169,8 @@ inline void sweep() {
       Peer &peer = port.peers[i];
       if (peer.seen == 0 || (now - peer.seen) <= TTL_MS)
         continue;
-      ESP_LOGW(TAG, "%s - %02X:%02X:%02X:%02X:%02X:%02X.bus%u id=0x%03X (LOST, silent %u ms)", port.name,
-               peer.mac[0], peer.mac[1], peer.mac[2], peer.mac[3], peer.mac[4], peer.mac[5], peer.bus,
+      ESP_LOGW(TAG, "%s - %02X:%02X:%02X:%02X:%02X:%02X.bus%u id=0x%03X (LOST, silent %u ms)", port.name, peer.mac[0],
+               peer.mac[1], peer.mac[2], peer.mac[3], peer.mac[4], peer.mac[5], peer.bus,
                static_cast<unsigned>(peer.can_id), static_cast<unsigned>(now - peer.seen));
       peer.seen = 0;
     }
@@ -210,11 +211,11 @@ inline void report() {
     // USB descriptor. That matters for the classic ESP32, which sits behind a
     // CP2102 bridge and has no MAC to read over USB at all.
     if (live == 0)
-      ESP_LOGW(TAG, "%s [%02X:%02X:%02X:%02X:%02X:%02X.bus%u] = nothing", port.name, mac[0], mac[1], mac[2],
-               mac[3], mac[4], mac[5], port.bus);
+      ESP_LOGW(TAG, "%s [%02X:%02X:%02X:%02X:%02X:%02X.bus%u] = nothing", port.name, mac[0], mac[1], mac[2], mac[3],
+               mac[4], mac[5], port.bus);
     else
-      ESP_LOGI(TAG, "%s [%02X:%02X:%02X:%02X:%02X:%02X.bus%u] =%s", port.name, mac[0], mac[1], mac[2], mac[3],
-               mac[4], mac[5], port.bus, line);
+      ESP_LOGI(TAG, "%s [%02X:%02X:%02X:%02X:%02X:%02X.bus%u] =%s", port.name, mac[0], mac[1], mac[2], mac[3], mac[4],
+               mac[5], port.bus, line);
   }
 }
 

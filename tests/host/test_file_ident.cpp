@@ -104,8 +104,7 @@ TEST(ident_i3_every_basis_keeps_its_label_next_to_the_date) {
                {ClockBasis::EST, ClockSrc::BUILD, "est/build"}};
   for (const auto &c : cases) {
     CHECK_EQ(ident_line(ident, at(OPEN_S, c.basis, c.src)),
-             std::string("#ident,id=n,mac=-,date=2026-10-11T12:00:03Z,clock=") + c.clock +
-                 ",build=-,elf=-,cfg=-\n");
+             std::string("#ident,id=n,mac=-,date=2026-10-11T12:00:03Z,clock=") + c.clock + ",build=-,elf=-,cfg=-\n");
   }
 }
 
@@ -199,8 +198,7 @@ TEST(ident_i2_mac_is_the_six_byte_mac_48) {
   const uint8_t none[6] = {};
   ident_set_mac(ident, none);
   CHECK(!ident.has_mac);
-  CHECK_EQ(ident_line(ident, ClockPoint{}),
-           std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=-,cfg=-\n"));
+  CHECK_EQ(ident_line(ident, ClockPoint{}), std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=-,cfg=-\n"));
 }
 
 // Same field test: `elf=f81b322c5`, nine digits, because esp_app_get_elf_sha256() copies from a RAM
@@ -223,6 +221,5 @@ TEST(ident_i2_elf_is_sixteen_digits_of_the_binary_digest) {
   CHECK_EQ(std::string(ident.elf), std::string("000a"));
   ident_set_elf(ident, nullptr, 32);
   CHECK_EQ(std::string(ident.elf), std::string(""));
-  CHECK_EQ(ident_line(ident, ClockPoint{}),
-           std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=-,cfg=-\n"));
+  CHECK_EQ(ident_line(ident, ClockPoint{}), std::string("#ident,id=n,mac=-,date=-,clock=none,build=-,elf=-,cfg=-\n"));
 }

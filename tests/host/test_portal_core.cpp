@@ -1101,8 +1101,8 @@ TEST(resolve_ok_child_does_not_degrade_an_ok_parent) {
 
 TEST(write_envelope_never_emits_state_down_and_reports_unknown_no_rail_instrument) {
   ValueSample values[] = {fresh_text("wake_state", "DOWN", 10)};
-  NodeDef nodes[] = {node("ctl", NO_PARENT, 0, 1, 2000, "Control unit", "ctl", nullptr, nullptr, nullptr,
-                          "wake_state", "DOWN", "no_rail_instrument")};
+  NodeDef nodes[] = {node("ctl", NO_PARENT, 0, 1, 2000, "Control unit", "ctl", nullptr, nullptr, nullptr, "wake_state",
+                          "DOWN", "no_rail_instrument")};
   Snapshot snap = make_snapshot(nodes, 1, values, 1);
   State states[1];
   uint32_t ages[1];
@@ -1477,8 +1477,9 @@ TEST(write_envelope_ancestor_role_walk_terminates_on_a_parent_cycle_instead_of_h
   // outcome than one that returns the wrong JSON, and this is the only way a host
   // test can put that possibility in front of the gate at all.
   NodeDef nodes[] = {
-      node("root", NO_PARENT, 0, 0, 500), node("a", 2, 0, 0, 500),  // a's parent is index 2 ("b")
-      node("b", 1, 0, 0, 500),                                      // b's parent is index 1 ("a") -- a <-> b cycle
+      node("root", NO_PARENT, 0, 0, 500),
+      node("a", 2, 0, 0, 500),  // a's parent is index 2 ("b")
+      node("b", 1, 0, 0, 500),  // b's parent is index 1 ("a") -- a <-> b cycle
   };
   Snapshot snap = make_snapshot(nodes, 3, nullptr, 0);
   State states[3];
@@ -2110,7 +2111,8 @@ TEST(write_envelope_path_narrowing_onto_a_subtree_without_series_yields_null_leg
   // over the narrowed subtree and does not simply inherit "does the whole tree have one".
   SeriesDef def = series_def("cells", "Cell voltages", "mV", 1, "submodule_cell", 3, 0, nullptr, nullptr);
   NodeDef nodes[] = {
-      node("car", NO_PARENT, 0, 0, 500, "Vehicle", "car"), node("car.seg0", 0, 0, 0, 500),  // carries the series
+      node("car", NO_PARENT, 0, 0, 500, "Vehicle", "car"),
+      node("car.seg0", 0, 0, 0, 500),  // carries the series
       node("car.seg1", 0, 0, 0, 500),  // the narrowed target -- no series of its own
   };
   nodes[1].series = &def;

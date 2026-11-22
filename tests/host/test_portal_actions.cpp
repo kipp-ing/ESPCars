@@ -129,11 +129,10 @@ TEST(actions_ps_m3_03_switch_entry_matches_spec_5_4_exactly) {
   s.boolean = true;
   t.add(def("logging", Control::SWITCH), s);
   std::string j = emit(t.build());
-  CHECK(has(j,
-            "{\"key\":\"logging\",\"label\":\"logging\",\"method\":\"POST\","
-            "\"path\":\"/api/v1/actions/dev/logging\",\"enabled\":true,\"why\":null,"
-            "\"body\":{\"value\":\"bool\"},\"control\":\"switch\",\"value\":true,\"options\":null,"
-            "\"min\":null,\"max\":null,\"step\":null,\"unit\":null,\"result\":null}"));
+  CHECK(has(j, "{\"key\":\"logging\",\"label\":\"logging\",\"method\":\"POST\","
+               "\"path\":\"/api/v1/actions/dev/logging\",\"enabled\":true,\"why\":null,"
+               "\"body\":{\"value\":\"bool\"},\"control\":\"switch\",\"value\":true,\"options\":null,"
+               "\"min\":null,\"max\":null,\"step\":null,\"unit\":null,\"result\":null}"));
 }
 
 TEST(actions_ps_m3_03_button_has_null_body_and_null_value) {
@@ -231,9 +230,9 @@ TEST(actions_ps_m3_03_every_refusal_code_has_its_wire_name) {
   const struct {
     ActionCode c;
     const char *n;
-  } table[] = {{ActionCode::INVALID_BODY, "invalid_body"},   {ActionCode::WRONG_TYPE, "wrong_type"},
-               {ActionCode::OUT_OF_RANGE, "out_of_range"},   {ActionCode::UNKNOWN_OPTION, "unknown_option"},
-               {ActionCode::DISABLED, "disabled"},           {ActionCode::BODY_TOO_LARGE, "body_too_large"}};
+  } table[] = {{ActionCode::INVALID_BODY, "invalid_body"}, {ActionCode::WRONG_TYPE, "wrong_type"},
+               {ActionCode::OUT_OF_RANGE, "out_of_range"}, {ActionCode::UNKNOWN_OPTION, "unknown_option"},
+               {ActionCode::DISABLED, "disabled"},         {ActionCode::BODY_TOO_LARGE, "body_too_large"}};
   for (auto &row : table) {
     Tree t;
     ActionSample s;
@@ -541,8 +540,9 @@ TEST(actions_ps_m2_05_ap_active_claims_the_three_routes_plus_every_other_get_as_
     CHECK(match_route(false, "/wifisave", actions, true).route == Route::NONE);
     CHECK(match_route(false, "/wifisave?ssid=x&psk=y", actions, true).route == Route::NONE);
     // everything else is redirected to the portal
-    for (const char *p : {"/generate_204", "/hotspot-detect.html", "/connecttest.txt", "/ncsi.txt", "/library/test/success.html",
-                          "/anything/else", "/index.html", "/api/v1/stat", "/api/v1/actions/dev/x", "/wifi/", "/config.json/x"})
+    for (const char *p :
+         {"/generate_204", "/hotspot-detect.html", "/connecttest.txt", "/ncsi.txt", "/library/test/success.html",
+          "/anything/else", "/index.html", "/api/v1/stat", "/api/v1/actions/dev/x", "/wifi/", "/config.json/x"})
       CHECK(match_route(false, p, actions, true).route == Route::REDIRECT);
   }
 }

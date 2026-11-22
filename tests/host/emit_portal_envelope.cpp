@@ -229,7 +229,8 @@ int run(const std::string &scenario, const char *path) {
     adefs[3] = ActionDef{"interval", "Interval", Control::NUMBER, 1, nullptr, 0};
     asamples[0].has_value = true;
     asamples[0].boolean = true;
-    asamples[0].result = ActionResult{ActionState::ACCEPTED, ActionCode::APPLIED, 2140, {ValueKind::BOOL, true, 0.0f, {}}};
+    asamples[0].result =
+        ActionResult{ActionState::ACCEPTED, ActionCode::APPLIED, 2140, {ValueKind::BOOL, true, 0.0f, {}}};
     asamples[1].result = ActionResult{ActionState::RUNNING, ActionCode::QUEUED, 5, {}};
     asamples[2].has_value = true;
     std::snprintf(asamples[2].text, sizeof asamples[2].text, "two");

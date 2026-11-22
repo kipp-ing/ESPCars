@@ -264,6 +264,8 @@ findings by hand. Add `DOMAIN` to every component.
 
 1. Bump clang-format to the upstream version. The PR contains only the
    reformat.
+   **P3a done:** pinned 23.1.3; 99 → 0 replacements across all 87 hook-selected C/C++ files (12 reformatted).
+   The blocking CI and local gates now share the hook's full scope and exclusions.
 2. Fix what `ci_custom.py` finds, one PR per component:
    - integer `#define` → `static constexpr`
    - `sprintf` → `snprintf`
