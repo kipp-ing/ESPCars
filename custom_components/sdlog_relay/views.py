@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiohttp import web
-
 from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
 
 from .relay_core import serve_firmware, upload_firmware
@@ -24,11 +23,19 @@ class PassThroughView(HomeAssistantView):
     def __init__(self, data: RelayData) -> None:
         self._data = data
 
-    async def get(self, request: web.Request, logger_id: str, tail: str) -> web.StreamResponse:
-        return await self._data.relay.forward(request, self._data.targets, logger_id, tail)
+    async def get(
+        self, request: web.Request, logger_id: str, tail: str
+    ) -> web.StreamResponse:
+        return await self._data.relay.forward(
+            request, self._data.targets, logger_id, tail
+        )
 
-    async def post(self, request: web.Request, logger_id: str, tail: str) -> web.StreamResponse:
-        return await self._data.relay.forward(request, self._data.targets, logger_id, tail)
+    async def post(
+        self, request: web.Request, logger_id: str, tail: str
+    ) -> web.StreamResponse:
+        return await self._data.relay.forward(
+            request, self._data.targets, logger_id, tail
+        )
 
 
 class FirmwareView(HomeAssistantView):
@@ -41,8 +48,12 @@ class FirmwareView(HomeAssistantView):
     def __init__(self, data: RelayData) -> None:
         self._data = data
 
-    async def get(self, request: web.Request, logger_id: str, name: str) -> web.StreamResponse:
-        return await serve_firmware(request, self._data.store, self._data.targets, logger_id, name)
+    async def get(
+        self, request: web.Request, logger_id: str, name: str
+    ) -> web.StreamResponse:
+        return await serve_firmware(
+            request, self._data.store, self._data.targets, logger_id, name
+        )
 
 
 class FirmwareUploadView(HomeAssistantView):
@@ -58,5 +69,9 @@ class FirmwareUploadView(HomeAssistantView):
     async def put(self, request: web.Request, logger_id: str) -> web.Response:
         user = request[KEY_HASS_USER]
         return await upload_firmware(
-            request, self._data.store, self._data.targets, logger_id, is_admin=user.is_admin
+            request,
+            self._data.store,
+            self._data.targets,
+            logger_id,
+            is_admin=user.is_admin,
         )

@@ -17,6 +17,7 @@ import esphome.final_validate as fv
 
 CODEOWNERS = ["@swifty99"]
 DEPENDENCIES = ["can_gateway"]
+DOMAIN = "isotp"
 MULTI_CONF = True
 
 isotp_ns = cg.esphome_ns.namespace("isotp")

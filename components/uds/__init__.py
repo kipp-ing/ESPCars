@@ -67,6 +67,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@swifty99"]
 DEPENDENCIES = ["isotp"]
+DOMAIN = "uds"
 MULTI_CONF = True
 
 uds_ns = cg.esphome_ns.namespace("uds")
@@ -203,7 +204,10 @@ def resolve_group(ecu: dcat.Ecu, service: str | int) -> dcat.Group:
             return group
     raise cv.Invalid(
         f"unknown service {service!r} in ECU {ecu.name!r}"
-        + _suggest(service, [g.name for g in ecu.groups] + [a for g in ecu.groups for a in g.aliases]),
+        + _suggest(
+            service,
+            [g.name for g in ecu.groups] + [a for g in ecu.groups for a in g.aliases],
+        ),
         path=[CONF_SERVICE],
     )
 
@@ -213,7 +217,9 @@ def _suggest(name: str, universe: list[str]) -> str:
     return " — did you mean: " + ", ".join(close) if close else ""
 
 
-def resolve_field(ecu: dcat.Ecu, field: str, service: str | int | None, element: int) -> tuple[dcat.Group, dcat.Field]:
+def resolve_field(
+    ecu: dcat.Ecu, field: str, service: str | int | None, element: int
+) -> tuple[dcat.Group, dcat.Field]:
     """U5/U6/U8: the field a `field:`/`service:`/`element:` triple addresses.
 
     Format §5.1a makes a group's field names unique, so `service:` is enough to break every tie
@@ -292,10 +298,14 @@ def _partition_size(value: object) -> int:
             raise cv.Invalid(f"expected a size like '256KB' or 262144, got {value!r}")
         unit = match.group(2).lower()
         if unit not in _SIZE_UNITS:
-            raise cv.Invalid(f"unknown size unit {match.group(2)!r}; use B, KB/KiB or MB/MiB")
+            raise cv.Invalid(
+                f"unknown size unit {match.group(2)!r}; use B, KB/KiB or MB/MiB"
+            )
         size = int(match.group(1)) * _SIZE_UNITS[unit]
     if size < PARTITION_ALIGN or size % PARTITION_ALIGN != 0:
-        raise cv.Invalid(f"partition size must be a non-zero multiple of 4 KB (0x1000); got {size}")
+        raise cv.Invalid(
+            f"partition size must be a non-zero multiple of 4 KB (0x1000); got {size}"
+        )
     return size
 
 
@@ -335,8 +345,11 @@ def _validate_catalog(config):
             "(build tests and tiny catalogs)"
         )
     if not has_partition and CONF_SIZE in config:
-        raise cv.Invalid("'size:' belongs to 'partition:'; an embedded catalog is exactly as big "
-                         "as its file", path=[CONF_SIZE])
+        raise cv.Invalid(
+            "'size:' belongs to 'partition:'; an embedded catalog is exactly as big "
+            "as its file",
+            path=[CONF_SIZE],
+        )
 
     _cat, _crc, blob_size = load_catalog(config[CONF_FILE])
 
@@ -378,7 +391,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_ECU): cv.string_strict,
         # Three failures is the same threshold isotp's own retries settle on: enough that one
         # missed answer on a busy bus is not an outage, few enough that a real one shows up fast.
-        cv.Optional(CONF_MAX_CONSECUTIVE_FAILURES, default=3): cv.int_range(min=1, max=255),
+        cv.Optional(CONF_MAX_CONSECUTIVE_FAILURES, default=3): cv.int_range(
+            min=1, max=255
+        ),
         # Never widen this default (design §6). Everything that can change ECU state is behind it.
         cv.Optional(CONF_ALLOW_ACTIVE_SERVICES, default=False): cv.boolean,
         cv.Optional(CONF_ON_VALUE): automation.validate_automation(),
@@ -468,12 +483,18 @@ def _check_transport(config, ecu: dcat.Ecu, groups: list[dcat.Group]) -> None:
         _LOGGER.info(
             "uds %s: the catalog suggests block_size %d, isotp %s grants %d — allowed, just slower "
             "or burstier than the database expects",
-            hub, ecu.block_size, config[CONF_ISOTP_ID], isotp_conf[CONF_BLOCK_SIZE],
+            hub,
+            ecu.block_size,
+            config[CONF_ISOTP_ID],
+            isotp_conf[CONF_BLOCK_SIZE],
         )
     if ecu.st_min_raw and isotp_conf[CONF_ST_MIN] != ecu.st_min_raw:
         _LOGGER.info(
             "uds %s: the catalog suggests STmin raw 0x%02X, isotp %s requests 0x%02X",
-            hub, ecu.st_min_raw, config[CONF_ISOTP_ID], isotp_conf[CONF_ST_MIN],
+            hub,
+            ecu.st_min_raw,
+            config[CONF_ISOTP_ID],
+            isotp_conf[CONF_ST_MIN],
         )
     n_cr = isotp_conf[CONF_N_CR_TIMEOUT].total_milliseconds
     if ecu.p2_ext_ms and n_cr < ecu.p2_ext_ms:
@@ -481,7 +502,10 @@ def _check_transport(config, ecu: dcat.Ecu, groups: list[dcat.Group]) -> None:
             "uds %s: the catalog's P2* is %d ms but isotp %s sets n_cr_timeout %d ms. An ECU that "
             "answers 0x78 intends to take longer than that, and the transfer will time out "
             "mid-response.",
-            hub, ecu.p2_ext_ms, config[CONF_ISOTP_ID], n_cr,
+            hub,
+            ecu.p2_ext_ms,
+            config[CONF_ISOTP_ID],
+            n_cr,
         )
 
 
@@ -526,10 +550,15 @@ def _final_validate(config):
         )
         groups[group.name] = group
 
-    for name, action in _walk_actions(fv.full_config.get(), (ACTION_READ, ACTION_EXECUTE, ACTION_RAW)):
+    for name, action in _walk_actions(
+        fv.full_config.get(), (ACTION_READ, ACTION_EXECUTE, ACTION_RAW)
+    ):
         if action.get(CONF_ID) != config[CONF_ID]:
             continue
-        if name in (ACTION_EXECUTE, ACTION_RAW) and not config[CONF_ALLOW_ACTIVE_SERVICES]:
+        if (
+            name in (ACTION_EXECUTE, ACTION_RAW)
+            and not config[CONF_ALLOW_ACTIVE_SERVICES]
+        ):
             # U11. Sessions, routines, IO control, writes, security access and reset are reachable
             # only through these two actions AND only behind the flag; both are explicit on purpose.
             raise cv.Invalid(
@@ -572,7 +601,9 @@ def _emit_blob(config_id: ID, blob: bytes):
     array either way.
     """
     lines = [
-        cg.RawExpression(", ".join(f"0x{byte:02X}" for byte in blob[offset : offset + 16]))
+        cg.RawExpression(
+            ", ".join(f"0x{byte:02X}" for byte in blob[offset : offset + 16])
+        )
         for offset in range(0, len(blob), 16)
     ]
     arr_id = ID(f"{config_id}_catalog", is_declaration=True, type=cg.uint8)
@@ -596,7 +627,10 @@ def _sizes(config) -> tuple[int, int, int]:
             texts += 1
         if binding_interval(entry) != 0:
             group, _field = resolve_field(
-                ecu, entry[CONF_FIELD], entry.get(CONF_SERVICE), entry.get(CONF_ELEMENT, 0)
+                ecu,
+                entry[CONF_FIELD],
+                entry.get(CONF_SERVICE),
+                entry.get(CONF_ELEMENT, 0),
             )
             polled.add(group.name)
     return bindings, texts, len(polled)
@@ -643,9 +677,13 @@ async def to_code(config):
     cg.add(var.set_allow_active_services(config[CONF_ALLOW_ACTIVE_SERVICES]))
 
     for conf in config.get(CONF_ON_VALUE, []):
-        await automation.build_callback_automation(var, "add_on_value_callback", [(UdsValue, "x")], conf)
+        await automation.build_callback_automation(
+            var, "add_on_value_callback", [(UdsValue, "x")], conf
+        )
     for conf in config.get(CONF_ON_ERROR, []):
-        await automation.build_callback_automation(var, "add_on_error_callback", [(UdsError, "x")], conf)
+        await automation.build_callback_automation(
+            var, "add_on_error_callback", [(UdsError, "x")], conf
+        )
 
 
 # --- shared entity plumbing (sensor.py, text_sensor.py) ---------------------------------------
@@ -669,13 +707,21 @@ def binding_final_validate(config, *, want_text: bool):
     """
     hub = hub_config_of(config[CONF_UDS_ID])
     _cat, ecu = catalog_of(hub)
-    group, field = resolve_field(ecu, config[CONF_FIELD], config.get(CONF_SERVICE), config[CONF_ELEMENT])
+    group, field = resolve_field(
+        ecu, config[CONF_FIELD], config.get(CONF_SERVICE), config[CONF_ELEMENT]
+    )
 
     is_text = field.ascii or field.hexdump or field.is_enum
     if is_text != want_text:
         # U9. The catalog knows which of the two an entity has to be, so saying it wrongly is a
         # config error with a one-line fix rather than an entity that publishes nothing useful.
-        kind = "an ASCII" if field.ascii else "a HEXDUMP" if field.hexdump else "an enumerated"
+        kind = (
+            "an ASCII"
+            if field.ascii
+            else "a HEXDUMP"
+            if field.hexdump
+            else "an enumerated"
+        )
         if want_text:
             raise cv.Invalid(
                 f"field {field.name!r} in group {group.name!r} is numeric; declare it under "
@@ -699,7 +745,9 @@ def binding_final_validate(config, *, want_text: bool):
             rendered = field.bit_size // 8
             what = "is"
         else:
-            rendered = max((len(s.text.encode("utf-8")) for s in field.scales), default=0)
+            rendered = max(
+                (len(s.text.encode("utf-8")) for s in field.scales), default=0
+            )
             what = "has a state text of"
         if rendered + 1 > TEXT_SLOT_CAP:
             raise cv.Invalid(
@@ -773,12 +821,16 @@ async def _group_action_to_code(config, action_id, template_arg):
     return var
 
 
-@automation.register_action(ACTION_READ, UdsReadAction, _GROUP_ACTION_SCHEMA, synchronous=True)
+@automation.register_action(
+    ACTION_READ, UdsReadAction, _GROUP_ACTION_SCHEMA, synchronous=True
+)
 async def uds_read_to_code(config, action_id, template_arg, args):
     return await _group_action_to_code(config, action_id, template_arg)
 
 
-@automation.register_action(ACTION_EXECUTE, UdsExecuteAction, _GROUP_ACTION_SCHEMA, synchronous=True)
+@automation.register_action(
+    ACTION_EXECUTE, UdsExecuteAction, _GROUP_ACTION_SCHEMA, synchronous=True
+)
 async def uds_execute_to_code(config, action_id, template_arg, args):
     return await _group_action_to_code(config, action_id, template_arg)
 
@@ -793,7 +845,9 @@ RAW_ACTION_SCHEMA = cv.Schema(
 )
 
 
-@automation.register_action(ACTION_RAW, UdsRawAction, RAW_ACTION_SCHEMA, synchronous=True)
+@automation.register_action(
+    ACTION_RAW, UdsRawAction, RAW_ACTION_SCHEMA, synchronous=True
+)
 async def uds_raw_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])

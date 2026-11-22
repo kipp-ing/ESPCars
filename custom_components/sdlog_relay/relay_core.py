@@ -44,7 +44,17 @@ VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}")
 # ESP Web Tools spelling. ESP32 family only: the update path has no signature,
 # and the ESP8266 cannot even verify TLS.
 CHIP_FAMILIES = frozenset(
-    {"ESP32", "ESP32-C2", "ESP32-C3", "ESP32-C5", "ESP32-C6", "ESP32-H2", "ESP32-P4", "ESP32-S2", "ESP32-S3"}
+    {
+        "ESP32",
+        "ESP32-C2",
+        "ESP32-C3",
+        "ESP32-C5",
+        "ESP32-C6",
+        "ESP32-H2",
+        "ESP32-P4",
+        "ESP32-S2",
+        "ESP32-S3",
+    }
 )
 MAX_FIRMWARE = 8 * 1024 * 1024
 # The binary the previous manifest names stays servable, so a logger that read
@@ -85,13 +95,19 @@ def upstream_path(tail: str, method: str) -> str | web.Response:
 class Relay:
     """Pass-through to the loggers. Never stores a byte of a chunk."""
 
-    def __init__(self, session: aiohttp.ClientSession, *, busy_wait: float = BUSY_WAIT) -> None:
+    def __init__(
+        self, session: aiohttp.ClientSession, *, busy_wait: float = BUSY_WAIT
+    ) -> None:
         self._session = session
         self._busy_wait = busy_wait
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def forward(
-        self, request: web.Request, targets: Mapping[str, Target], logger_id: str, tail: str
+        self,
+        request: web.Request,
+        targets: Mapping[str, Target],
+        logger_id: str,
+        tail: str,
     ) -> web.StreamResponse:
         target = targets.get(logger_id)
         if target is None:
@@ -112,12 +128,16 @@ class Relay:
         finally:
             lock.release()
 
-    async def _forward(self, request: web.Request, target: Target, path: str) -> web.StreamResponse:
+    async def _forward(
+        self, request: web.Request, target: Target, path: str
+    ) -> web.StreamResponse:
         headers = {"Accept-Encoding": "identity"}
         for name in REQUEST_HEADERS:
             if name in request.headers:
                 headers[name] = request.headers[name]
-        timeout = aiohttp.ClientTimeout(total=None, connect=CONNECT_TIMEOUT, sock_read=READ_TIMEOUT)
+        timeout = aiohttp.ClientTimeout(
+            total=None, connect=CONNECT_TIMEOUT, sock_read=READ_TIMEOUT
+        )
         try:
             upstream = await self._session.request(
                 request.method,
@@ -184,7 +204,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -210,7 +230,7 @@ class FirmwareStore:
             raise FirmwareError(400, "empty_firmware")
         if len(data) > MAX_FIRMWARE:
             raise FirmwareError(413, "firmware_too_large")
-        md5 = hashlib.md5(data).hexdigest()  # noqa: S324 - the manifest format is MD5
+        md5 = hashlib.md5(data).hexdigest()  # The manifest format is MD5.
         binary = f"firmware-{md5}.ota.bin"
         directory = self.root / logger_id
         directory.mkdir(parents=True, exist_ok=True)
@@ -220,7 +240,9 @@ class FirmwareStore:
         manifest = {
             "name": logger_id,
             "version": version,
-            "builds": [{"chipFamily": chip_family, "ota": {"md5": md5, "path": binary}}],
+            "builds": [
+                {"chipFamily": chip_family, "ota": {"md5": md5, "path": binary}}
+            ],
         }
         _atomic_write(directory / MANIFEST, json.dumps(manifest, indent=2).encode())
         self._prune(directory, binary)
@@ -229,7 +251,11 @@ class FirmwareStore:
     @staticmethod
     def _prune(directory: Path, current: str) -> None:
         binaries = sorted(
-            (p for p in directory.iterdir() if BINARY_RE.fullmatch(p.name) and p.name != current),
+            (
+                p
+                for p in directory.iterdir()
+                if BINARY_RE.fullmatch(p.name) and p.name != current
+            ),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -251,22 +277,37 @@ def _not_found() -> web.Response:
 
 
 async def serve_firmware(
-    request: web.Request, store: FirmwareStore, targets: Mapping[str, Target], logger_id: str, name: str
+    request: web.Request,
+    store: FirmwareStore,
+    targets: Mapping[str, Target],
+    logger_id: str,
+    name: str,
 ) -> web.StreamResponse:
     """Unauthenticated on purpose: only the logger itself may fetch (R9, R12)."""
     target = targets.get(logger_id)
     if target is None or not same_address(request.remote, target.host):
         return _not_found()
-    path = await asyncio.get_running_loop().run_in_executor(None, store.resolve, logger_id, name)
+    path = await asyncio.get_running_loop().run_in_executor(
+        None, store.resolve, logger_id, name
+    )
     if path is None:
         return _not_found()
     data = await asyncio.get_running_loop().run_in_executor(None, path.read_bytes)
-    content_type = "application/json" if name == MANIFEST else "application/octet-stream"
-    return web.Response(body=data, content_type=content_type, headers={"Cache-Control": "no-store"})
+    content_type = (
+        "application/json" if name == MANIFEST else "application/octet-stream"
+    )
+    return web.Response(
+        body=data, content_type=content_type, headers={"Cache-Control": "no-store"}
+    )
 
 
 async def upload_firmware(
-    request: web.Request, store: FirmwareStore, targets: Mapping[str, Target], logger_id: str, *, is_admin: bool
+    request: web.Request,
+    store: FirmwareStore,
+    targets: Mapping[str, Target],
+    logger_id: str,
+    *,
+    is_admin: bool,
 ) -> web.Response:
     """Admin only (R10). 403, never 401, for a user who is not."""
     if not is_admin:

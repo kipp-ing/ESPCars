@@ -12,6 +12,7 @@ import esphome.final_validate as fv
 
 CODEOWNERS = ["@kipp-ing"]
 DEPENDENCIES = ["can_gateway"]
+DOMAIN = "ccp"
 MULTI_CONF = True
 
 ccp_ns = cg.esphome_ns.namespace("ccp")
@@ -96,7 +97,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_RESPONSE_ID, default=0x701): _can_id,
         cv.Optional(CONF_STATION_ADDRESS, default=0x0001): cv.hex_uint16_t,
         cv.Optional(CONF_BYTE_ORDER, default="little"): _byte_order,
-        cv.Optional(CONF_RESPONSE_TIMEOUT, default="100ms"): cv.positive_time_period_milliseconds,
+        cv.Optional(
+            CONF_RESPONSE_TIMEOUT, default="100ms"
+        ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ALLOW_WRITE, default=False): cv.boolean,
         cv.Optional(CONF_DAQ_ANCHOR): DAQ_ANCHOR_SCHEMA,
         cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(),
@@ -115,7 +118,9 @@ def _final_validate(config):
     port = str(config[CONF_CAN_GATEWAY_ID])
     for hub in hubs:
         if str(hub[CONF_ID]) != this_id and str(hub[CONF_CAN_GATEWAY_ID]) == port:
-            raise cv.Invalid(f"CCP hub port '{port}' is already used by another CCP hub")
+            raise cv.Invalid(
+                f"CCP hub port '{port}' is already used by another CCP hub"
+            )
     return config
 
 
@@ -132,29 +137,81 @@ async def to_code(config):
     cg.add(var.set_command_id(config[CONF_COMMAND_ID]))
     cg.add(var.set_response_id(config[CONF_RESPONSE_ID]))
     cg.add(var.set_station_address(config[CONF_STATION_ADDRESS]))
-    cg.add(var.set_byte_order(cg.RawExpression("ccp::ByteOrder::LITTLE" if config[CONF_BYTE_ORDER] == "little" else "ccp::ByteOrder::BIG")))
+    cg.add(
+        var.set_byte_order(
+            cg.RawExpression(
+                "ccp::ByteOrder::LITTLE"
+                if config[CONF_BYTE_ORDER] == "little"
+                else "ccp::ByteOrder::BIG"
+            )
+        )
+    )
     cg.add(var.set_response_timeout(config[CONF_RESPONSE_TIMEOUT].total_milliseconds))
     cg.add(var.set_allow_write(config[CONF_ALLOW_WRITE]))
     if CONF_DAQ_ANCHOR in config:
         anchor = config[CONF_DAQ_ANCHOR]
-        cg.add(var.set_daq_anchor(anchor[CONF_EXT], anchor[CONF_ADDRESS], anchor[CONF_EXPECT]))
+        cg.add(
+            var.set_daq_anchor(
+                anchor[CONF_EXT], anchor[CONF_ADDRESS], anchor[CONF_EXPECT]
+            )
+        )
     for conf in config.get(CONF_ON_CONNECTED, []):
-        await automation.build_callback_automation(var, "add_on_connected_callback", [], conf)
+        await automation.build_callback_automation(
+            var, "add_on_connected_callback", [], conf
+        )
     for conf in config.get(CONF_ON_RESPONSE, []):
-        await automation.build_callback_automation(var, "add_on_response_callback", [(cg.uint8, "command"), (cg.uint8, "return_code"), (cg.std_vector.template(cg.uint8), "data")], conf)
+        await automation.build_callback_automation(
+            var,
+            "add_on_response_callback",
+            [
+                (cg.uint8, "command"),
+                (cg.uint8, "return_code"),
+                (cg.std_vector.template(cg.uint8), "data"),
+            ],
+            conf,
+        )
     for conf in config.get(CONF_ON_ERROR, []):
-        await automation.build_callback_automation(var, "add_on_error_callback", [(cg.uint8, "command"), (cg.uint8, "return_code")], conf)
+        await automation.build_callback_automation(
+            var,
+            "add_on_error_callback",
+            [(cg.uint8, "command"), (cg.uint8, "return_code")],
+            conf,
+        )
     for conf in config.get(CONF_ON_DAQ, []):
-        await automation.build_callback_automation(var, "add_on_daq_callback", [(cg.uint8, "pid"), (cg.std_vector.template(cg.uint8), "data")], conf)
+        await automation.build_callback_automation(
+            var,
+            "add_on_daq_callback",
+            [(cg.uint8, "pid"), (cg.std_vector.template(cg.uint8), "data")],
+            conf,
+        )
     for conf in config.get(CONF_ON_DAQ_READ, []):
-        await automation.build_callback_automation(var, "add_on_daq_read_callback", [(cg.bool_, "ok"), (cg.uint16, "anchor_ok"), (cg.uint16, "frames_seen"), (cg.std_vector.template(cg.std_vector.template(cg.uint8)), "values")], conf)
+        await automation.build_callback_automation(
+            var,
+            "add_on_daq_read_callback",
+            [
+                (cg.bool_, "ok"),
+                (cg.uint16, "anchor_ok"),
+                (cg.uint16, "frames_seen"),
+                (cg.std_vector.template(cg.std_vector.template(cg.uint8)), "values"),
+            ],
+            conf,
+        )
 
 
 _HUB = {cv.Required(CONF_ID): cv.use_id(CcpHub)}
 _BYTES = cv.templatable(cv.ensure_list(cv.hex_uint8_t))
-_U8 = lambda default=None: cv.templatable(cv.int_range(min=0, max=0xFF))
-_U16 = lambda: cv.templatable(cv.int_range(min=0, max=0xFFFF))
-_U32 = lambda: cv.templatable(cv.int_range(min=0, max=0xFFFFFFFF))
+
+
+def _U8(default=None):
+    return cv.templatable(cv.int_range(min=0, max=0xFF))
+
+
+def _U16():
+    return cv.templatable(cv.int_range(min=0, max=0xFFFF))
+
+
+def _U32():
+    return cv.templatable(cv.int_range(min=0, max=0xFFFFFFFF))
 
 
 DAQ_FIELD_SCHEMA = cv.Schema(
@@ -202,64 +259,193 @@ async def _action(config, action_id, template_arg, cls):
     return var
 
 
-@automation.register_action("ccp.connect", CcpConnectAction, cv.Schema(_HUB), synchronous=True)
-async def ccp_connect(config, action_id, template_arg, args): return await _action(config, action_id, template_arg, CcpConnectAction)
+@automation.register_action(
+    "ccp.connect", CcpConnectAction, cv.Schema(_HUB), synchronous=True
+)
+async def ccp_connect(config, action_id, template_arg, args):
+    return await _action(config, action_id, template_arg, CcpConnectAction)
 
-@automation.register_action("ccp.disconnect", CcpDisconnectAction, cv.Schema({**_HUB, cv.Optional(CONF_END, default=False): cv.templatable(cv.boolean)}), synchronous=True)
+
+@automation.register_action(
+    "ccp.disconnect",
+    CcpDisconnectAction,
+    cv.Schema(
+        {**_HUB, cv.Optional(CONF_END, default=False): cv.templatable(cv.boolean)}
+    ),
+    synchronous=True,
+)
 async def ccp_disconnect(config, action_id, template_arg, args):
-    var = await _action(config, action_id, template_arg, CcpDisconnectAction); cg.add(var.set_end(await cg.templatable(config[CONF_END], args, bool))); return var
+    var = await _action(config, action_id, template_arg, CcpDisconnectAction)
+    cg.add(var.set_end(await cg.templatable(config[CONF_END], args, bool)))
+    return var
 
-@automation.register_action("ccp.get_version", CcpGetVersionAction, cv.Schema(_HUB), synchronous=True)
-async def ccp_version(config, action_id, template_arg, args): return await _action(config, action_id, template_arg, CcpGetVersionAction)
 
-@automation.register_action("ccp.exchange_id", CcpExchangeIdAction, cv.Schema(_HUB), synchronous=True)
-async def ccp_exchange_id(config, action_id, template_arg, args): return await _action(config, action_id, template_arg, CcpExchangeIdAction)
+@automation.register_action(
+    "ccp.get_version", CcpGetVersionAction, cv.Schema(_HUB), synchronous=True
+)
+async def ccp_version(config, action_id, template_arg, args):
+    return await _action(config, action_id, template_arg, CcpGetVersionAction)
 
-@automation.register_action("ccp.set_mta", CcpSetMtaAction, cv.Schema({**_HUB, cv.Optional(CONF_MTA, default=0): _U8(), cv.Required(CONF_EXT): _U8(), cv.Required(CONF_ADDRESS): _U32()}), synchronous=True)
+
+@automation.register_action(
+    "ccp.exchange_id", CcpExchangeIdAction, cv.Schema(_HUB), synchronous=True
+)
+async def ccp_exchange_id(config, action_id, template_arg, args):
+    return await _action(config, action_id, template_arg, CcpExchangeIdAction)
+
+
+@automation.register_action(
+    "ccp.set_mta",
+    CcpSetMtaAction,
+    cv.Schema(
+        {
+            **_HUB,
+            cv.Optional(CONF_MTA, default=0): _U8(),
+            cv.Required(CONF_EXT): _U8(),
+            cv.Required(CONF_ADDRESS): _U32(),
+        }
+    ),
+    synchronous=True,
+)
 async def ccp_set_mta(config, action_id, template_arg, args):
     var = await _action(config, action_id, template_arg, CcpSetMtaAction)
-    cg.add(var.set_mta(await cg.templatable(config[CONF_MTA], args, cg.uint8))); cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8))); cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32))); return var
+    cg.add(var.set_mta(await cg.templatable(config[CONF_MTA], args, cg.uint8)))
+    cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8)))
+    cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32)))
+    return var
 
-@automation.register_action("ccp.upload", CcpUploadAction, cv.Schema({**_HUB, cv.Required(CONF_SIZE): cv.templatable(cv.int_range(min=1, max=5))}), synchronous=True)
+
+@automation.register_action(
+    "ccp.upload",
+    CcpUploadAction,
+    cv.Schema(
+        {**_HUB, cv.Required(CONF_SIZE): cv.templatable(cv.int_range(min=1, max=5))}
+    ),
+    synchronous=True,
+)
 async def ccp_upload(config, action_id, template_arg, args):
-    var = await _action(config, action_id, template_arg, CcpUploadAction); cg.add(var.set_size(await cg.templatable(config[CONF_SIZE], args, cg.uint8))); return var
+    var = await _action(config, action_id, template_arg, CcpUploadAction)
+    cg.add(var.set_size(await cg.templatable(config[CONF_SIZE], args, cg.uint8)))
+    return var
 
-@automation.register_action("ccp.short_upload", CcpShortUploadAction, cv.Schema({**_HUB, cv.Required(CONF_SIZE): cv.templatable(cv.int_range(min=1, max=5)), cv.Required(CONF_EXT): _U8(), cv.Required(CONF_ADDRESS): _U32()}), synchronous=True)
+
+@automation.register_action(
+    "ccp.short_upload",
+    CcpShortUploadAction,
+    cv.Schema(
+        {
+            **_HUB,
+            cv.Required(CONF_SIZE): cv.templatable(cv.int_range(min=1, max=5)),
+            cv.Required(CONF_EXT): _U8(),
+            cv.Required(CONF_ADDRESS): _U32(),
+        }
+    ),
+    synchronous=True,
+)
 async def ccp_short_upload(config, action_id, template_arg, args):
     var = await _action(config, action_id, template_arg, CcpShortUploadAction)
-    cg.add(var.set_size(await cg.templatable(config[CONF_SIZE], args, cg.uint8))); cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8))); cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32))); return var
+    cg.add(var.set_size(await cg.templatable(config[CONF_SIZE], args, cg.uint8)))
+    cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8)))
+    cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32)))
+    return var
+
 
 async def _data_action(config, action_id, template_arg, args, cls):
     var = await _action(config, action_id, template_arg, cls)
-    if cg.is_template(config[CONF_DATA]): cg.add(var.set_data_template(await cg.templatable(config[CONF_DATA], args, cg.std_vector.template(cg.uint8))))
-    else: cg.add(var.set_data_static(config[CONF_DATA]))
+    if cg.is_template(config[CONF_DATA]):
+        cg.add(
+            var.set_data_template(
+                await cg.templatable(
+                    config[CONF_DATA], args, cg.std_vector.template(cg.uint8)
+                )
+            )
+        )
+    else:
+        cg.add(var.set_data_static(config[CONF_DATA]))
     return var
 
-@automation.register_action("ccp.download", CcpDownloadAction, cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}), synchronous=True)
-async def ccp_download(config, action_id, template_arg, args): return await _data_action(config, action_id, template_arg, args, CcpDownloadAction)
 
-@automation.register_action("ccp.select_cal_page", CcpSelectCalPageAction, cv.Schema(_HUB), synchronous=True)
-async def ccp_select_page(config, action_id, template_arg, args): return await _action(config, action_id, template_arg, CcpSelectCalPageAction)
+@automation.register_action(
+    "ccp.download",
+    CcpDownloadAction,
+    cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}),
+    synchronous=True,
+)
+async def ccp_download(config, action_id, template_arg, args):
+    return await _data_action(config, action_id, template_arg, args, CcpDownloadAction)
 
-@automation.register_action("ccp.read_memory", CcpReadMemoryAction, cv.Schema({**_HUB, cv.Required(CONF_EXT): _U8(), cv.Required(CONF_ADDRESS): _U32(), cv.Required(CONF_LENGTH): cv.templatable(cv.int_range(min=1, max=0xFFFF))}), synchronous=True)
+
+@automation.register_action(
+    "ccp.select_cal_page", CcpSelectCalPageAction, cv.Schema(_HUB), synchronous=True
+)
+async def ccp_select_page(config, action_id, template_arg, args):
+    return await _action(config, action_id, template_arg, CcpSelectCalPageAction)
+
+
+@automation.register_action(
+    "ccp.read_memory",
+    CcpReadMemoryAction,
+    cv.Schema(
+        {
+            **_HUB,
+            cv.Required(CONF_EXT): _U8(),
+            cv.Required(CONF_ADDRESS): _U32(),
+            cv.Required(CONF_LENGTH): cv.templatable(cv.int_range(min=1, max=0xFFFF)),
+        }
+    ),
+    synchronous=True,
+)
 async def ccp_read_memory(config, action_id, template_arg, args):
     var = await _action(config, action_id, template_arg, CcpReadMemoryAction)
-    cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8))); cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32))); cg.add(var.set_length(await cg.templatable(config[CONF_LENGTH], args, cg.uint16))); return var
+    cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8)))
+    cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32)))
+    cg.add(var.set_length(await cg.templatable(config[CONF_LENGTH], args, cg.uint16)))
+    return var
 
-@automation.register_action("ccp.write_memory", CcpWriteMemoryAction, cv.Schema({**_HUB, cv.Required(CONF_EXT): _U8(), cv.Required(CONF_ADDRESS): _U32(), cv.Required(CONF_DATA): _BYTES}), synchronous=True)
+
+@automation.register_action(
+    "ccp.write_memory",
+    CcpWriteMemoryAction,
+    cv.Schema(
+        {
+            **_HUB,
+            cv.Required(CONF_EXT): _U8(),
+            cv.Required(CONF_ADDRESS): _U32(),
+            cv.Required(CONF_DATA): _BYTES,
+        }
+    ),
+    synchronous=True,
+)
 async def ccp_write_memory(config, action_id, template_arg, args):
-    var = await _data_action(config, action_id, template_arg, args, CcpWriteMemoryAction)
-    cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8))); cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32))); return var
+    var = await _data_action(
+        config, action_id, template_arg, args, CcpWriteMemoryAction
+    )
+    cg.add(var.set_ext(await cg.templatable(config[CONF_EXT], args, cg.uint8)))
+    cg.add(var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.uint32)))
+    return var
 
-@automation.register_action("ccp.start_daq", CcpDaqAction, cv.Schema(_HUB), synchronous=True)
+
+@automation.register_action(
+    "ccp.start_daq", CcpDaqAction, cv.Schema(_HUB), synchronous=True
+)
 async def ccp_start_daq(config, action_id, template_arg, args):
-    var = await _action(config, action_id, template_arg, CcpDaqAction); cg.add(var.set_start(await cg.templatable(True, args, bool))); return var
+    var = await _action(config, action_id, template_arg, CcpDaqAction)
+    cg.add(var.set_start(await cg.templatable(True, args, bool)))
+    return var
 
-@automation.register_action("ccp.stop_daq", CcpDaqAction, cv.Schema(_HUB), synchronous=True)
+
+@automation.register_action(
+    "ccp.stop_daq", CcpDaqAction, cv.Schema(_HUB), synchronous=True
+)
 async def ccp_stop_daq(config, action_id, template_arg, args):
-    var = await _action(config, action_id, template_arg, CcpDaqAction); cg.add(var.set_start(await cg.templatable(False, args, bool))); return var
+    var = await _action(config, action_id, template_arg, CcpDaqAction)
+    cg.add(var.set_start(await cg.templatable(False, args, bool)))
+    return var
 
-@automation.register_action("ccp.daq_read", CcpDaqReadAction, DAQ_READ_SCHEMA, synchronous=True)
+
+@automation.register_action(
+    "ccp.daq_read", CcpDaqReadAction, DAQ_READ_SCHEMA, synchronous=True
+)
 async def ccp_daq_read(config, action_id, template_arg, args):
     var = await _action(config, action_id, template_arg, CcpDaqReadAction)
     for field in config[CONF_FIELDS]:
@@ -267,15 +453,40 @@ async def ccp_daq_read(config, action_id, template_arg, args):
     cg.add(var.set_list(await cg.templatable(config[CONF_LIST], args, cg.uint8)))
     cg.add(var.set_dto_id(await cg.templatable(config[CONF_DTO_ID], args, cg.uint32)))
     cg.add(var.set_event(await cg.templatable(config[CONF_EVENT], args, cg.uint8)))
-    cg.add(var.set_prescaler(await cg.templatable(config[CONF_PRESCALER], args, cg.uint16)))
+    cg.add(
+        var.set_prescaler(await cg.templatable(config[CONF_PRESCALER], args, cg.uint16))
+    )
     cg.add(var.set_samples(await cg.templatable(config[CONF_SAMPLES], args, cg.uint16)))
-    cg.add(var.set_collect_timeout(await cg.templatable(config[CONF_COLLECT_TIMEOUT], args, cg.uint32)))
-    cg.add(var.set_require_anchor(await cg.templatable(config[CONF_REQUIRE_ANCHOR], args, bool)))
+    cg.add(
+        var.set_collect_timeout(
+            await cg.templatable(config[CONF_COLLECT_TIMEOUT], args, cg.uint32)
+        )
+    )
+    cg.add(
+        var.set_require_anchor(
+            await cg.templatable(config[CONF_REQUIRE_ANCHOR], args, bool)
+        )
+    )
     return var
 
-@automation.register_action("ccp.raw", CcpRawAction, cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}), synchronous=True)
-async def ccp_raw(config, action_id, template_arg, args): return await _data_action(config, action_id, template_arg, args, CcpRawAction)
 
-@automation.register_action("ccp.set_enabled", CcpSetEnabledAction, cv.Schema({**_HUB, cv.Required(CONF_ENABLED): cv.templatable(cv.boolean)}), synchronous=True)
+@automation.register_action(
+    "ccp.raw",
+    CcpRawAction,
+    cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}),
+    synchronous=True,
+)
+async def ccp_raw(config, action_id, template_arg, args):
+    return await _data_action(config, action_id, template_arg, args, CcpRawAction)
+
+
+@automation.register_action(
+    "ccp.set_enabled",
+    CcpSetEnabledAction,
+    cv.Schema({**_HUB, cv.Required(CONF_ENABLED): cv.templatable(cv.boolean)}),
+    synchronous=True,
+)
 async def ccp_enabled(config, action_id, template_arg, args):
-    var = await _action(config, action_id, template_arg, CcpSetEnabledAction); cg.add(var.set_enabled(await cg.templatable(config[CONF_ENABLED], args, bool))); return var
+    var = await _action(config, action_id, template_arg, CcpSetEnabledAction)
+    cg.add(var.set_enabled(await cg.templatable(config[CONF_ENABLED], args, bool)))
+    return var

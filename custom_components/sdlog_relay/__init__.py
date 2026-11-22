@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant, callback
@@ -35,7 +34,9 @@ class RelayData:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Own session: no cookie jar, so nothing a logger sets ever travels back.
     session = async_create_clientsession(hass, cookie_jar=aiohttp.DummyCookieJar())
-    data = RelayData(Relay(session), FirmwareStore(Path(hass.config.path(FIRMWARE_DIR))))
+    data = RelayData(
+        Relay(session), FirmwareStore(Path(hass.config.path(FIRMWARE_DIR)))
+    )
     hass.data[DOMAIN] = data
     # Views cannot be unregistered; they look the logger up per request, so an
     # unloaded entry answers 404.

@@ -93,7 +93,9 @@ RESPONSE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_LIN_ID): cv.int_range(min=0, max=63),
         cv.Required(CONF_DATA): cv.All([cv.hex_uint8_t], cv.Length(min=0, max=8)),
-        cv.Optional(CONF_CHECKSUM, default="enhanced"): cv.enum(CHECKSUM_ENUM, lower=True),
+        cv.Optional(CONF_CHECKSUM, default="enhanced"): cv.enum(
+            CHECKSUM_ENUM, lower=True
+        ),
     }
 )
 
@@ -101,7 +103,9 @@ RESPONSE_SCHEMA = cv.Schema(
 def _validate_rx_id_entry(conf):
     # An rx_ids entry with neither length nor checksum would carry no information (V5).
     if CONF_LENGTH not in conf and CONF_CHECKSUM not in conf:
-        raise cv.Invalid("each rx_ids entry needs at least one of 'length' or 'checksum'")
+        raise cv.Invalid(
+            "each rx_ids entry needs at least one of 'length' or 'checksum'"
+        )
     return conf
 
 
