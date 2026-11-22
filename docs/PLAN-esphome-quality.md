@@ -93,6 +93,9 @@ the bump surfaces.
 
 ### P1 — Upstream tooling · infrastructure, no component code
 
+Two PRs: **P1a** is items 1–3 and 5 (pre-commit, ruff, `ci_custom.py`, CI
+wiring). **P1b** is item 4 (clang-tidy) plus its own CI wiring.
+
 1. `.pre-commit-config.yaml` with the upstream hooks and versions: ruff,
    ruff-format, pyupgrade `--py312-plus`, yamllint and clang-format, plus the
    pre-commit-hooks for whitespace and newlines.

@@ -25,6 +25,25 @@ per branch and per PR, in the order listed there.
   with new host test cases in `tests/host/`. A concurrency change needs a case
   with a real thread, not an argument.
 
+## The PR description is your report
+
+A reviewer (Claude) reads the PR, not your session, so the description must
+stand on its own:
+
+1. **Phase**: which plan phase this is, e.g. `P1a`, and whether it is
+   *mechanical* or *bench-pending*.
+2. **What changed**, and what was deliberately left out, with the reason.
+3. **Gates run**: the exact commands and their results (pass/fail, counts).
+   Name a gate you could not run, and say why.
+4. **Finding counts** before and after, for every lint or tidy tool the
+   phase touches.
+5. **Behavior**: anything that could differ at runtime, even if it is
+   near-identical (see the plan's "Behavior neutrality").
+6. **Questions**: decisions you need from someone. Then stop. Don't guess.
+
+If the plan is wrong or no longer matches upstream, fix the plan in the same
+PR and say so under 2.
+
 ## Working rules
 
 - Branch off `main`, open a PR, merge with a merge commit. Never push to `main`.
