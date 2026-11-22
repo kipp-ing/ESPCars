@@ -770,24 +770,24 @@ Three optimizations are enabled automatically, with no new YAML options:
   when a full second passes without refusals. Successful sends between refusals
   do not reset an episode. Sustained overload therefore costs two lines total.
 
-Measured on C6: at 1,000 frames/s, TX-idle suppression reduced Tmr_Svc from
-12.3% to 0% (approximately 7 percentage points of exclusive CPU), with identical
-delivery. At saturation, hardware filtering reduced CAN ISR count by 25% and
-ISR time by 17%. Removing periodic refusal warnings reduced the worst loop
-pass from 1,080 to 626 microseconds; the new episode-edge warnings retain the
-information. Evidence is maintained in the esp_timing project's D-101 driver
-A/B studies; these measurements are workload-specific.
+Measured on an ESP32-C6 two-port gateway (both TWAIs on one wire, 3 boots per
+side, free CPU from a calibrated idle-loop meter that includes ISR time):
 
-Storage cost on 32-bit ESP32: refusal counter 4 bytes/port, episode state
-12 bytes/port replacing a 4-byte warning timestamp (net +8), filter-reason
-pointer 4 bytes/port, and idle capture/counters 32 bytes globally on eligible
-builds. Thus field payload grows by 16 bytes/port before enclosing-structure padding,
-plus 32 bytes globally when idle suppression is enabled. Final linked RAM/flash
-deltas remain to be measured.
-Run `script/d101_compile_matrix.sh` on an IDF-capable host for the C6 and classic
-ESP32 default builds and paired per-feature off/on flash/RAM reports. The
-`CAN_GATEWAY_TEST_DISABLE_IDLE_NOTIFY`, `CAN_GATEWAY_TEST_DISABLE_HW_FILTER`
-and `CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS` defines are measurement controls,
-not component configuration. The idle-off build retains pass-through wrappers;
-all pairs retain the refusal counter and filter-reason field. Flash cost and
-linked RAM totals are unverified until that matrix is run.
+| Change | Load | Result |
+|---|---|---|
+| TX-idle suppression | 1,000 frames/s per direction | Tmr_Svc 12.1% → 0%, free CPU 76.7% → 82.0% (+5.3 pp), delivery identical |
+| Hardware filter | wire saturated, statistics and RX hooks off | free CPU 67.4% → 71.6% (+4.2 pp); CAN ISRs −25%, CAN ISR time −17% |
+| Episode warnings | wire saturated, injects refused | 8 instead of 70 warning lines per 30 s; the periodic ~0.5 ms warning pass is gone |
+
+Delivery, loss and latency were unchanged in every pair. With statistics or RX
+hooks compiled in, the filter stays off and the saturated free CPU is unchanged.
+Evidence is maintained in the esp_timing project's D-101 studies; the numbers
+are workload-specific.
+
+Linked cost (C6 IDF bridge build, each feature off → on): TX-idle suppression
++586 B flash / +98 B static RAM, hardware filter +468 B / 0 B, episode warnings
++276 B / +16 B; all three together on the C6 gateway fixture +980 B / +132 B.
+Classic ESP32 builds get no wraps and link unchanged. `script/d101_compile_matrix.sh`
+reproduces the numbers; its `CAN_GATEWAY_TEST_DISABLE_IDLE_NOTIFY`,
+`CAN_GATEWAY_TEST_DISABLE_HW_FILTER` and `CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS`
+defines are measurement controls, not component configuration.
