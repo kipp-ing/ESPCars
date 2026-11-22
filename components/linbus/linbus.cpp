@@ -17,13 +17,15 @@ static int get_pin_no(GPIOPin *pin) {
 }
 
 void LinBusComponent::set_uart_port_str(const std::string &port) {
-  if (port == "UART_NUM_0")
+  if (port == "UART_NUM_0") {
     this->uart_port_ = UART_NUM_0;
-  else if (port == "UART_NUM_1")
+  } else if (port == "UART_NUM_1") {
     this->uart_port_ = UART_NUM_1;
+  }
 #if SOC_UART_HP_NUM > 2
-  else if (port == "UART_NUM_2")
+  else if (port == "UART_NUM_2") {
     this->uart_port_ = UART_NUM_2;
+  }
 #endif
   else {
     ESP_LOGW(TAG, "Unknown UART port: %s, defaulting to UART_NUM_1", port.c_str());
@@ -85,7 +87,7 @@ void LinBusComponent::setup() {
 
   // Enable the built-in loopback self-test if configured (commander + transceiver + pull-up).
   if (this->self_test_) {
-    this->lin_comm_->enableSelfTest(true);
+    this->lin_comm_->enable_self_test(true);
   }
 
   ESP_LOGCONFIG(TAG, "LIN Bus setup complete");
@@ -101,7 +103,7 @@ void LinBusComponent::loop() {
   // Fire on_error for each newly-counted fault (loop runs ~16 ms, so a deliberately induced
   // error lights up within a frame or two). Skipped entirely when no on_error is configured.
   if (!this->error_triggers_.empty()) {
-    const lin_statistics_t &est = this->lin_comm_->getStatistics();
+    const LinStatistics &est = this->lin_comm_->get_statistics();
     const struct {
       uint32_t cur;
       uint32_t *last;
@@ -126,7 +128,7 @@ void LinBusComponent::loop() {
   uint32_t now = esphome::millis();
   if (now - this->last_stats_log_ > 10000) {
     this->last_stats_log_ = now;
-    const lin_statistics_t &stats = this->lin_comm_->getStatistics();
+    const LinStatistics &stats = this->lin_comm_->get_statistics();
 
     // Publish sensor values. The counter sensors are STATE_CLASS_TOTAL_INCREASING, so they
     // must be fed the monotonic lifetime totals, not the per-window counters that reset
@@ -163,7 +165,7 @@ void LinBusComponent::loop() {
       this->self_test_pass_sensor_->publish_state(this->lin_comm_->self_test_passed());
 
     // Every counter below except `Unique IDs` is a 10 s WINDOW (zeroed by
-    // updateStatistics(); the *_total fields never reset). Printing the windowed
+    // update_statistics(); the *_total fields never reset). Printing the windowed
     // value under a bare "Data Bytes RX" cost three sessions: a steady bus
     // carries the same bytes every window, so the identical number reappeared in
     // report after report and in two separate sessions, and was read as a frozen
@@ -190,7 +192,7 @@ void LinBusComponent::loop() {
   // Check for new frames and trigger automations
   for (auto *trigger : this->frame_triggers_) {
     uint8_t lin_id = trigger->get_lin_id();
-    lin_discovered_id_t frame_data;
+    LinDiscoveredId frame_data;
 
     // Get current frame data for this LIN ID
     if (this->lin_comm_->get_response_4id(lin_id, &frame_data)) {
@@ -258,7 +260,7 @@ void LinBusComponent::run_self_test(bool enable) {
     return;
   }
   ESP_LOGI(TAG, "%s LIN self-test", enable ? LOG_STR_LITERAL("Starting") : LOG_STR_LITERAL("Stopping"));
-  this->lin_comm_->enableSelfTest(enable);
+  this->lin_comm_->enable_self_test(enable);
 }
 
 void LinBusComponent::update_response(uint8_t lin_id, const std::vector<uint8_t> &data) {
@@ -287,43 +289,43 @@ void LinBusComponent::update_response(uint8_t lin_id, const std::vector<uint8_t>
 uint32_t LinBusComponent::get_commander_requests_sent() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().commander_requests_sent;
+  return this->lin_comm_->get_statistics().commander_requests_sent;
 }
 
 uint32_t LinBusComponent::get_id_requests_answered() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().id_requests_answered;
+  return this->lin_comm_->get_statistics().id_requests_answered;
 }
 
 uint32_t LinBusComponent::get_data_bytes_received() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().data_bytes_received;
+  return this->lin_comm_->get_statistics().data_bytes_received;
 }
 
 uint32_t LinBusComponent::get_checksum_errors() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().checksum_errors;
+  return this->lin_comm_->get_statistics().checksum_errors;
 }
 
 uint32_t LinBusComponent::get_commander_send_failures() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().commander_send_failures;
+  return this->lin_comm_->get_statistics().commander_send_failures;
 }
 
 float LinBusComponent::get_bus_load_percent() const {
   if (this->lin_comm_ == nullptr)
     return 0.0f;
-  return this->lin_comm_->getStatistics().estimated_bus_load_percent;
+  return this->lin_comm_->get_statistics().estimated_bus_load_percent;
 }
 
 float LinBusComponent::get_error_rate_percent() const {
   if (this->lin_comm_ == nullptr)
     return 0.0f;
-  return this->lin_comm_->getStatistics().error_rate_percent;
+  return this->lin_comm_->get_statistics().error_rate_percent;
 }
 
 }  // namespace esphome::linbus

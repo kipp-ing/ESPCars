@@ -66,7 +66,7 @@ class LinSerial;
 class LINCommunication {
  public:
   LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin, int cs_pin = -1);
-  esp_err_t init(lin_mode_t mode, int baud_rate);  // Initialize LIN communication
+  esp_err_t init(LinMode mode, int baud_rate);  // Initialize LIN communication
   ~LINCommunication();
 
   bool lin_process();  // Loop-context housekeeping: self-test evaluation + statistics windows.
@@ -80,7 +80,7 @@ class LINCommunication {
   // Responses
   bool set_response_data(uint8_t id, uint8_t *data, uint8_t data_length, bool enhanced = true,
                          bool preserve_existing_checksum = false);
-  bool get_response_4id(uint8_t id, lin_discovered_id_t *lindata);
+  bool get_response_4id(uint8_t id, LinDiscoveredId *lindata);
 
   // Per-received-ID static hints from config (length-aware finalize + declared checksum mode).
   // length 0 = no length hint; checksum_mode -1 = undeclared, 0 = classic, 1 = enhanced.
@@ -94,23 +94,23 @@ class LINCommunication {
   bool self_test_passed() const { return self_test_passed_; }
 
   // Debug
-  void dumpReceivedPIDsToLog() const;
+  void dump_received_pids_to_log() const;
 
   // Enable/disable built-in LIN self test (commander only). Call before or after init().
-  void enableSelfTest(bool enable);
+  void enable_self_test(bool enable);
 
   // Statistics (low overhead access to LinProtocolHandler statistics)
-  const lin_statistics_t &getStatistics() const;
-  void logStatistics() const;
-  void resetStatistics();
-  void updateStatistics();
+  const LinStatistics &get_statistics() const;
+  void log_statistics() const;
+  void reset_statistics();
+  void update_statistics();
 
  private:
   uart_port_t uart_num_;
   int tx_pin_;
   int rx_pin_;
   int cs_pin_;
-  lin_mode_t mode_;
+  LinMode mode_;
   int baud_rate_;
 
   LinSerial *lin_serial_{nullptr};
@@ -118,9 +118,9 @@ class LINCommunication {
   bool is_initialized_ = false;
   mutable SemaphoreHandle_t data_mutex_{nullptr};
 
-  lin_schedule_item_t schedule_[LIN_MAX_ID_RQ_COUNT];
-  lin_respond_data_t responses_[LIN_MAX_RESPONSES];
-  lin_discovered_id_t discoveredIDs_[LIN_MAX_DISCOVERED_PIDS];
+  LinScheduleItem schedule_[LIN_MAX_ID_RQ_COUNT];
+  LinRespondData responses_[LIN_MAX_RESPONSES];
+  LinDiscoveredId discovered_ids_[LIN_MAX_DISCOVERED_PIDS];
 
   TaskHandle_t uart_event_task_handle_{nullptr};
   static void uart_event_task_trampoline(void *arg);
@@ -147,15 +147,15 @@ class LINCommunication {
   };
   static constexpr size_t SELF_TEST_MAX_IDS = 10;
   SelfTestStat self_test_stats_[SELF_TEST_MAX_IDS]{};
-  // How many slots selfTestInitIfNeeded() actually filled. Needed because `id`
+  // How many slots self_test_init_if_needed_() actually filled. Needed because `id`
   // cannot double as the "empty slot" sentinel: 0x00 is a legitimate LIN id and
   // is the FIRST case the exerciser schedules, so `if (st.id == 0) continue`
   // silently dropped it from every verdict — a dead 0x00 still passed.
   size_t self_test_count_ = 0;
 
-  void selfTestTick();  // invoked inside lin_process()
-  void selfTestInitIfNeeded();
-  void selfTestEvaluate();
+  void self_test_tick_();  // invoked inside lin_process()
+  void self_test_init_if_needed_();
+  void self_test_evaluate_();
 };
 
 }  // namespace esphome::linbus

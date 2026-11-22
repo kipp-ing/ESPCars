@@ -208,9 +208,9 @@ designed here so the format does not have to change when they land):
   visible.
 - **S3 — native `linbus` source** (later): a registered sink equivalent to S2
   so LIN frames skip the lambda round-trip. The hook point is
-  `LinProtocolHandler::onData`, right after the frame is accepted: that is the
+  `LinProtocolHandler::on_data`, right after the frame is accepted: that is the
   only place where the PID *with* parity, the resolved checksum mode and the
-  fallback flag are still live — none of them survive into `lin_discovered_id_t`,
+  fallback flag are still live — none of them survive into `LinDiscoveredId`,
   and the `on_frame` trigger the logger uses today fires from the **main loop**,
   where frames arriving faster than a loop pass are coalesced away
   (`note_frames_coalesced()`). A LIN log fed through the trigger is therefore
@@ -924,7 +924,7 @@ before the rail collapses.
   (same ethos as the repo's ISR-flash-audit discipline). The writer, on seeing
   `dying`: stop accepting records → flush the block-aligned remainder →
   `f_sync` → `f_close` → `unmount` → (optional) de-assert `card_power_pin`.
-  **Every step bounded** (timeouts, like `linbus` `sendBreak`'s 20 ms cap) so
+  **Every step bounded** (timeouts, like `linbus` `send_break`'s 20 ms cap) so
   the path can never outlive the hold-up budget.
 - **Hold-up sizing (HW ask on the PCB repo):**
   `E = ½·C·(V0² − Vmin²)` must cover
