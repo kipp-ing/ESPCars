@@ -139,6 +139,39 @@ jobs:
       - name: Report every P1a tool without modifying source files
         run: python script/lint_report.py --report-only
 
+  clang-tidy:
+    name: clang-tidy (report-only)
+    runs-on: ubuntu-latest
+    # Deliberately absent from Required checks.needs until P5 is clean.
+    env:
+      # ESPHome 2026.11 uses native ESP-IDF; cache its install and ccache too.
+      ESPHOME_ESP_IDF_PREFIX: ~/.esphome-idf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements_test.txt
+            requirements_lint.txt
+      - run: pip install -r requirements_test.txt -r requirements_lint.txt
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.esphome-idf
+          key: tidy-${{ runner.os }}-${{ hashFiles('requirements_test.txt') }}
+      - name: Compile the seven clang-tidy targets
+        run: |
+          set -e
+          python script/clang_tidy.py --list-targets | while IFS= read -r config; do
+            esphome compile "$config"
+          done
+      - name: Report clang-tidy findings and count tables
+        run: python script/clang_tidy.py --report-only
+
   ha-integration:
     name: Home Assistant glue (sdlog_relay)
     runs-on: ubuntu-latest

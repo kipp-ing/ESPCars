@@ -121,6 +121,7 @@ def report_environment(monkeypatch):
             "pre-commit-hooks": "5.0.0",
             "identify": "2.6.20",
             "clang-format": "13.0.1",
+            "clang-tidy": "23.1.4",
         }[package],
     )
 
@@ -175,7 +176,7 @@ def test_summary_hides_details_only(report_environment, monkeypatch, capsys, sum
     assert ("finding details" in output) is not summary
     if summary:
         assert output.splitlines() == [
-            "P1a lint summary (report-only; units described in script/lint_report.py):",
+            "Upstream lint summary (report-only; units described in script/lint_report.py):",
             "  ruff: 3",
         ]
 

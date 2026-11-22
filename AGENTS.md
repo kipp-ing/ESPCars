@@ -15,8 +15,9 @@ per branch and per PR, in the order listed there.
   sandbox, and it may be offline. So a change must be either
   *mechanical* (behavior-neutral) or *bench-pending*, as defined in the plan
   (section "Behavior neutrality"). Mark a bench-pending PR with
-  `[bench-pending]` in its title. It is not merged until someone runs
-  `verify.py` with exit 0 on it.
+  `[bench-pending]` in its title, and add a row for it to the P9 ledger in
+  the plan: what could differ, and how P9 checks it. It is merged after
+  review; the bench check happens once, in P9.
 - **Gates you can run:** `script/check.sh` (pytest, host C++ tests, clang-format,
   `esphome config` on all build YAMLs) and `esphome compile` on the affected
   `tests/build/` targets. CI runs the full compile matrix. `script/check.sh`

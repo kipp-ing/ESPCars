@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run P1a linters without modifying the checkout; findings are advisory.
+"""Run upstream linters without modifying the checkout; findings are advisory.
 
 Install requirements_lint.txt into the same environment as requirements_test.txt.
 Both check.sh and CI call this entry point. Mutating tools run on disposable
@@ -37,6 +37,7 @@ TOOLS = (
     "trailing-whitespace",
     "no-commit-to-branch",
     "ci-custom",
+    "clang-tidy",
 )
 
 
@@ -197,6 +198,12 @@ def report(tool, files, config):
         if result.returncode:
             print(".git/HEAD:1: [no-commit-to-branch] protected branch")
         return result.returncode
+    if tool == "clang-tidy":
+        result = run([sys.executable, "script/clang_tidy.py", "--report-only"])
+        print(result.stdout, end="")
+        if result.returncode:
+            raise RuntimeError(result.stdout + result.stderr)
+        return int(re.search(r"  TOTAL: (\d+)", result.stdout)[1])
     result = run([sys.executable, "script/ci_custom.py"])
     print(result.stdout, end="")
     if result.returncode not in (0, 1) or result.stderr:
@@ -237,6 +244,18 @@ def main(argv=None):
             print(f"ERROR [version-{package}]: {error}")
             counts[f"version-{package}"] = None
     for tool in args.only or TOOLS:
+        if tool == "clang-tidy":
+            if __package__:
+                from .clang_tidy import has_local_builds
+            else:
+                from clang_tidy import has_local_builds
+
+            if not has_local_builds():
+                counts[tool] = (
+                    "SKIPPED (no local compile_commands.json; run esphome compile)"
+                )
+                print(f"SKIP [clang-tidy]: {counts[tool]}")
+                continue
         if not args.summary:
             print(f"== report-only: {tool} ==", flush=True)
         details = io.StringIO()
@@ -248,19 +267,25 @@ def main(argv=None):
                 print(details.getvalue(), end="")
             print(f"ERROR [{tool}]: {error}")
             counts[tool] = None
-    print("P1a lint summary (report-only; units described in script/lint_report.py):")
+    print(
+        "Upstream lint summary (report-only; units described in script/lint_report.py):"
+    )
     for tool, count in counts.items():
         print(f"  {tool}: {count if count is not None else 'ERROR (no count)'}")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary).open("a", encoding="utf-8") as output:
-            output.write("\n### P1a lint counts\n\n| Tool | Count |\n|---|---:|\n")
+            output.write("\n### Upstream lint counts\n\n| Tool | Count |\n|---|---:|\n")
             for tool, count in counts.items():
                 value = count if count is not None else "ERROR (no count)"
                 output.write(f"| {tool} | {value} |\n")
             output.write("\nCount units are documented in `script/lint_report.py`.\n")
     if None in counts.values():
         return 2
-    return 0 if args.report_only else int(any(counts.values()))
+    return (
+        0
+        if args.report_only
+        else int(any(isinstance(count, int) and count > 0 for count in counts.values()))
+    )
 
 
 if __name__ == "__main__":
