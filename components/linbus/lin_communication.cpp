@@ -1,14 +1,22 @@
-#include "LINCommunication.h"
-#include "esp_log.h"
+#include "lin_communication.h"
+#include "esphome/core/log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <cstring>
+#include <cstdio>
 
 // Project Headers
-#include "LinSerial.h"
-#include "LinProtocolHandler.h"
+#include "lin_serial.h"
+#include "lin_protocol_handler.h"
 
-static const char *TAG = "LIN_COMM";
+#include <cinttypes>
+
+namespace esphome::linbus {
+
+ESPHOME_LOG_TAG(TAG, "LIN_COMM");
+
+// The former IDF logger compiled non-error logs out (CONFIG_LOG_MAXIMUM_LEVEL=1).
+// Keep them at VERBOSE so DEBUG adds no logging work on LIN timing paths.
 
 LINCommunication::LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin, int cs_pin)
     : uart_num_(uart_num), tx_pin_(tx_pin), rx_pin_(rx_pin), cs_pin_(cs_pin), mode_(LIN_MODE_LISTENER), baud_rate_(0) {
@@ -41,7 +49,7 @@ LINCommunication::~LINCommunication() {
 
 esp_err_t LINCommunication::init(lin_mode_t mode, int baud_rate) {
   if (is_initialized_) {
-    ESP_LOGW(TAG, "LINCommunication is already initialized. Skipping reinitialization.");
+    ESP_LOGV(TAG, "LINCommunication is already initialized. Skipping reinitialization.");
     return ESP_ERR_INVALID_STATE;
   }
 
@@ -97,7 +105,7 @@ esp_err_t LINCommunication::init(lin_mode_t mode, int baud_rate) {
     return ESP_FAIL;
   }
 
-  ESP_LOGI(TAG, "LINCommunication initialized in mode %d at %d baud", mode_, baud_rate_);
+  ESP_LOGV(TAG, "LINCommunication initialized in mode %d at %d baud", mode_, baud_rate_);
   is_initialized_ = true;  // Mark as initialized
 
   return ESP_OK;
@@ -190,15 +198,15 @@ void LINCommunication::uart_event_task_trampoline(void *arg) {
       self->lin_protocol_handler_->onInterByteTimeout();
     }
 
-    // Off-loop schedule tick (A5/N8): the master header cadence lives HERE, not in the main
+    // Off-loop schedule tick (A5/N8): the commander header cadence lives HERE, not in the main
     // loop, so the bus keeps being polled through OTA writes and heavy-lambda stalls (N2 for
-    // the master side). This task wakes on every UART event and at least every wait_ticks
+    // the commander side). This task wakes on every UART event and at least every wait_ticks
     // (~2 ms), which bounds schedule jitter to ~2 ms + any in-flight frame time. Header TX
     // and response TX (onID) now share this one task context, so they can never interleave
-    // on the wire; data_mutex_ + the isBusIdle() gate inside master_send() still guard
+    // on the wire; data_mutex_ + the isBusIdle() gate inside commander_send() still guard
     // against main-loop table mutation and mid-frame transmission.
-    if (self->mode_ == LIN_MODE_MASTER) {
-      self->lin_protocol_handler_->master_send();
+    if (self->mode_ == LIN_MODE_COMMANDER) {
+      self->lin_protocol_handler_->commander_send();
     }
   }
 }
@@ -207,7 +215,7 @@ bool LINCommunication::lin_process() {
   if (lin_protocol_handler_ == nullptr)
     return false;
 
-  // Note: the master schedule is NOT ticked here. Header cadence runs in the UART event
+  // Note: the commander schedule is NOT ticked here. Header cadence runs in the UART event
   // task (A5 off-loop tick, see uart_event_task_trampoline), so a blocked main loop never
   // stalls the bus. This call only carries the loop-context housekeeping below.
 
@@ -223,9 +231,9 @@ bool LINCommunication::lin_process() {
   return true;
 }
 
-// master scheduler functions
+// commander scheduler functions
 
-bool LINCommunication::master_add_id_schedule(uint8_t id, uint32_t interval_ms) {
+bool LINCommunication::commander_add_id_schedule(uint8_t id, uint32_t interval_ms) {
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
   // Update existing
@@ -236,7 +244,7 @@ bool LINCommunication::master_add_id_schedule(uint8_t id, uint32_t interval_ms) 
       schedule_[i].updateInterval = interval_ms;
       schedule_[i].last_send_time_ms = 0;
       schedule_[i].sent_once = false;
-      ESP_LOGI(TAG, "Updated schedule ID 0x%02X interval %u ms", id, interval_ms);
+      ESP_LOGV(TAG, "Updated schedule ID 0x%02X interval %" PRIu32 " ms", id, interval_ms);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
       return true;
@@ -249,19 +257,19 @@ bool LINCommunication::master_add_id_schedule(uint8_t id, uint32_t interval_ms) 
       schedule_[i].updateInterval = interval_ms;
       schedule_[i].last_send_time_ms = 0;
       schedule_[i].sent_once = false;
-      ESP_LOGI(TAG, "Added schedule ID 0x%02X interval %u ms", id, interval_ms);
+      ESP_LOGV(TAG, "Added schedule ID 0x%02X interval %" PRIu32 " ms", id, interval_ms);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
       return true;
     }
   }
-  ESP_LOGW(TAG, "Schedule full, cannot add ID 0x%02X", id);
+  ESP_LOGV(TAG, "Schedule full, cannot add ID 0x%02X", id);
   if (data_mutex_ != nullptr)
     xSemaphoreGive(data_mutex_);
   return false;
 }
 
-bool LINCommunication::master_remove_id_schedule(uint8_t id) {
+bool LINCommunication::commander_remove_id_schedule(uint8_t id) {
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
   for (size_t i = 0; i < LIN_MAX_ID_RQ_COUNT; i++) {
@@ -271,13 +279,13 @@ bool LINCommunication::master_remove_id_schedule(uint8_t id) {
       schedule_[i].updateInterval = 0;  // mark free
       schedule_[i].last_send_time_ms = 0;
       schedule_[i].sent_once = false;
-      ESP_LOGI(TAG, "Removed schedule ID 0x%02X", id);
+      ESP_LOGV(TAG, "Removed schedule ID 0x%02X", id);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
       return true;
     }
   }
-  ESP_LOGW(TAG, "ID 0x%02X not found in schedule", id);
+  ESP_LOGV(TAG, "ID 0x%02X not found in schedule", id);
   if (data_mutex_ != nullptr)
     xSemaphoreGive(data_mutex_);
   return false;
@@ -389,8 +397,8 @@ bool LINCommunication::get_response_4id(uint8_t id, lin_discovered_id_t *lindata
 void LINCommunication::dumpReceivedPIDsToLog() const {
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return;
-  ESP_LOGI(TAG, "| %-5s | %-4s | %-3s | %-7s | %-8s | %-24s |", "Idx", "ID", "Len", "Count", "Last(ms)", "Data(hex)");
-  ESP_LOGI(TAG, "|-------|------|-----|---------|----------|--------------------------|");
+  ESP_LOGV(TAG, "| %-5s | %-4s | %-3s | %-7s | %-8s | %-24s |", "Idx", "ID", "Len", "Count", "Last(ms)", "Data(hex)");
+  ESP_LOGV(TAG, "|-------|------|-----|---------|----------|--------------------------|");
   for (size_t i = 0; i < LIN_MAX_DISCOVERED_PIDS; i++) {
     if (discoveredIDs_[i].dataLength == 0)
       continue;  // skip free slot (ID may be 0 validly)
@@ -398,11 +406,11 @@ void LINCommunication::dumpReceivedPIDsToLog() const {
     char dataStr[3 * LIN_MAX_DATA_SIZE + 1] = {0};
     char *p = dataStr;
     for (uint8_t j = 0; j < discoveredIDs_[i].dataLength; ++j) {
-      sprintf(p, "%02X ", discoveredIDs_[i].data[j]);
+      snprintf(p, sizeof(dataStr) - (p - dataStr), "%02X ", discoveredIDs_[i].data[j]);
       p += 3;
     }
 
-    ESP_LOGI(TAG, "| %-5zu | 0x%02X | %-3u | %-7u | %-8lld | %-24s |", i, discoveredIDs_[i].id,
+    ESP_LOGV(TAG, "| %-5zu | 0x%02X | %-3u | %-7" PRIu32 " | %-8" PRId64 " | %-24s |", i, discoveredIDs_[i].id,
              discoveredIDs_[i].dataLength, discoveredIDs_[i].updateCount,
              (esp_timer_get_time() - discoveredIDs_[i].lastUpdateTime) / 1000, dataStr);
   }
@@ -424,7 +432,7 @@ void LINCommunication::enableSelfTest(bool enable) {
 }
 
 void LINCommunication::selfTestTick() {
-  if (mode_ != LIN_MODE_MASTER)
+  if (mode_ != LIN_MODE_COMMANDER)
     return;
   if (!lin_protocol_handler_)
     return;
@@ -485,13 +493,13 @@ void LINCommunication::selfTestInitIfNeeded() {
                                   {0x3C, 250, 2}, {0x3D, 280, 2}, {0x3E, 300, 6}, {0x3F, 330, 1}};
   const size_t case_count = sizeof(CASES) / sizeof(CASES[0]);
   if (case_count > SELF_TEST_MAX_IDS) {
-    ESP_LOGW(TAG, "SelfTest truncated: too many cases (%zu)", case_count);
+    ESP_LOGV(TAG, "SelfTest truncated: too many cases (%zu)", case_count);
   }
   size_t added = 0;
   for (size_t i = 0; i < case_count && added < SELF_TEST_MAX_IDS; ++i) {
     const auto &c = CASES[i];
-    if (!master_add_id_schedule(c.id, c.interval_ms)) {
-      ESP_LOGW(TAG, "Schedule full while adding self-test ID 0x%02X", c.id);
+    if (!commander_add_id_schedule(c.id, c.interval_ms)) {
+      ESP_LOGV(TAG, "Schedule full while adding self-test ID 0x%02X", c.id);
       continue;
     }
     uint8_t payload[LIN_MAX_DATA_SIZE]{};
@@ -512,7 +520,7 @@ void LINCommunication::selfTestInitIfNeeded() {
   self_test_count_ = added;
   self_test_start_time_us_ = esp_timer_get_time();
   self_test_initialized_ = true;
-  ESP_LOGI(TAG, "LIN self-test initialized with %zu IDs", added);
+  ESP_LOGV(TAG, "LIN self-test initialized with %zu IDs", added);
 }
 
 void LINCommunication::selfTestEvaluate() {
@@ -521,7 +529,7 @@ void LINCommunication::selfTestEvaluate() {
     return;
   self_test_last_eval_us_ = elapsed_us;
 
-  ESP_LOGI(TAG, "---- LIN Self-Test Status (%.2fs) ----", elapsed_us / 1e6f);
+  ESP_LOGV(TAG, "---- LIN Self-Test Status (%.2fs) ----", elapsed_us / 1e6f);
   // Iterate the slots that were actually filled. This used to run to
   // SELF_TEST_MAX_IDS and skip `st.id == 0` as an empty-slot sentinel, which
   // also skipped the scheduled id 0x00 — the first case the exerciser adds — so
@@ -532,13 +540,13 @@ void LINCommunication::selfTestEvaluate() {
     int64_t expected_interval_us = (int64_t) st.scheduled_interval_ms * 1000;
     bool pass = st.seen_updates >= 2;
     all_have_updates &= pass;
-    ESP_LOGI(TAG, "ID 0x%02X upd=%u miss=%u min=%.1fms max=%.1fms exp=%.1fms %s", st.id, st.seen_updates,
-             st.missed_windows, st.min_interval_us / 1000.0, st.max_interval_us / 1000.0, expected_interval_us / 1000.0,
-             pass ? "OK" : "WAIT");
+    ESP_LOGV(TAG, "ID 0x%02X upd=%" PRIu32 " miss=%" PRIu32 " min=%.1fms max=%.1fms exp=%.1fms %s", st.id,
+             st.seen_updates, st.missed_windows, st.min_interval_us / 1000.0, st.max_interval_us / 1000.0,
+             expected_interval_us / 1000.0, pass ? LOG_STR_LITERAL("OK") : LOG_STR_LITERAL("WAIT"));
   }
   if (all_have_updates && elapsed_us > 5'000'000) {
     self_test_passed_ = true;
-    ESP_LOGI(TAG, "LIN self-test: BASIC PASS (all IDs active).");
+    ESP_LOGV(TAG, "LIN self-test: BASIC PASS (all IDs active).");
   }
 }
 
@@ -569,3 +577,5 @@ void LINCommunication::updateStatistics() {
     lin_protocol_handler_->updateStatistics();
   }
 }
+
+}  // namespace esphome::linbus

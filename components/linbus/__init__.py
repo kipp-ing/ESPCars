@@ -1,5 +1,7 @@
 """LIN Bus component for ESPHome."""
 
+import logging
+
 from esphome import automation, final_validate as fv, pins
 import esphome.codegen as cg
 import esphome.config_validation as cv
@@ -16,6 +18,8 @@ DOMAIN = "linbus"
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["sensor", "binary_sensor"]
 CODEOWNERS = ["@swifty99"]
+
+_LOGGER = logging.getLogger(__name__)
 
 # A board can carry more than one LIN segment (the CAN_LIN_ESP32 reference board
 # has two), and each segment needs its own UART. Instances are independent: the
@@ -63,9 +67,33 @@ CONF_LINBUS_ID = "linbus_id"
 CHECKSUM_ENUM = {"classic": False, "enhanced": True}
 
 # Mode constants
-MODE_MASTER = "master"
-MODE_SLAVE = "slave"
+MODE_COMMANDER = "commander"
+MODE_RESPONDER = "responder"
 MODE_LISTENER = "listener"
+
+# Released YAML spellings remain aliases for one release cycle.
+_DEPRECATED_MODES = {
+    "master": MODE_COMMANDER,
+    "slave": MODE_RESPONDER,  # NOLINT: released YAML alias, removed after one release cycle.
+}
+_MODE_ENUM = cv.enum(
+    {MODE_COMMANDER: 0, MODE_RESPONDER: 1, MODE_LISTENER: 2}, lower=True
+)
+
+
+def _validate_mode(value):
+    value = cv.string(value).lower()
+    if replacement := _DEPRECATED_MODES.get(value):
+        _LOGGER.warning(
+            "linbus mode: %s is deprecated; use mode: %s. "
+            "The old spelling is supported for one release cycle.",
+            value,
+            replacement,
+        )
+        value = replacement
+    # Only canonical values appear in validation errors and validated configs.
+    return _MODE_ENUM(value)
+
 
 # LIN 2.1 caps the bus at 20 kbit/s; 0 would divide-by-zero in the driver (UPGRADES.md H6).
 UART_PORTS = ["UART_NUM_0", "UART_NUM_1", "UART_NUM_2"]
@@ -138,14 +166,14 @@ def _no_duplicate_lin_ids(key):
 
 
 def _validate_mode_config(config):
-    mode = config.get(CONF_MODE, MODE_MASTER)
-    if CONF_SCHEDULE in config and mode != MODE_MASTER:
-        raise cv.Invalid("linbus schedule is only valid with mode: master")
+    mode = config.get(CONF_MODE, MODE_COMMANDER)
+    if CONF_SCHEDULE in config and mode != MODE_COMMANDER:
+        raise cv.Invalid("linbus schedule is only valid with mode: commander")
     if CONF_RESPONSES in config and mode == MODE_LISTENER:
         raise cv.Invalid("linbus responses are not valid with mode: listener")
-    # The self-test drives the bus against its own looped-back frames, so it needs a master.
-    if config.get(CONF_SELF_TEST) and mode != MODE_MASTER:
-        raise cv.Invalid("linbus self_test requires mode: master")
+    # The self-test drives the bus against its own looped-back frames, so it needs a commander.
+    if config.get(CONF_SELF_TEST) and mode != MODE_COMMANDER:
+        raise cv.Invalid("linbus self_test requires mode: commander")
     return config
 
 
@@ -163,9 +191,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_UART_PORT, default="UART_NUM_1"): cv.one_of(
                 *UART_PORTS, upper=True
             ),
-            cv.Optional(CONF_MODE, default=MODE_MASTER): cv.enum(
-                {MODE_MASTER: 0, MODE_SLAVE: 1, MODE_LISTENER: 2}, lower=True
-            ),
+            cv.Optional(CONF_MODE, default=MODE_COMMANDER): _validate_mode,
             cv.Optional(CONF_SCHEDULE): cv.All(
                 cv.ensure_list(SCHEDULE_SCHEMA),
                 cv.Length(max=16),
@@ -326,7 +352,7 @@ async def to_code(config):
         enhanced = getattr(enhanced, "enum_value", enhanced)
         return 1 if enhanced else 0
 
-    # Schedule (master mode)
+    # Schedule (commander mode)
     if CONF_SCHEDULE in config:
         for item in config[CONF_SCHEDULE]:
             cg.add(

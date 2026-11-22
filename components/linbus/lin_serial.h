@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace esphome::linbus {
+
 // ESP32 dependant
 // INTENTIONAL: High-level UART driver ONLY. No custom LL ISR / uart_ll_* usage.
 
@@ -43,3 +45,5 @@ class LinSerial {
 
   QueueHandle_t uart_queue_{nullptr};  // driver event queue
 };
+
+}  // namespace esphome::linbus

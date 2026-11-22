@@ -3,10 +3,11 @@
 #include "esphome/core/gpio.h"
 #include "soc/soc_caps.h"
 
-namespace esphome {
-namespace linbus {
+#include <cinttypes>
 
-static const char *const TAG = "linbus";
+namespace esphome::linbus {
+
+ESPHOME_LOG_TAG(TAG, "linbus");
 
 // Helper to get pin number from GPIOPin
 static int get_pin_no(GPIOPin *pin) {
@@ -62,7 +63,7 @@ void LinBusComponent::setup() {
 
   // Apply schedule configuration
   for (const auto &item : this->pending_schedule_) {
-    this->lin_comm_->master_add_id_schedule(item.id, item.interval_ms);
+    this->lin_comm_->commander_add_id_schedule(item.id, item.interval_ms);
   }
   this->pending_schedule_.clear();
 
@@ -82,7 +83,7 @@ void LinBusComponent::setup() {
   }
   this->pending_rx_hints_.clear();
 
-  // Enable the built-in loopback self-test if configured (master + transceiver + pull-up).
+  // Enable the built-in loopback self-test if configured (commander + transceiver + pull-up).
   if (this->self_test_) {
     this->lin_comm_->enableSelfTest(true);
   }
@@ -94,7 +95,7 @@ void LinBusComponent::loop() {
   if (this->lin_comm_ == nullptr)
     return;
 
-  // Process LIN communication (master scheduling, statistics, etc.)
+  // Process LIN communication (commander scheduling, statistics, etc.)
   this->lin_comm_->lin_process();
 
   // Fire on_error for each newly-counted fault (loop runs ~16 ms, so a deliberately induced
@@ -110,7 +111,7 @@ void LinBusComponent::loop() {
         {est.frame_errors_total, &this->last_frame_errors_, "framing"},
         {est.pid_errors_total, &this->last_pid_errors_, "pid"},
         {est.collisions_total, &this->last_collisions_, "collision"},
-        {est.master_send_failures_total, &this->last_send_failures_, "send"},
+        {est.commander_send_failures_total, &this->last_send_failures_, "send"},
     };
     for (const auto &c : checks) {
       if (c.cur != *c.last) {
@@ -122,7 +123,7 @@ void LinBusComponent::loop() {
   }
 
   // Update sensors and log statistics every 10 seconds
-  uint32_t now = millis();
+  uint32_t now = esphome::millis();
   if (now - this->last_stats_log_ > 10000) {
     this->last_stats_log_ = now;
     const lin_statistics_t &stats = this->lin_comm_->getStatistics();
@@ -130,8 +131,8 @@ void LinBusComponent::loop() {
     // Publish sensor values. The counter sensors are STATE_CLASS_TOTAL_INCREASING, so they
     // must be fed the monotonic lifetime totals, not the per-window counters that reset
     // every 10 s (which would look like meter resets to Home Assistant). See UPGRADES.md H4.
-    if (this->master_requests_sensor_)
-      this->master_requests_sensor_->publish_state(stats.master_requests_total);
+    if (this->commander_requests_sensor_)
+      this->commander_requests_sensor_->publish_state(stats.commander_requests_total);
     if (this->id_requests_answered_sensor_)
       this->id_requests_answered_sensor_->publish_state(stats.id_requests_answered_total);
     if (this->data_bytes_received_sensor_)
@@ -153,7 +154,7 @@ void LinBusComponent::loop() {
     if (this->frames_coalesced_sensor_)
       this->frames_coalesced_sensor_->publish_state(stats.frames_coalesced_total);
     if (this->send_failures_sensor_)
-      this->send_failures_sensor_->publish_state(stats.master_send_failures_total);
+      this->send_failures_sensor_->publish_state(stats.commander_send_failures_total);
     if (this->bus_load_sensor_)
       this->bus_load_sensor_->publish_state(stats.estimated_bus_load_percent);
     if (this->error_rate_sensor_)
@@ -172,14 +173,16 @@ void LinBusComponent::loop() {
     // "Total Bus Bytes" was the worst of it: windowed, but named like a total.
     // So: name the window, and print the lifetime beside it wherever one exists.
     ESP_LOGI(TAG, "=== LIN Bus Statistics (10s window | lifetime) ===");
-    ESP_LOGI(TAG, "Master Requests: %u | %u", stats.master_requests_sent, stats.master_requests_total);
-    ESP_LOGI(TAG, "ID Answers: %u | %u", stats.id_requests_answered, stats.id_requests_answered_total);
-    ESP_LOGI(TAG, "Data Bytes RX: %u | %u", stats.data_bytes_received, stats.data_bytes_received_total);
-    ESP_LOGI(TAG, "Frames RX: %u | %u", stats.frames_received, stats.frames_received_total);
-    ESP_LOGI(TAG, "Bus Bytes (window): %u", stats.total_bus_bytes);
-    ESP_LOGI(TAG, "Unique IDs Seen (lifetime): %u", stats.unique_ids_seen);
-    ESP_LOGI(TAG, "Checksum Errors: %u | %u", stats.checksum_errors, stats.checksum_errors_total);
-    ESP_LOGI(TAG, "Send Failures: %u | %u", stats.master_send_failures, stats.master_send_failures_total);
+    ESP_LOGI(TAG, "Commander Requests: %" PRIu32 " | %" PRIu32, stats.commander_requests_sent,
+             stats.commander_requests_total);
+    ESP_LOGI(TAG, "ID Answers: %" PRIu32 " | %" PRIu32, stats.id_requests_answered, stats.id_requests_answered_total);
+    ESP_LOGI(TAG, "Data Bytes RX: %" PRIu32 " | %" PRIu32, stats.data_bytes_received, stats.data_bytes_received_total);
+    ESP_LOGI(TAG, "Frames RX: %" PRIu32 " | %" PRIu32, stats.frames_received, stats.frames_received_total);
+    ESP_LOGI(TAG, "Bus Bytes (window): %" PRIu32, stats.total_bus_bytes);
+    ESP_LOGI(TAG, "Unique IDs Seen (lifetime): %" PRIu32, stats.unique_ids_seen);
+    ESP_LOGI(TAG, "Checksum Errors: %" PRIu32 " | %" PRIu32, stats.checksum_errors, stats.checksum_errors_total);
+    ESP_LOGI(TAG, "Send Failures: %" PRIu32 " | %" PRIu32, stats.commander_send_failures,
+             stats.commander_send_failures_total);
     ESP_LOGI(TAG, "Bus Load: %.1f%%", stats.estimated_bus_load_percent);
     ESP_LOGI(TAG, "Error Rate: %.2f%%", stats.error_rate_percent);
   }
@@ -213,7 +216,8 @@ void LinBusComponent::loop() {
         // Update last seen count
         this->last_update_counts_[lin_id] = frame_data.updateCount;
 
-        ESP_LOGD(TAG, "Fired trigger for LIN ID 0x%02X (count: %u -> %u)", lin_id, last_count, frame_data.updateCount);
+        ESP_LOGD(TAG, "Fired trigger for LIN ID 0x%02X (count: %" PRIu32 " -> %" PRIu32 ")", lin_id, last_count,
+                 frame_data.updateCount);
       }
     }
   }
@@ -222,15 +226,15 @@ void LinBusComponent::loop() {
 void LinBusComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "LIN Bus:");
   ESP_LOGCONFIG(TAG, "  UART Port: %d", this->uart_port_);
-  ESP_LOGCONFIG(TAG, "  Baud Rate: %u", this->baud_rate_);
+  ESP_LOGCONFIG(TAG, "  Baud Rate: %" PRIu32, this->baud_rate_);
   LOG_PIN("  TX Pin: ", this->tx_pin_);
   LOG_PIN("  RX Pin: ", this->rx_pin_);
   LOG_PIN("  CS Pin: ", this->cs_pin_);
-  const char *mode_str = this->mode_ == LIN_MODE_MASTER  ? "Master"
-                         : this->mode_ == LIN_MODE_SLAVE ? "Slave"
-                                                         : "Listener";
+  const char *mode_str = this->mode_ == LIN_MODE_COMMANDER   ? "Commander"
+                         : this->mode_ == LIN_MODE_RESPONDER ? "Responder"
+                                                             : "Listener";
   ESP_LOGCONFIG(TAG, "  Mode: %s", mode_str);
-  ESP_LOGCONFIG(TAG, "  Self-Test: %s", this->self_test_ ? "enabled" : "disabled");
+  ESP_LOGCONFIG(TAG, "  Self-Test: %s", this->self_test_ ? LOG_STR_LITERAL("enabled") : LOG_STR_LITERAL("disabled"));
 }
 
 void LinBusComponent::add_schedule_item(uint8_t id, uint32_t interval_ms) {
@@ -253,7 +257,7 @@ void LinBusComponent::run_self_test(bool enable) {
     ESP_LOGW(TAG, "Cannot run self-test: LIN communication not initialized");
     return;
   }
-  ESP_LOGI(TAG, "%s LIN self-test", enable ? "Starting" : "Stopping");
+  ESP_LOGI(TAG, "%s LIN self-test", enable ? LOG_STR_LITERAL("Starting") : LOG_STR_LITERAL("Stopping"));
   this->lin_comm_->enableSelfTest(enable);
 }
 
@@ -280,10 +284,10 @@ void LinBusComponent::update_response(uint8_t lin_id, const std::vector<uint8_t>
 }
 
 // Statistics getters
-uint32_t LinBusComponent::get_master_requests_sent() const {
+uint32_t LinBusComponent::get_commander_requests_sent() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().master_requests_sent;
+  return this->lin_comm_->getStatistics().commander_requests_sent;
 }
 
 uint32_t LinBusComponent::get_id_requests_answered() const {
@@ -304,10 +308,10 @@ uint32_t LinBusComponent::get_checksum_errors() const {
   return this->lin_comm_->getStatistics().checksum_errors;
 }
 
-uint32_t LinBusComponent::get_master_send_failures() const {
+uint32_t LinBusComponent::get_commander_send_failures() const {
   if (this->lin_comm_ == nullptr)
     return 0;
-  return this->lin_comm_->getStatistics().master_send_failures;
+  return this->lin_comm_->getStatistics().commander_send_failures;
 }
 
 float LinBusComponent::get_bus_load_percent() const {
@@ -322,5 +326,4 @@ float LinBusComponent::get_error_rate_percent() const {
   return this->lin_comm_->getStatistics().error_rate_percent;
 }
 
-}  // namespace linbus
-}  // namespace esphome
+}  // namespace esphome::linbus

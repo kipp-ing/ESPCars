@@ -1,5 +1,4 @@
-#ifndef LIN_COMMUNICATION_H
-#define LIN_COMMUNICATION_H
+#pragma once
 
 // Standard Library Headers
 #include <cstdint>
@@ -12,14 +11,17 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "LinCommon.h"
+#include "lin_common.h"
+#include "lin_protocol_handler.h"
+
+namespace esphome::linbus {
 
 // Forward Declarations
 class LinProtocolHandler;
 class LinSerial;
 
 /**
- * @file LINCommunication.h
+ * @file lin_communication.h
  * @brief Local Interconnect Network (LIN) communication driver
  *
  * This library implements a non-blocking LIN communication driver using a layered,
@@ -32,12 +34,12 @@ class LinSerial;
  *
  * # Operation Modes
  *
- * ## Master Mode
+ * ## Commander Mode
  * - Sends scheduled headers from the UART event task (A5 off-loop tick) — cadence is
  *   main-loop-independent (N2/N8)
  * - Can respond to its own PIDs when response data is set
  *
- * ## Slave Mode
+ * ## Responder Mode
  * - Listens for PIDs on the bus
  * - Responds automatically when a matching PID is detected and response data has been set
  *
@@ -49,9 +51,9 @@ class LinSerial;
  *
  * 1. Create a LINCommunication object with UART port and pins
  * 2. Initialize with desired mode and baud rate
- * 3. For master: Add IDs to the schedule with master_add_id_schedule() — headers then go
+ * 3. For commander: Add IDs to the schedule with commander_add_id_schedule() — headers then go
  *    out from the event task on their own cadence
- * 4. For slave/responder: Set response data with set_response_data()
+ * 4. For responder: Set response data with set_response_data()
  * 5. Call lin_process() regularly in your main loop for the loop-context housekeeping
  *    (self-test evaluation, statistics windows) — the data path does not depend on it
  *
@@ -61,8 +63,6 @@ class LinSerial;
 
 // Core constants (define only if not already defined elsewhere)
 
-#include "LinProtocolHandler.h"
-
 class LINCommunication {
  public:
   LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin, int cs_pin = -1);
@@ -70,12 +70,12 @@ class LINCommunication {
   ~LINCommunication();
 
   bool lin_process();  // Loop-context housekeeping: self-test evaluation + statistics windows.
-                       // The data path (RX decode, response TX, master schedule) runs in the
+                       // The data path (RX decode, response TX, commander schedule) runs in the
                        // UART event task and does not depend on this being called.
 
-  // Master scheduler
-  bool master_add_id_schedule(uint8_t id, uint32_t interval_ms);
-  bool master_remove_id_schedule(uint8_t id);
+  // Commander scheduler
+  bool commander_add_id_schedule(uint8_t id, uint32_t interval_ms);
+  bool commander_remove_id_schedule(uint8_t id);
 
   // Responses
   bool set_response_data(uint8_t id, uint8_t *data, uint8_t data_length, bool enhanced = true,
@@ -96,7 +96,7 @@ class LINCommunication {
   // Debug
   void dumpReceivedPIDsToLog() const;
 
-  // Enable/disable built-in LIN self test (master only). Call before or after init().
+  // Enable/disable built-in LIN self test (commander only). Call before or after init().
   void enableSelfTest(bool enable);
 
   // Statistics (low overhead access to LinProtocolHandler statistics)
@@ -158,4 +158,4 @@ class LINCommunication {
   void selfTestEvaluate();
 };
 
-#endif  // LIN_COMMUNICATION_H
+}  // namespace esphome::linbus

@@ -1,10 +1,10 @@
-# Using `linbus` — LIN master/slave/sniffer in an ESPHome project
+# Using `linbus` — LIN commander/responder/sniffer in an ESPHome project
 
 A practical guide: what the component does, how a project is actually put
 together, and the end-to-end workflow from a wired-up transceiver to
 statistics and frame data flowing into ESPHome. This document only covers the
 *how*; the component has no separate design doc — the C++ sources
-(`LinProtocolHandler.cpp`, `LINCommunication.cpp`) carry the "why" in their
+(`lin_protocol_handler.cpp`, `lin_communication.cpp`) carry the "why" in their
 own comments, and §8 points at the specific ones worth reading.
 
 ## 1. The shape of it
@@ -12,13 +12,17 @@ own comments, and §8 points at the specific ones worth reading.
 Every `linbus:` block is one independent instance — its own UART, its own
 pins, its own state — running in exactly one of three modes:
 
-```
-mode: listener            mode: slave (no responses:)   mode: slave (+ responses:)   mode: master
-──────────────────        ────────────────────────────  ───────────────────────────  ─────────────────────
-watches only, never        watches only — no response     answers a matching PID       drives break+sync+
-transmits a single bit     registered for any PID          with published data          header on its own
-                                                                                          schedule, from boot
-```
+| Mode | Behavior |
+|---|---|
+| `listener` | Watches only; never transmits. |
+| `responder` without `responses:` | Watches only; no response registered for any PID. |
+| `responder` with `responses:` | Answers matching PIDs with published data. |
+| `commander` | Drives break, sync and PID on its own schedule, from boot. |
+
+The role names follow ISO 17987. For one release cycle, the old YAML values
+`master` and `slave` remain accepted as aliases for `commander` and `responder`.
+Validation logs a deprecation warning naming the replacement, then normalizes
+the alias before code generation; both spellings generate identical C++.
 
 There is no built-in signal decoder. `linbus` publishes **bus-level
 statistics** (frame counts, checksum errors, bus load) as sensors and a
@@ -42,7 +46,7 @@ UARTs it has.
    reference part, does) — `linbus` drives it high once at boot and leaves it
    there; there is no runtime sleep control.
 2. **Firmware YAML** — one `linbus:` block per physical segment, in the mode
-   that segment actually needs. **The default mode is `master`** — an
+   that segment actually needs. **The default mode is `commander`** — an
    instance with a `schedule:` starts driving the bus from the moment it
    boots, with no separate enable step (§6). Set `mode: listener` explicitly
    while you're still characterizing a bus you don't own the schedule for.
@@ -106,21 +110,21 @@ Only checksum-valid frames ever reach this stage; there is no
 checksum-valid/invalid flag exposed to the automation because an invalid one
 never gets this far.
 
-### 3.3 Answer as a slave
+### 3.3 Answer as a responder
 
 ```yaml
 linbus:
   id: lin1
   tx_pin: GPIO17
   rx_pin: GPIO16
-  mode: slave
+  mode: responder
   responses:
     - lin_id: 0x22
       data: [0x01, 0x02, 0x03, 0x04]
       checksum: enhanced   # default; classic is the other option
 ```
 
-A slave only ever answers an id it has a `responses:` entry for; every other
+A responder only ever answers an id it has a `responses:` entry for; every other
 poll on the wire is silently not its problem. For a value that changes at
 runtime, publish the static entry above (it's what gives the id its length
 and checksum mode) and update it from an automation:
@@ -141,27 +145,27 @@ one and defaults to enhanced. There is no `linbus.send` — a `linbus`
 instance can only publish response data for an id it's declared, never fire
 an arbitrary one-off frame.
 
-### 3.4 Drive the bus as a master
+### 3.4 Drive the bus as a commander
 
 ```yaml
 linbus:
   id: lin1
   tx_pin: GPIO17
   rx_pin: GPIO16
-  mode: master           # drives break+sync+header from boot — see §6
+  mode: commander        # drives break+sync+header from boot — see §6
   schedule:
     - lin_id: 0x22
       interval: 100ms
       length: 4
     - lin_id: 0x30
       interval: 50ms
-  responses:               # a master can also answer ids in its own schedule
+  responses:               # a commander can also answer ids in its own schedule
     - lin_id: 0x30
       data: [0xAA]
 ```
 
 A `schedule:` entry only declares an id and a polling `interval:` (≥1 ms) and
-optionally `length:`; it does not declare a checksum. The checksum a master
+optionally `length:`; it does not declare a checksum. The checksum a commander
 expects back for that id's response is resolved at runtime — from a matching
 `responses:`/`rx_ids:` entry if one exists, otherwise enhanced with a
 classic-mode retry on mismatch (§5's `checksum_fallback` counter is exactly
@@ -177,7 +181,7 @@ this path, and it's expected, not an error, on a bus that mixes LIN 1.x and
 [linbus:XXX]:   TX Pin: GPIO17
 [linbus:XXX]:   RX Pin: GPIO16
 [linbus:XXX]:   CS Pin: GPIO18
-[linbus:XXX]:   Mode: Master
+[linbus:XXX]:   Mode: Commander
 [linbus:XXX]:   Self-Test: disabled
 ```
 
@@ -193,7 +197,7 @@ Every 10 s:
 
 ```
 [I][linbus:XXX]: === LIN Bus Statistics (10s window | lifetime) ===
-[I][linbus:XXX]: Master Requests: 41 | 1230
+[I][linbus:XXX]: Commander Requests: 41 | 1230
 [I][linbus:XXX]: ID Answers: 39 | 1180
 [I][linbus:XXX]: Data Bytes RX: 156 | 4720
 [I][linbus:XXX]: Frames RX: 39 | 1180
@@ -213,7 +217,7 @@ having been clean. `sensor: platform: linbus` entities publish the **lifetime
 totals** as `TOTAL_INCREASING`, matching what Home Assistant expects from a
 counter — never the windowed value.
 
-`self_test: true` (master-mode only) is a real bus-driving loopback test, not
+`self_test: true` (commander-mode only) is a real bus-driving loopback test, not
 a software check — it schedules nine fixed ids against itself and needs a
 live transceiver and pull-up looped back to pass. Toggle it at runtime with
 `linbus.run_self_test: {id: lin1, enable: true}`; it publishes through
@@ -234,22 +238,22 @@ packages:
 ```
 
 `tests/build/linbus/common_dual.yaml` is the worked example for **two**
-segments on one chip — a slave on `UART_NUM_1` answering a partner's poll,
+segments on one chip — a responder on `UART_NUM_1` answering a partner's poll,
 and a listener on `UART_NUM_2` sniffing the same wire — proving two instances
 stay independently addressable (`linbus_id:` on every sensor/action). Two
 instances sharing a `uart_port` or a physical pin is a config-time error
 (§5), not a runtime surprise.
 
 `tests/hil/mr-purple-lin.yaml` is a real two-transceiver board bring-up: one
-LIN0 slave answering a partner's poll, one LIN1 listener on the same wire.
+LIN0 responder answering a partner's poll, one LIN1 listener on the same wire.
 Its sibling file `tests/hil/mr-purple-partner-lin.yaml` records a genuinely
 useful cross-bus lesson worth generalizing: on a board that also runs
 `can_gateway`, a dead/unterminated CAN segment is not quiet — with nobody to
 ACK, every beacon retransmits forever and ESP-IDF's TWAI error interrupt
 fires continuously (~4750 events/s measured on a C6). That storm starved the
-LIN master's own scheduling task and stalled its schedule dead at 198
+LIN commander's own scheduling task and stalled its schedule dead at 198
 requests — "a broken CAN segment silently invalidates a healthy LIN one." If
-a master's `Master Requests` count stops climbing on a board that also has
+a commander's `Commander Requests` count stops climbing on a board that also has
 CAN, check the CAN side before assuming the LIN wiring is at fault.
 
 ## 5. Config reference
@@ -263,15 +267,15 @@ CAN, check the CAN side before assuming the LIN wiring is at fault.
 | `cs_pin` | optional; transceiver enable/sleep, driven high once at `setup()` and left there |
 | `baud_rate` | default `19200`; `1000`–`20000` |
 | `uart_port` | default `UART_NUM_1`; one of `UART_NUM_0`/`UART_NUM_1`/`UART_NUM_2` — each instance needs its own, checked at config time |
-| `mode` | default `master`; `master` / `slave` / `listener` |
-| `schedule` | list, max 16, unique `lin_id`; **master only** |
+| `mode` | default `commander`; `commander` / `responder` / `listener` |
+| `schedule` | list, max 16, unique `lin_id`; **commander only** |
 | `responses` | list, max 16, unique `lin_id`; **not valid with `mode: listener`** |
 | `rx_ids` | list, max 32, unique `lin_id` |
-| `self_test` | default `false`; **master only** — a real bus-driving loopback test, see §3.6 |
+| `self_test` | default `false`; **commander only** — a real bus-driving loopback test, see §3.6 |
 | `on_frame` | automation, fires per frame update — see §3.2 |
 | `on_error` | automation, fires on a transport error |
 
-### `schedule:` entries (master)
+### `schedule:` entries (commander)
 
 | key | meaning |
 |---|---|
@@ -311,9 +315,13 @@ All keys optional, all tied to a parent via `linbus_id:`. Every value is the
 **lifetime total** (`TOTAL_INCREASING`), not the windowed count from §3.6's
 log block.
 
+`master_requests` remains a deprecated alias for `commander_requests` for one
+release cycle. Its warning names the replacement; the sensor configuration
+and generated code are identical. Specifying both keys is an error.
+
 | key | meaning |
 |---|---|
-| `master_requests` | headers this instance sent (master only) |
+| `commander_requests` | headers this instance sent (commander only) |
 | `id_requests_answered` | polls this instance answered |
 | `data_bytes_received` | payload bytes received |
 | `frames_received` | checksum-valid frames received |
@@ -324,9 +332,9 @@ log block.
 | `framing_errors` | UART framing/parity/overflow errors |
 | `collisions` | a self-transmitted byte didn't echo back as sent — a competing publisher answered the same id |
 | `frames_coalesced` | `on_frame:` update-count jumps by more than one — the automation is missing intermediate frames |
-| `send_failures` | genuine master TX errors |
+| `send_failures` | genuine commander TX errors |
 | `bus_load` | `%`, estimated from bytes-on-wire vs. `baud_rate` over the window (assumes 8N1) |
-| `error_rate` | `%`, `(send_failures + pid_errors + checksum_errors) / (master_requests + id_answers)` |
+| `error_rate` | `%`, `(send_failures + pid_errors + checksum_errors) / (commander_requests + id_answers)` |
 
 ### `binary_sensor: platform: linbus`
 
@@ -337,9 +345,9 @@ log block.
 ## 6. Safety model
 
 **There is no opt-in gate for transmission** — nothing like `uds`'s
-`allow_active_services`. `mode: master` defaults, and an instance with a
+`allow_active_services`. `mode: commander` defaults, and an instance with a
 `schedule:` starts sending break+sync+header on its own cadence the moment
-`setup()` runs, with no separate enable action. `mode: slave` only
+`setup()` runs, with no separate enable action. `mode: responder` only
 transmits an answer for an id it has a `responses:` entry for; `mode:
 listener` never transmits at all — that check is unconditional in the C++,
 not a config option that could be silently widened.
@@ -350,7 +358,7 @@ so treat it with the same caution.
 
 Follow the repo-wide rule (`README.md`, `CLAUDE.md`): start a bus you don't
 fully understand at `mode: listener`, characterize it with `rx_ids:` /
-`on_frame:`, and only move to `mode: slave` or `mode: master` once you know
+`on_frame:`, and only move to `mode: responder` or `mode: commander` once you know
 what you're answering or scheduling. Confirm what's actually flashed from the
 `Mode:` line in `dump_config` and from the request/failure counters in §3.6
 — not from reading the YAML, since a stale build can outlive a YAML edit.
@@ -361,35 +369,35 @@ what you're answering or scheduling. Confirm what's actually flashed from the
 |---|---|
 | `uart_port N is already used by linbus '<id>'` | two instances on one chip share a UART — give one a different `uart_port` |
 | `GPIOn is already used as <key> by linbus '<id>'` | two instances share a physical pin |
-| `linbus schedule is only valid with mode: master` | `schedule:` set on a `slave`/`listener` instance |
+| `linbus schedule is only valid with mode: commander` | `schedule:` set on a `responder`/`listener` instance |
 | `linbus responses are not valid with mode: listener` | `responses:` set on a `listener` instance |
-| `linbus self_test requires mode: master` | `self_test: true` on a `slave`/`listener` instance |
+| `linbus self_test requires mode: commander` | `self_test: true` on a `responder`/`listener` instance |
 | `each rx_ids entry needs at least one of 'length' or 'checksum'` | a bare `rx_ids:` entry with only `lin_id` |
 | `duplicate lin_id N in <schedule/responses/rx_ids>` | the same id declared twice in one list |
 | `interval must be at least 1ms` | a `schedule:` entry's `interval` rounded to 0 |
 | `dump_config` doesn't show my `schedule:`/`responses:`/`rx_ids:` | expected — §3.5; read the statistics block instead to confirm behavior |
 | `checksum_fallback` climbing, `checksum_errors` not | expected on a bus mixing LIN 1.x (classic) and 2.x (enhanced) nodes — not a defect |
 | `checksum_errors` climbing | a real defect — both checksum modes failed for that frame; check wiring/termination and bus load |
-| `collisions` climbing | another node is answering the same id — check for a duplicate slave `responses:` entry, on this board or another |
+| `collisions` climbing | another node is answering the same id — check for a duplicate responder `responses:` entry, on this board or another |
 | `frames_coalesced` climbing | `on_frame:` automations (or the main loop) can't keep up with frame arrival — do less work per automation, or read the id via `sensor:`/manual polling instead |
-| `send_failures` climbing | genuine master TX errors — bus wiring, termination, or a segment with no responder |
-| `self_test_pass` never goes true | needs `mode: master` **and** a real transceiver looped back with a pull-up — it is not a software-only check |
-| a master's request count stops climbing on a board that also runs `can_gateway` | check the CAN side first — a bus-off CAN segment can flood the TWAI driver with error events fast enough to stall the LIN master's own task (§4) |
+| `send_failures` climbing | genuine commander TX errors — bus wiring, termination, or a segment with no responder |
+| `self_test_pass` never goes true | needs `mode: commander` **and** a real transceiver looped back with a pull-up — it is not a software-only check |
+| a commander's request count stops climbing on a board that also runs `can_gateway` | check the CAN side first — a bus-off CAN segment can flood the TWAI driver with error events fast enough to stall the LIN commander's own task (§4) |
 | `Unknown UART port: ...` warning, falls back to `UART_NUM_1` | `uart_port` named a peripheral this chip wasn't built with (e.g. `UART_NUM_2` on a two-UART target) — passed config validation but has no matching case at runtime; use a port the target actually has |
 
 ## 8. Going deeper
 
-- `components/linbus/LinProtocolHandler.cpp` — the checksum algorithm
+- `components/linbus/lin_protocol_handler.cpp` — the checksum algorithm
   (`calculateChecksum`), the classic/enhanced runtime fallback, and why
   diagnostic ids `0x3C`/`0x3D` are always classic.
-- `components/linbus/LINCommunication.cpp` — schedule execution, response
+- `components/linbus/lin_communication.cpp` — schedule execution, response
   registration, and the self-test's fixed nine-id loopback table.
 - `components/linbus/linbus.cpp` — `dump_config()` and the 10 s statistics
   block, if you're chasing an exact log format.
-- `tests/build/linbus/common.yaml` — a single master instance exercising
+- `tests/build/linbus/common.yaml` — a single commander instance exercising
   every config key (`schedule`, `responses`, `rx_ids`, `on_frame`,
   `on_error`, both actions, every sensor).
-- `tests/build/linbus/common_dual.yaml` — two independent instances (a slave
+- `tests/build/linbus/common_dual.yaml` — two independent instances (a responder
   and a listener) on one chip, the worked `packages:`-style example for §4.
 - `tests/hil/mr-purple-lin.yaml` — a real two-transceiver board bring-up,
   including the CAN/LIN cross-talk lesson cited in §4.
