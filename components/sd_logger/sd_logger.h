@@ -51,8 +51,7 @@ extern "C" {
 #include "sdmmc_cmd.h"
 }
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 #ifdef USE_SWITCH
 class DebugWriterFreezeSwitch;
@@ -961,5 +960,4 @@ template<typename... Ts> class ConfineFormatAction : public Action<Ts...> {
   SdLogger *parent_;
 };
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

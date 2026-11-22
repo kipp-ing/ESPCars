@@ -16,8 +16,7 @@
 
 #include "log_format.h"
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// How good a stated time is. Ordered: a greater value is a better basis, and a later line only
 /// overrides an earlier one of the same or a worse basis (spec §4, reading rule).
@@ -486,5 +485,4 @@ inline bool clock_restate_due(uint32_t bytes_since, uint64_t now_us, uint64_t la
          (now_us >= last_us && now_us - last_us >= SD_LOG_CLOCK_RESTATE_US);
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

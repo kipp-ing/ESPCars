@@ -20,8 +20,7 @@
 #include "clock_basis.h"
 #include "log_format.h"
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// The `#close` reason the boot writes for a torn file. Never written by the writer itself.
 static const char SD_LOG_CLOSE_RECOVERED[] = "recovered";
@@ -78,10 +77,11 @@ class TornTailScanner {
       }
       if (this->skipping_)
         continue;
-      if (this->len_ < sizeof(this->head_))
+      if (this->len_ < sizeof(this->head_)) {
         this->head_[this->len_] = c;
-      else
+      } else {
         this->overlong_ = true;
+      }
       this->len_++;
     }
   }
@@ -232,5 +232,4 @@ template<typename Io> SealResult seal_torn_tail(Io &io, const TornTailScanner &t
   return SealResult::SEALED;
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

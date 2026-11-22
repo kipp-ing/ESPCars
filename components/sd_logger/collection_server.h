@@ -52,8 +52,7 @@
 
 #include <esp_http_server.h>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 class SdLogger;
 
@@ -119,14 +118,14 @@ class CollectionServer {
 
  protected:
   // The eight routes. `user_ctx` carries the instance, so these stay ordinary members.
-  static esp_err_t index_route_(httpd_req_t *req);
-  static esp_err_t chunk_route_(httpd_req_t *req);
-  static esp_err_t done_route_(httpd_req_t *req);
-  static esp_err_t status_route_(httpd_req_t *req);
-  static esp_err_t fsdebug_route_(httpd_req_t *req);
-  static esp_err_t raw_route_(httpd_req_t *req);
-  static esp_err_t chain_route_(httpd_req_t *req);
-  static esp_err_t spitrace_route_(httpd_req_t *req);
+  static esp_err_t index_route(httpd_req_t *req);
+  static esp_err_t chunk_route(httpd_req_t *req);
+  static esp_err_t done_route(httpd_req_t *req);
+  static esp_err_t status_route(httpd_req_t *req);
+  static esp_err_t fsdebug_route(httpd_req_t *req);
+  static esp_err_t raw_route(httpd_req_t *req);
+  static esp_err_t chain_route(httpd_req_t *req);
+  static esp_err_t spitrace_route(httpd_req_t *req);
 
   esp_err_t serve_index_(httpd_req_t *req);
   esp_err_t serve_chunk_(httpd_req_t *req);
@@ -155,7 +154,6 @@ class CollectionServer {
   char device_[40]{};
 };
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger
 
 #endif  // USE_SD_LOGGER_COLLECTION_SERVER

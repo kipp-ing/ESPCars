@@ -29,8 +29,7 @@
 
 #include <cstdint>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 /// MOSI idle level. Every byte clocked purely to make the card talk is this one.
 static const uint8_t SD_SPI_IDLE_BYTE = 0xFF;
@@ -163,8 +162,8 @@ inline uint8_t sd_send_command(CardResetIo &io, uint8_t index, uint32_t arg) {
   frame[2] = static_cast<uint8_t>(arg >> 16);
   frame[3] = static_cast<uint8_t>(arg >> 8);
   frame[4] = static_cast<uint8_t>(arg);
-  for (uint8_t i = 0; i < 5; i++)
-    io.xfer(frame[i]);
+  for (uint8_t byte : frame)
+    io.xfer(byte);
   io.xfer(sd_crc7(frame, 5));
 
   for (uint8_t i = 0; i < 16; i++) {
@@ -348,8 +347,8 @@ inline bool card_probe_ready(CardResetIo &io, CardReadyResult *out) {
     uint8_t echo[4] = {0, 0, 0, 0};
     const uint8_t r1 = sd_send_command(io, 8, 0x000001AAUL);
     if (r1 != 0xFF && (r1 & 0x04) == 0) {
-      for (uint8_t i = 0; i < 4; i++)
-        echo[i] = io.xfer(SD_SPI_IDLE_BYTE);
+      for (uint8_t &byte : echo)
+        byte = io.xfer(SD_SPI_IDLE_BYTE);
       r.cmd8_echoed = (echo[2] == 0x01 && echo[3] == 0xAA);
     }
   }
@@ -441,5 +440,4 @@ inline const char *card_reset_step_str(CardResetStep step) {
   return "?";
 }
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger

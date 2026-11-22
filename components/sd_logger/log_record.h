@@ -2,8 +2,7 @@
 
 #include <cstdint>
 
-namespace esphome {
-namespace sd_logger {
+namespace esphome::sd_logger {
 
 // One captured frame. Packed to ~20 bytes so the RAM ring stays small: a
 // 500 ms SD stall at 60 % of 500 kbps (~1050 frames) fits in ~21 KB.
@@ -27,5 +26,4 @@ static const uint8_t REC_FLAG_TX = 1 << 2;
 static const uint8_t REC_FLAG_SHED = 1 << 3;
 static const uint8_t REC_FLAG_TRUNCATED = 1 << 7;
 
-}  // namespace sd_logger
-}  // namespace esphome
+}  // namespace esphome::sd_logger
