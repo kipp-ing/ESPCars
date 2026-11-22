@@ -160,7 +160,7 @@ void IsoTpProtocol::dump_config() {
 }
 
 #ifdef USE_SENSOR
-void IsoTpDiagnostics::publish_changed_(sensor::Sensor *s, uint32_t value, uint32_t &last) {
+void IsoTpDiagnostics::publish_changed(sensor::Sensor *s, uint32_t value, uint32_t &last) {
   if (s == nullptr || value == last)
     return;
   last = value;
@@ -169,10 +169,10 @@ void IsoTpDiagnostics::publish_changed_(sensor::Sensor *s, uint32_t value, uint3
 
 void IsoTpDiagnostics::update() {
   IsoTpProtocol *p = this->parent_;
-  publish_changed_(this->messages_sent_sensor_, p->messages_sent(), this->last_messages_sent_);
-  publish_changed_(this->messages_received_sensor_, p->messages_received(), this->last_messages_received_);
-  publish_changed_(this->transfers_failed_sensor_, p->transfers_failed(), this->last_transfers_failed_);
-  publish_changed_(this->frames_ignored_sensor_, p->frames_ignored(), this->last_frames_ignored_);
+  publish_changed(this->messages_sent_sensor_, p->messages_sent(), this->last_messages_sent_);
+  publish_changed(this->messages_received_sensor_, p->messages_received(), this->last_messages_received_);
+  publish_changed(this->transfers_failed_sensor_, p->transfers_failed(), this->last_transfers_failed_);
+  publish_changed(this->frames_ignored_sensor_, p->frames_ignored(), this->last_frames_ignored_);
 }
 
 void IsoTpDiagnostics::dump_config() {

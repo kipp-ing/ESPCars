@@ -226,21 +226,21 @@ class Catalog {
     this->index_count_ = load_u32(base + 0x48);
     // §2 step 3: every table inside [0x50, total_size), 4-aligned. All arithmetic in 64 bits so a
     // hostile offset cannot wrap its way past the check.
-    if (!table_ok_(this->ecus_off_, this->ecu_count_, ECU_RECORD_SIZE, total))
+    if (!table_ok(this->ecus_off_, this->ecu_count_, ECU_RECORD_SIZE, total))
       return false;
-    if (!table_ok_(this->groups_off_, this->group_count_, GROUP_RECORD_SIZE, total))
+    if (!table_ok(this->groups_off_, this->group_count_, GROUP_RECORD_SIZE, total))
       return false;
-    if (!table_ok_(this->fields_off_, this->field_count_, FIELD_RECORD_SIZE, total))
+    if (!table_ok(this->fields_off_, this->field_count_, FIELD_RECORD_SIZE, total))
       return false;
-    if (!table_ok_(this->scales_off_, this->scale_count_, SCALE_RECORD_SIZE, total))
+    if (!table_ok(this->scales_off_, this->scale_count_, SCALE_RECORD_SIZE, total))
       return false;
-    if (!table_ok_(this->index_off_, this->index_count_, INDEX_RECORD_SIZE, total))
+    if (!table_ok(this->index_off_, this->index_count_, INDEX_RECORD_SIZE, total))
       return false;
     // §2 step 4: both pools inside [0x50, total_size); the string pool NUL-framed at both ends,
     // which is the invariant that makes every in-pool ref a safe `const char *` without a length.
-    if (!range_ok_(this->reqbytes_off_, this->reqbytes_len_, total))
+    if (!range_ok(this->reqbytes_off_, this->reqbytes_len_, total))
       return false;
-    if (!range_ok_(this->strings_off_, this->strings_len_, total))
+    if (!range_ok(this->strings_off_, this->strings_len_, total))
       return false;
     if (this->strings_len_ == 0)
       return false;  // cannot hold the mandatory leading and trailing NUL
@@ -413,7 +413,7 @@ class Catalog {
   /// §2 step 3 for one table. An empty table is accepted whatever its offset says: the range is
   /// empty, the accessors never dereference it, and rejecting a compiler's choice of offset for
   /// zero records would be strictness without safety.
-  static bool table_ok_(uint32_t off, uint32_t count, size_t record_size, uint32_t total) {
+  static bool table_ok(uint32_t off, uint32_t count, size_t record_size, uint32_t total) {
     if (count == 0)
       return true;
     if (off % 4 != 0)
@@ -424,7 +424,7 @@ class Catalog {
 
   /// §2 step 4 for one pool. Pools are byte pools — no alignment requirement in the spec, none
   /// imposed here.
-  static bool range_ok_(uint32_t off, uint32_t len, uint32_t total) {
+  static bool range_ok(uint32_t off, uint32_t len, uint32_t total) {
     if (len == 0)
       return true;
     return off >= CATALOG_MIN_SIZE && static_cast<uint64_t>(off) + len <= total;

@@ -182,7 +182,7 @@ class IsoTpDiagnostics : public PollingComponent, public Parented<IsoTpProtocol>
  protected:
   /// Publish only on change: these counters are mostly idle, and a diagnostic session should not
   /// generate API traffic in proportion to its poll rate.
-  static void publish_changed_(sensor::Sensor *s, uint32_t value, uint32_t &last);
+  static void publish_changed(sensor::Sensor *s, uint32_t value, uint32_t &last);
 
   sensor::Sensor *messages_sent_sensor_{nullptr};
   sensor::Sensor *messages_received_sensor_{nullptr};

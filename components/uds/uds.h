@@ -285,7 +285,7 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   bool find_group_(const char *name, uint16_t *out) const;
   bool enqueue_(uint16_t group_index);
 
-  static void copy_bounded_(char *dst, size_t cap, const char *src);
+  static void copy_bounded(char *dst, size_t cap, const char *src);
 
   isotp::IsoTpProtocol *isotp_;
 
@@ -387,7 +387,7 @@ class UdsDiagnostics : public PollingComponent, public Parented<UdsHub> {
  protected:
   /// Publish only on change: these counters are mostly idle, and a diagnostic session should not
   /// generate API traffic in proportion to its poll rate.
-  static void publish_changed_(sensor::Sensor *s, uint32_t value, uint32_t &last);
+  static void publish_changed(sensor::Sensor *s, uint32_t value, uint32_t &last);
 
   sensor::Sensor *requests_sent_sensor_{nullptr};
   sensor::Sensor *responses_accepted_sensor_{nullptr};
