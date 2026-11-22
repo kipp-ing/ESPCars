@@ -40,8 +40,9 @@ for y in tests/build/*/test*.yaml; do
   echo "VALID $y"
 done
 
-# P1a stays advisory until P2/P3 clean the baseline. CI uses this same runner
-# with requirements_lint.txt. Fixers operate on temporary copies only.
+# Upstream lint stays advisory until the cleanup phases clear the baseline.
+# clang-tidy skips on a fresh clone; compiled local builds are analyzed.
+# CI uses this runner with requirements_lint.txt. Fixers use temporary copies.
 echo "== upstream lint (report-only; pins: requirements_lint.txt) =="
 "$PY" script/lint_report.py --report-only --summary
 echo "For details, run: .venv/bin/python script/lint_report.py"
