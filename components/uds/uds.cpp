@@ -569,7 +569,7 @@ void UdsHub::decode_text_(UdsBinding &b, const FieldView &f, const uint8_t *resp
   } else {
     const Decoded d = decode_numeric(this->catalog_, f, resp, resp_len, b.element);
     if (d.text != nullptr)
-      copy_bounded_(b.text, UDS_TEXT_SLOT_CAP, d.text);
+      copy_bounded(b.text, UDS_TEXT_SLOT_CAP, d.text);
     // A matched INVALID row still carries its text ("Signal not available"), and for a text entity
     // that text *is* the honest state — so it publishes, while the decode still counts as
     // unmatched for the diagnostics counter.
@@ -652,7 +652,7 @@ void UdsHub::report_group_error_(uint16_t group_index, const char *what, uint8_t
   this->report_error_(msg, nrc);
 }
 
-void UdsHub::copy_bounded_(char *dst, size_t cap, const char *src) {
+void UdsHub::copy_bounded(char *dst, size_t cap, const char *src) {
   size_t i = 0;
   for (; i + 1 < cap && src[i] != '\0'; i++)
     dst[i] = src[i];
@@ -806,7 +806,7 @@ void UdsHub::dump_config() {
 }
 
 #ifdef USE_SENSOR
-void UdsDiagnostics::publish_changed_(sensor::Sensor *s, uint32_t value, uint32_t &last) {
+void UdsDiagnostics::publish_changed(sensor::Sensor *s, uint32_t value, uint32_t &last) {
   if (s == nullptr || value == last)
     return;
   last = value;
@@ -815,15 +815,15 @@ void UdsDiagnostics::publish_changed_(sensor::Sensor *s, uint32_t value, uint32_
 
 void UdsDiagnostics::update() {
   UdsHub *p = this->parent_;
-  publish_changed_(this->requests_sent_sensor_, p->requests_sent(), this->last_requests_sent_);
-  publish_changed_(this->responses_accepted_sensor_, p->responses_accepted(), this->last_responses_accepted_);
-  publish_changed_(this->timeouts_sensor_, p->timeouts(), this->last_timeouts_);
-  publish_changed_(this->negative_responses_sensor_, p->negative_responses(), this->last_negative_responses_);
-  publish_changed_(this->decode_unmatched_sensor_, p->decode_unmatched(), this->last_decode_unmatched_);
-  publish_changed_(this->groups_suspended_sensor_, p->groups_suspended(), this->last_groups_suspended_);
-  publish_changed_(this->partial_responses_sensor_, p->partial_responses(), this->last_partial_responses_);
-  publish_changed_(this->fields_uncovered_sensor_, p->fields_uncovered(), this->last_fields_uncovered_);
-  publish_changed_(this->last_nrc_sensor_, p->last_nrc(), this->last_last_nrc_);
+  publish_changed(this->requests_sent_sensor_, p->requests_sent(), this->last_requests_sent_);
+  publish_changed(this->responses_accepted_sensor_, p->responses_accepted(), this->last_responses_accepted_);
+  publish_changed(this->timeouts_sensor_, p->timeouts(), this->last_timeouts_);
+  publish_changed(this->negative_responses_sensor_, p->negative_responses(), this->last_negative_responses_);
+  publish_changed(this->decode_unmatched_sensor_, p->decode_unmatched(), this->last_decode_unmatched_);
+  publish_changed(this->groups_suspended_sensor_, p->groups_suspended(), this->last_groups_suspended_);
+  publish_changed(this->partial_responses_sensor_, p->partial_responses(), this->last_partial_responses_);
+  publish_changed(this->fields_uncovered_sensor_, p->fields_uncovered(), this->last_fields_uncovered_);
+  publish_changed(this->last_nrc_sensor_, p->last_nrc(), this->last_last_nrc_);
 }
 
 void UdsDiagnostics::dump_config() {

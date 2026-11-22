@@ -229,7 +229,6 @@ inline const char *return_code_name(uint8_t code) {
     case 0x33:
       return "access denied";
     case 0x34:
-      return "overload";
     case 0x35:
       return "overload";
     default:
