@@ -357,6 +357,8 @@ def test_partial_builds_analyze_available_targets(tree, monkeypatch, capsys, str
         return {finding}
 
     monkeypatch.setattr(tidy, "run_tidy", run)
+    summary_file = tree / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
     args = ["missing.yaml", "ready.yaml", "--report-only", "--summary"]
     if strict:
         args.append("--strict")
@@ -369,6 +371,9 @@ def test_partial_builds_analyze_available_targets(tree, monkeypatch, capsys, str
     assert "  TOTAL: 1\n" in output
     assert "targets analyzed (1/2): ready.yaml" in output
     assert "INCOMPLETE" in output
+    content = summary_file.read_text(encoding="utf-8")
+    assert "targets analyzed (1/2): ready.yaml" in content
+    assert "INCOMPLETE" in content
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -392,6 +397,22 @@ def test_empty_database_is_an_error(tree):
     db.write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match=r"no component C\+\+ translation units"):
         tidy.prepare_jobs(db, tree / "temp", "tests/build/demo/test.yaml")
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_invalid_database_is_never_skipped(tree, monkeypatch, capsys, strict):
+    dbs = {name: database(tree, name) for name in ("ready", "invalid")}
+    dbs["invalid"].write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(tidy, "locate_database", dbs.__getitem__)
+    monkeypatch.setattr(
+        tidy, "run_tidy", lambda *args: pytest.fail("preparation failed")
+    )
+    args = ["ready", "invalid", "--report-only", *(["--strict"] if strict else [])]
+    assert tidy.main(args) == 2
+    output = capsys.readouterr().out
+    assert "no component C++ translation units" in output
+    assert "SKIP" not in output
+    assert "targets analyzed (0/2): (none)" in output
 
 
 def test_ci_targets_and_nonblocking_wiring(capsys):

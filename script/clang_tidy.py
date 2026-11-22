@@ -523,6 +523,7 @@ def main(argv=None):
         executable = str(Path(sys.executable).parent / "clang-tidy")
         with tempfile.TemporaryDirectory(prefix="espcars-tidy-") as temporary:
             jobs = []
+            prepared = []
             for index, target in enumerate(args.targets):
                 directory = Path(temporary) / str(index)
                 directory.mkdir()
@@ -537,9 +538,10 @@ def main(argv=None):
                     else:
                         print(f"SKIP [clang-tidy]: {message}")
                     continue
-                analyzed.append(target)
+                prepared.append(target)
                 components.update(active)
                 jobs.extend(target_jobs)
+            analyzed = prepared
             if not args.summary:
                 print(
                     f"clang-tidy {actual}: {len(jobs)} TUs (including {len(analyzed)} header TUs), {args.jobs} workers",

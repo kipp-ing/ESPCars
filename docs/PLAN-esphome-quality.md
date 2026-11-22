@@ -188,8 +188,9 @@ uses divergent repo/build files to verify both current headers and the generated
 core headers/defines, without compiling firmware or modifying the build copies.
 
 Existing C++ source/header edits do not require refreshing copies. The runner
-skips the target with its `esphome compile` command (fails with `--strict`) if any active component's
-C/C++ file is absent from its build copy (including new headers/TUs), generated
+skips the target with its `esphome compile` command (fails with `--strict`) if
+any active component's C/C++ file is absent from its build copy (including new
+headers/TUs), generated
 `src/esphome/core/defines.h` is missing, or its timestamp predates an active
 component's `__init__.py`. Header-only dependencies are checked too. Python and
 assets are not build-copyable C++ files; YAML/codegen/define changes still need
@@ -249,8 +250,8 @@ build exists. With partial local builds, available targets are analyzed; each
 missing or stale target gets a SKIP line with its reason and compile command.
 Summaries list the analyzed targets and mark incomplete counts as partial.
 The separate `clang-tidy (report-only)` CI job uses `--strict` to treat missing
-or stale builds as tool errors and compiles these same seven
-configs, caches native ESP-IDF/ccache as well as PlatformIO, and writes per-check
+or stale builds as tool errors, compiles these same seven configs, caches native
+ESP-IDF/ccache as well as PlatformIO, and writes per-check
 and per-component tables to the step summary. It is absent from Required checks.
 Tool/compiler errors fail even in report-only mode. The P1a tool counts above
 remain unchanged after adding this infrastructure.
