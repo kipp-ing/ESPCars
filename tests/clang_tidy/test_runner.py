@@ -1,5 +1,7 @@
 """Exercise the runner with fake CMake databases and fake clang-tidy output."""
 
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -331,28 +333,61 @@ def test_cli_counts_exit_codes_and_summary(
     assert ("INCOMPLETE" in content) == (state == "error")
 
 
-def test_missing_build_error_names_compile_command(tree, monkeypatch, capsys):
+@pytest.mark.parametrize("strict", [False, True])
+def test_partial_builds_analyze_available_targets(tree, monkeypatch, capsys, strict):
     from esphome import config
     from esphome.core import CORE
 
+    db = database(tree)
+
     def read_config(*args):
-        CORE.build_path = str(tree / "not-built")
+        CORE.build_path = str(
+            db.parent.parent
+            if CORE.config_path.name == "ready.yaml"
+            else tree / "not-built"
+        )
         return {}
 
     monkeypatch.setattr(config, "read_config", read_config)
-    assert tidy.main(["tests/build/demo/test.yaml", "--report-only"]) == 2
-    assert "run: esphome compile tests/build/demo/test.yaml" in capsys.readouterr().out
+    finding = tidy.Finding("components/demo/demo.cpp", 2, 1, "check-a", "details")
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        return {finding}
+
+    monkeypatch.setattr(tidy, "run_tidy", run)
+    summary_file = tree / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    args = ["missing.yaml", "ready.yaml", "--report-only", "--summary"]
+    if strict:
+        args.append("--strict")
+    assert tidy.main(args) == (2 if strict else 0)
+    assert len(calls) == 2
+    output = capsys.readouterr().out
+    assert "run: esphome compile missing.yaml" in output
+    assert ("SKIP [clang-tidy]: missing.yaml:" in output) == (not strict)
+    assert f"  tool errors: {int(strict)}\n" in output
+    assert "  TOTAL: 1\n" in output
+    assert "targets analyzed (1/2): ready.yaml" in output
+    assert "INCOMPLETE" in output
+    content = summary_file.read_text(encoding="utf-8")
+    assert "targets analyzed (1/2): ready.yaml" in content
+    assert "INCOMPLETE" in content
 
 
+@pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("installed", [False, True])
-def test_missing_or_wrong_version_is_a_tool_error(tree, monkeypatch, capsys, installed):
+def test_missing_or_wrong_version_is_a_tool_error(
+    tree, monkeypatch, capsys, installed, strict
+):
     def wrong_version(package):
         if not installed:
             raise tidy.PackageNotFoundError(package)
         return "22.0"
 
     monkeypatch.setattr(tidy, "version", wrong_version)
-    assert tidy.main(["--report-only"]) == 2
+    assert tidy.main(["--report-only", *(["--strict"] if strict else [])]) == 2
     expected = "expected 23.1.4, found 22.0" if installed else "No package metadata"
     assert expected in capsys.readouterr().out
 
@@ -362,6 +397,22 @@ def test_empty_database_is_an_error(tree):
     db.write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match=r"no component C\+\+ translation units"):
         tidy.prepare_jobs(db, tree / "temp", "tests/build/demo/test.yaml")
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_invalid_database_is_never_skipped(tree, monkeypatch, capsys, strict):
+    dbs = {name: database(tree, name) for name in ("ready", "invalid")}
+    dbs["invalid"].write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(tidy, "locate_database", dbs.__getitem__)
+    monkeypatch.setattr(
+        tidy, "run_tidy", lambda *args: pytest.fail("preparation failed")
+    )
+    args = ["ready", "invalid", "--report-only", *(["--strict"] if strict else [])]
+    assert tidy.main(args) == 2
+    output = capsys.readouterr().out
+    assert "no component C++ translation units" in output
+    assert "SKIP" not in output
+    assert "targets analyzed (0/2): (none)" in output
 
 
 def test_ci_targets_and_nonblocking_wiring(capsys):
@@ -378,7 +429,7 @@ def test_ci_targets_and_nonblocking_wiring(capsys):
     runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "script/clang_tidy.py --list-targets" in runs
     assert 'esphome compile "$config"' in runs
-    assert "python script/clang_tidy.py --report-only" in runs
+    assert "python script/clang_tidy.py --report-only --strict" in runs
     assert "~/.esphome-idf" in str(job)
     assert "clang-tidy" in lint_report.TOOLS
 
@@ -400,7 +451,8 @@ def test_lint_runner_skips_fresh_clone(tree, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("suffix", [".cpp", ".h", ".hpp", ".tcc"])
-def test_new_component_file_requires_compile(tree, monkeypatch, capsys, suffix):
+@pytest.mark.parametrize("strict", [False, True])
+def test_new_component_file_requires_compile(tree, monkeypatch, capsys, suffix, strict):
     db = database(tree)
     new_file = tree / f"components/demo/nested/new{suffix}"
     new_file.parent.mkdir()
@@ -409,20 +461,25 @@ def test_new_component_file_requires_compile(tree, monkeypatch, capsys, suffix):
     monkeypatch.setattr(
         tidy,
         "run_tidy",
-        lambda *args: pytest.fail("stale build must fail before clang-tidy"),
+        lambda *args: pytest.fail("stale build must be detected before clang-tidy"),
     )
     target = "tests/build/demo/test.yaml"
-    assert tidy.main([target, "--report-only", "--summary"]) == 2
+    args = [target, "--report-only", "--summary", *(["--strict"] if strict else [])]
+    assert tidy.main(args) == (2 if strict else 0)
     output = capsys.readouterr().out
     assert (
         f"New component file missing from build: components/demo/nested/new{suffix}"
         in output
     )
     assert f"esphome compile {target}" in output
+    assert ("SKIP [clang-tidy]:" in output) == (not strict)
+    assert f"  tool errors: {int(strict)}\n" in output
+    assert "targets analyzed (0/1): (none)" in output
 
 
 @pytest.mark.parametrize("state", ["missing", "older", "same", "newer"])
-def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state):
+@pytest.mark.parametrize("strict", [False, True])
+def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state, strict):
     db = database(tree)
     generated = db.parent.parent / "src/esphome/core/defines.h"
     if state == "missing":
@@ -437,15 +494,89 @@ def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state):
     monkeypatch.setattr(tidy, "locate_database", lambda target: db)
     monkeypatch.setattr(tidy, "run_tidy", lambda *args: set())
     target = "tests/build/demo/test.yaml"
-    assert tidy.main([target, "--report-only", "--summary"]) == (
-        2 if state in ("missing", "older") else 0
-    )
+    stale = state in ("missing", "older")
+    args = [target, "--report-only", "--summary", *(["--strict"] if strict else [])]
+    assert tidy.main(args) == (2 if stale and strict else 0)
     output = capsys.readouterr().out
-    if state in ("missing", "older"):
+    if stale:
         assert "defines.h" in output
         assert f"esphome compile {target}" in output
+        assert ("SKIP [clang-tidy]:" in output) == (not strict)
+        assert f"  tool errors: {int(strict)}\n" in output
+        assert "targets analyzed (0/1): (none)" in output
     if state == "older":
         assert "components/demo/__init__.py" in output
+
+
+@pytest.mark.parametrize("summary", [False, True])
+@pytest.mark.parametrize("state", ["missing", "stale", "new-file", "crash"])
+def test_lint_report_partial_builds_keep_coverage_visible(
+    tree, monkeypatch, capsys, summary, state
+):
+    ready = database(tree, "ready")
+    unavailable = database(tree, "unavailable")
+    if state == "missing":
+        unavailable.unlink()
+    elif state == "stale":
+        generated = unavailable.parent.parent / "src/esphome/core/defines.h"
+        os.utime(generated, ns=(500_000_000, 500_000_000))
+    elif state == "new-file":
+        (unavailable.parent.parent / "src/esphome/components/demo/unused.h").unlink()
+
+    from esphome import config
+    from esphome.core import CORE
+
+    def read_config(*args):
+        CORE.build_path = str(
+            ready.parent.parent
+            if CORE.config_path.name == "ready.yaml"
+            else unavailable.parent.parent
+        )
+        return {}
+
+    monkeypatch.setattr(config, "read_config", read_config)
+    monkeypatch.setattr(tidy, "DEFAULT_TARGETS", ("unavailable.yaml", "ready.yaml"))
+    monkeypatch.setattr(lint_report, "ROOT", REPO)
+    monkeypatch.setattr(lint_report, "selected_files", lambda config: {})
+    pins = dict(
+        re.findall(
+            r"^([\w-]+)==([\w.]+)$",
+            (REPO / "requirements_lint.txt").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    )
+    monkeypatch.setattr(lint_report, "version", pins.__getitem__)
+    finding = tidy.Finding("components/demo/demo.cpp", 2, 1, "check-a", "details")
+
+    def run(*args):
+        if state == "crash":
+            raise RuntimeError("clang-tidy crashed")
+        return {finding}
+
+    monkeypatch.setattr(tidy, "run_tidy", run)
+
+    def invoke(command):
+        assert command[1] == "script/clang_tidy.py"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = tidy.main(command[2:])
+        return subprocess.CompletedProcess(command, code, output.getvalue(), "")
+
+    monkeypatch.setattr(lint_report, "run", invoke)
+    args = ["--only", "clang-tidy", "--report-only"]
+    if summary:
+        args.append("--summary")
+    assert lint_report.main(args) == (2 if state == "crash" else 0)
+    output = capsys.readouterr().out
+    if state == "crash":
+        assert "clang-tidy crashed" in output
+    else:
+        assert output.count("SKIP [clang-tidy]: unavailable.yaml:") == 1
+        assert "esphome compile unavailable.yaml" in output
+        assert "targets analyzed (1/2): ready.yaml" in output
+        assert "INCOMPLETE" in output
+        assert "  clang-tidy: 1\n" in output
+        assert "ERROR" not in output
 
 
 def test_dependency_codegen_also_requires_compile(tree):

@@ -2,7 +2,8 @@
 """Report upstream clang-tidy findings on compiled ESPCars components.
 
 Requires requirements_test.txt + requirements_lint.txt and an `esphome compile`
-for each target. Findings are unique (path, line, column, check, message) across
+for each analyzed target. Unavailable builds are skipped; --strict makes them
+tool errors (for CI). Findings are unique (path, line, column, check, message) across
 TUs/targets; a diagnostic naming multiple checks counts once for each check.
 --summary hides individual findings, --report-only tolerates findings, never
 compiler/tool errors. Exit codes: 0 clean/advisory, 1 findings, 2 tool errors.
@@ -76,6 +77,10 @@ COMPONENT_SOURCE_EXTENSIONS = {
 }
 
 
+class BuildUnavailable(RuntimeError):
+    """A missing or stale target build that can be refreshed by compiling."""
+
+
 def locate_database(target):
     """Let ESPHome resolve substitutions, packages and custom build_path."""
     from esphome.config import read_config
@@ -87,7 +92,7 @@ def locate_database(target):
         raise RuntimeError(f"Invalid ESPHome config: {target}")
     database = Path(CORE.build_path) / "build/compile_commands.json"
     if not database.is_file():
-        raise RuntimeError(f"Missing {database}; run: esphome compile {target}")
+        raise BuildUnavailable(f"Missing {database}; run: esphome compile {target}")
     return database
 
 
@@ -365,7 +370,7 @@ def check_build_freshness(source_root, components, target):
                 f"Generated config {generated} is older than {codegen.relative_to(ROOT)}"
             )
     if problems:
-        raise RuntimeError("\n".join([*problems, f"Run: esphome compile {target}"]))
+        raise BuildUnavailable("; ".join([*problems, f"run: esphome compile {target}"]))
 
 
 def prepare_jobs(database, temporary, target):
@@ -442,9 +447,14 @@ def count_findings(findings, components):
     )
 
 
-def print_counts(findings, components, errors):
+def print_counts(findings, components, errors, analyzed, targets):
     checks, areas = count_findings(findings, components)
+    coverage = f"targets analyzed ({len(analyzed)}/{len(targets)}): {', '.join(analyzed) or '(none)'}"
+    incomplete = bool(errors) or len(analyzed) != len(targets)
     print("clang-tidy counts (unique path, line, column, check, message):")
+    print(f"  {coverage}")
+    if incomplete:
+        print("  INCOMPLETE: unavailable builds or tool errors; counts are partial.")
     for label, counts in (("check", checks), ("component", areas)):
         print(f"  by {label}:")
         for name, count in sorted(counts.items()):
@@ -454,8 +464,11 @@ def print_counts(findings, components, errors):
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary).open("a", encoding="utf-8") as output:
             output.write("\n### clang-tidy counts\n\n")
-            if errors:
-                output.write("**INCOMPLETE: tool errors; counts are partial.**\n\n")
+            output.write(f"{coverage}\n\n")
+            if incomplete:
+                output.write(
+                    "**INCOMPLETE: unavailable builds or tool errors; counts are partial.**\n\n"
+                )
             for label, counts in (("Check", checks), ("Component", areas)):
                 output.write(f"| {label} | Count |\n|---|---:|\n")
                 for name, count in sorted(counts.items()):
@@ -484,6 +497,11 @@ def main(argv=None):
         help="Findings exit 0; tool/compiler errors still exit 2",
     )
     parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat missing or stale target builds as tool errors (for CI)",
+    )
+    parser.add_argument(
         "--list-targets",
         action="store_true",
         help="Print default YAMLs for CI compilation and exit",
@@ -495,6 +513,7 @@ def main(argv=None):
     if args.jobs < 1:
         parser.error("-j must be positive")
     findings, components, errors = set(), set(), []
+    analyzed = []
     try:
         pins = (ROOT / "requirements_lint.txt").read_text(encoding="utf-8")
         expected = re.search(r"^clang-tidy==([\w.]+)$", pins, re.MULTILINE)[1]
@@ -504,17 +523,28 @@ def main(argv=None):
         executable = str(Path(sys.executable).parent / "clang-tidy")
         with tempfile.TemporaryDirectory(prefix="espcars-tidy-") as temporary:
             jobs = []
+            prepared = []
             for index, target in enumerate(args.targets):
                 directory = Path(temporary) / str(index)
                 directory.mkdir()
-                target_jobs, active = prepare_jobs(
-                    locate_database(target), directory, target
-                )
+                try:
+                    target_jobs, active = prepare_jobs(
+                        locate_database(target), directory, target
+                    )
+                except BuildUnavailable as error:
+                    message = f"{target}: {error}"
+                    if args.strict:
+                        errors.append(message)
+                    else:
+                        print(f"SKIP [clang-tidy]: {message}")
+                    continue
+                prepared.append(target)
                 components.update(active)
                 jobs.extend(target_jobs)
+            analyzed = prepared
             if not args.summary:
                 print(
-                    f"clang-tidy {actual}: {len(jobs)} TUs (including {len(args.targets)} header TUs), {args.jobs} workers",
+                    f"clang-tidy {actual}: {len(jobs)} TUs (including {len(analyzed)} header TUs), {args.jobs} workers",
                     flush=True,
                 )
             with ThreadPoolExecutor(max_workers=args.jobs) as executor:
@@ -558,7 +588,7 @@ def main(argv=None):
             print(f"{finding.path}:{finding.line}: [{finding.check}] {finding.message}")
     for error in errors:
         print(f"ERROR [clang-tidy]: {error}")
-    print_counts(findings, components, errors)
+    print_counts(findings, components, errors, analyzed, args.targets)
     return 2 if errors else int(bool(findings) and not args.report_only)
 
 
