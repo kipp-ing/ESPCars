@@ -20,7 +20,9 @@
 #include "gateway_core.h"
 #include "harness.h"
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 using namespace esphome::can_gateway;
@@ -302,6 +304,16 @@ TEST(decode_sign_extend_round_trips_every_width) {
   }
 }
 
+TEST(decode_sign_extend_minimum_width_at_frame_edge) {
+  // The smallest configured bit_length is 1, even at the last bit of the frame.
+  // A short/missing payload still uses that configured width, never width zero.
+  const uint8_t payload[MAX_FRAME_DATA_LEN] = {0, 0, 0, 0, 0, 0, 0, 0x80};
+  CHECK_EQ(sign_extend(extract_bits(payload, 8, 63, 1), 1), -1);
+  CHECK_EQ(sign_extend(extract_bits_be(payload, 8, 63, 1), 1), -1);
+  CHECK_EQ(sign_extend(extract_bits(payload, 7, 63, 1), 1), 0);
+  CHECK_EQ(sign_extend(extract_bits_be(payload, 7, 63, 1), 1), 0);
+}
+
 TEST(decode_sign_extend_composes_with_extraction) {
   // The path the decode sensor actually takes: extract then sign-extend, with
   // the width the sensor derives (bit_length, or 8 * byte length).
@@ -572,4 +584,41 @@ TEST(physical_to_raw_scaling_rounding_saturation) {
   CHECK_EQ(physical_to_raw(1e30, 1.0, 0.0, 32, true), 0x7FFFFFFFu);
   CHECK_EQ(physical_to_raw(-1e30, 1.0, 0.0, 32, true), 0x80000000u);
   CHECK_EQ(physical_to_raw(0.0 / 0.0, 1.0, 0.0, 8, false), 0u);
+}
+
+TEST(physical_to_raw_range_edges_every_configured_width) {
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (uint8_t width = 1; width <= 32; width++) {
+    const uint32_t unsigned_max = static_cast<uint32_t>((1ull << width) - 1);
+    const uint32_t signed_min_bits = static_cast<uint32_t>(1ull << (width - 1));
+    const uint32_t signed_max = signed_min_bits - 1;
+    const double signed_min = -static_cast<double>(signed_min_bits);
+    CHECK_EQ(physical_to_raw(0.0, 1.0, 0.0, width, false), 0u);
+    CHECK_EQ(physical_to_raw(unsigned_max, 1.0, 0.0, width, false), unsigned_max);
+    CHECK_EQ(physical_to_raw(-inf, 1.0, 0.0, width, false), 0u);
+    CHECK_EQ(physical_to_raw(inf, 1.0, 0.0, width, false), unsigned_max);
+    CHECK_EQ(physical_to_raw(nan, 1.0, 0.0, width, false), 0u);
+    CHECK_EQ(physical_to_raw(signed_min, 1.0, 0.0, width, true), signed_min_bits);
+    CHECK_EQ(physical_to_raw(signed_max, 1.0, 0.0, width, true), signed_max);
+    CHECK_EQ(physical_to_raw(-inf, 1.0, 0.0, width, true), signed_min_bits);
+    CHECK_EQ(physical_to_raw(inf, 1.0, 0.0, width, true), signed_max);
+    CHECK_EQ(physical_to_raw(nan, 1.0, 0.0, width, true), signed_min_bits);
+  }
+}
+
+TEST(physical_to_raw_preserves_double_rounding_at_half_edges) {
+  // The first six cases use exactly representable float inputs to SetSignalAction::play().
+  // Scaling happens in double: offset +/-2^-54 reaches the double just below +/-0.5.
+  // Adding 0.5 rounds its magnitude to 1; lround/llround would instead give zero.
+  CHECK_EQ(physical_to_raw(0.5, 1.0, 0x1p-54, 32, false), 1u);
+  CHECK_EQ(physical_to_raw(-0.5, 1.0, -0x1p-54, 32, true), 0xFFFFFFFFu);
+  CHECK_EQ(physical_to_raw(0.5, 1.0, 0.0, 32, false), 1u);
+  CHECK_EQ(physical_to_raw(-0.5, 1.0, 0.0, 32, true), 0xFFFFFFFFu);
+  // One more double step toward zero stays below the rounding threshold.
+  CHECK_EQ(physical_to_raw(0.5, 1.0, 0x1p-53, 32, false), 0u);
+  CHECK_EQ(physical_to_raw(-0.5, 1.0, -0x1p-53, 32, true), 0u);
+  // Direct helper calls with the adjacent doubles on the other side of each half.
+  CHECK_EQ(physical_to_raw(std::nextafter(0.5, 1.0), 1.0, 0.0, 32, false), 1u);
+  CHECK_EQ(physical_to_raw(std::nextafter(-0.5, -1.0), 1.0, 0.0, 32, true), 0xFFFFFFFFu);
 }

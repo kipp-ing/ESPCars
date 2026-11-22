@@ -412,10 +412,11 @@ class GatewayPort {
       record.source = this->index_;
       for (uint8_t i = 0; i < dlc; i++)
         record.data[i] = data[i];
-      if (this->log_tap_ring_->push(record))
+      if (this->log_tap_ring_->push(record)) {
         this->log_tap_rx_accepted_.fetch_add(1, std::memory_order_relaxed);
-      else
+      } else {
         this->log_tap_dropped_.fetch_add(1, std::memory_order_relaxed);
+      }
     }
 #endif
   }

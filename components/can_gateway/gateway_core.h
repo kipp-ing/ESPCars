@@ -1047,6 +1047,10 @@ inline uint32_t physical_to_raw(double value, double factor, double offset, uint
   if (scaled > hi)
     scaled = hi;
   // Round half away from zero.
+  // SetSignalAction::play() calls this only in loop context. After saturation, scaled is in
+  // [-2^31, 2^31-1] (signed) or [0, 2^32-1] (unsigned); each cast sees a nonnegative magnitude.
+  // Keep the addition's double rounding immediately below a half (e.g. 0.5 - 2^-54 becomes 1).
+  // NOLINTNEXTLINE(bugprone-incorrect-roundings) -- Preserve half-edge results and unsigned range beyond 32-bit long.
   int64_t rounded = scaled < 0 ? -static_cast<int64_t>(-scaled + 0.5) : static_cast<int64_t>(scaled + 0.5);
   if (rounded > static_cast<int64_t>(hi))
     rounded = static_cast<int64_t>(hi);
@@ -1061,6 +1065,9 @@ inline uint32_t physical_to_raw(double value, double factor, double offset, uint
 CAN_GATEWAY_CORE_INLINE int32_t sign_extend(uint32_t raw, uint8_t width) {
   if (width >= 32)
     return static_cast<int32_t>(raw);
+  // The sole production caller, CanGatewayDecodeSensor::on_frame(), uses schema-validated
+  // bit_length (1-32) or 8 * length (length 1-4); defaults are length 1, byte mode.
+  // NOLINTNEXTLINE(clang-analyzer-core.BitwiseShift) -- Width is 1-31 here; schema/codegen cannot supply zero.
   uint32_t sign_bit = 1u << (width - 1);
   if (raw & sign_bit)
     return static_cast<int32_t>(raw | (~0u << width));

@@ -793,10 +793,11 @@ void IRAM_ATTR GatewayPort::handle_tx_done_isr(const twai_tx_done_event_data_t *
     record.source = this->index_;
     if (edata->done_tx_frame->buffer != nullptr && !tx_header.rtr && tx_dlc != 0)
       std::memcpy(record.data, edata->done_tx_frame->buffer, tx_dlc);
-    if (this->log_tap_tx_ring_->push(record))
+    if (this->log_tap_tx_ring_->push(record)) {
       this->log_tap_tx_accepted_.fetch_add(1, std::memory_order_relaxed);
-    else
+    } else {
       this->log_tap_dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 #endif
 #ifdef USE_CAN_GATEWAY_STATS
