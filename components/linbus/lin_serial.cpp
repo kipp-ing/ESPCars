@@ -39,10 +39,10 @@ esp_err_t LinSerial::init() {
   }
 
   // Install driver WITH event queue (RX only buffer)
-  const int RX_BUF = 512;
-  const int TX_BUF = 0;
-  const int QUEUE_SZ = 20;
-  err = uart_driver_install(uart_num_, RX_BUF, TX_BUF, QUEUE_SZ, &uart_queue_, 0);
+  const int rx_buf = 512;
+  const int tx_buf = 0;
+  const int queue_sz = 20;
+  err = uart_driver_install(uart_num_, rx_buf, tx_buf, queue_sz, &uart_queue_, 0);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "uart_driver_install failed on port %d: %s", uart_num_, esp_err_to_name(err));
     return err;
@@ -61,7 +61,7 @@ LinSerial::~LinSerial() {
   }
 }
 
-bool LinSerial::sendBreak() {
+bool LinSerial::send_break() {
   // Set baud rate to half speed for the break signal, trusted and works good
   uint32_t break_baud_rate = baud_rate_ / 2;
   if (uart_set_baudrate(uart_num_, break_baud_rate) != ESP_OK)
@@ -84,12 +84,12 @@ bool LinSerial::available() {
   return bytes > 0;
 }
 
-bool LinSerial::readByte(uint8_t &byte) {
+bool LinSerial::read_byte(uint8_t &byte) {
   int len = uart_read_bytes(uart_num_, &byte, 1, 0);
   return len == 1;
 }
 
-bool LinSerial::writeBytes(const uint8_t *data, size_t len) {
+bool LinSerial::write_bytes(const uint8_t *data, size_t len) {
   int written = uart_write_bytes(uart_num_, (const char *) data, len);
   return written == (int) len;
 }

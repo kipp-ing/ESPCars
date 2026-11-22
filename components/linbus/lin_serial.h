@@ -21,21 +21,21 @@ class LinSerial {
   esp_err_t init();
 
   bool available();
-  bool readByte(uint8_t &byte);
-  bool writeBytes(const uint8_t *data, size_t len);
+  bool read_byte(uint8_t &byte);
+  bool write_bytes(const uint8_t *data, size_t len);
   void flush();
-  uart_port_t getPort() const { return uart_num_; }
+  uart_port_t get_port() const { return uart_num_; }
 
   // Sende LIN Header: Break (HW oder Fallback), Sync (0x55) und PID (ID + Parity)
   // id: 0..63 (nur 6 Bit), break_bits typisch 13
   // use_hw_break=true nutzt UART HW-Break (empfohlen)
-  bool sendHeader(uint8_t id, bool use_hw_break = true, uint8_t break_bits = 13);
+  bool send_header(uint8_t id, bool use_hw_break = true, uint8_t break_bits = 13);
 
   // Send LIN break signal. Returns false on TX error/timeout (bounded wait). See UPGRADES.md M3.
-  bool sendBreak();
+  bool send_break();
 
   // Event queue accessor (driver-owned ISR pushes events here)
-  QueueHandle_t getEventQueue() const { return uart_queue_; }
+  QueueHandle_t get_event_queue() const { return uart_queue_; }
 
  private:
   uart_port_t uart_num_;

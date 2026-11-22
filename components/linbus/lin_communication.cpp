@@ -26,7 +26,7 @@ LINCommunication::LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin,
   // Initialize arrays to zero
   memset(schedule_, 0, sizeof(schedule_));
   memset(responses_, 0, sizeof(responses_));
-  memset(discoveredIDs_, 0, sizeof(discoveredIDs_));
+  memset(discovered_ids_, 0, sizeof(discovered_ids_));
   data_mutex_ = xSemaphoreCreateMutex();
 }
 
@@ -47,7 +47,7 @@ LINCommunication::~LINCommunication() {
   }
 }
 
-esp_err_t LINCommunication::init(lin_mode_t mode, int baud_rate) {
+esp_err_t LINCommunication::init(LinMode mode, int baud_rate) {
   if (is_initialized_) {
     ESP_LOGV(TAG, "LINCommunication is already initialized. Skipping reinitialization.");
     return ESP_ERR_INVALID_STATE;
@@ -79,7 +79,7 @@ esp_err_t LINCommunication::init(lin_mode_t mode, int baud_rate) {
 
   // Now create LinProtocolHandler with valid pointers
   lin_protocol_handler_ =
-      new LinProtocolHandler(lin_serial_, baud_rate_, schedule_, discoveredIDs_, responses_, mode_, data_mutex_);
+      new LinProtocolHandler(lin_serial_, baud_rate_, schedule_, discovered_ids_, responses_, mode_, data_mutex_);
 
   if (cs_pin_ != -1) {
     // Configure CS  pin
@@ -117,7 +117,7 @@ void LINCommunication::uart_event_task_trampoline(void *arg) {
     vTaskDelete(nullptr);
     return;
   }
-  QueueHandle_t q = self->lin_serial_->getEventQueue();
+  QueueHandle_t q = self->lin_serial_->get_event_queue();
   uart_event_t evt;
   uint8_t buf[32];
 
@@ -142,7 +142,7 @@ void LINCommunication::uart_event_task_trampoline(void *arg) {
       if (r <= 0)
         break;
       for (int i = 0; i < r; ++i)
-        self->lin_protocol_handler_->receiveDecode(buf[i], 0);
+        self->lin_protocol_handler_->receive_decode(buf[i], 0);
     }
   };
 
@@ -165,7 +165,7 @@ void LINCommunication::uart_event_task_trampoline(void *arg) {
               break;
             remaining -= (size_t) r;
             for (int i = 0; i < r; ++i) {
-              self->lin_protocol_handler_->receiveDecode(buf[i], 0);
+              self->lin_protocol_handler_->receive_decode(buf[i], 0);
             }
           }
           // (No manual finalize here; rely on timeout path)
@@ -175,7 +175,7 @@ void LINCommunication::uart_event_task_trampoline(void *arg) {
           // Resync on a hardware BREAK — but only after draining the bytes that preceded it
           // (HW-6b): the event refers to the wire NOW, the decoder to the ring buffer THEN.
           drain_rx();
-          self->lin_protocol_handler_->onUartBreak();
+          self->lin_protocol_handler_->on_uart_break();
           break;
         case UART_FRAME_ERR:
         case UART_PARITY_ERR:
@@ -183,27 +183,27 @@ void LINCommunication::uart_event_task_trampoline(void *arg) {
           // parsing garbage into header states (ghost-header risk). See UPGRADES.md C3.
           // Drain first for the same stream-alignment reason as UART_BREAK (HW-6b).
           drain_rx();
-          self->lin_protocol_handler_->onFrameError();
+          self->lin_protocol_handler_->on_frame_error();
           break;
         case UART_FIFO_OVF:
         case UART_BUFFER_FULL:
           uart_flush_input(self->uart_num_);
-          self->lin_protocol_handler_->onFrameError();
+          self->lin_protocol_handler_->on_frame_error();
           break;
         default:
           break;
       }
     } else {
       // Queue wait timed out: inter-byte gap -> finalize frame if in DATA
-      self->lin_protocol_handler_->onInterByteTimeout();
+      self->lin_protocol_handler_->on_inter_byte_timeout();
     }
 
     // Off-loop schedule tick (A5/N8): the commander header cadence lives HERE, not in the main
     // loop, so the bus keeps being polled through OTA writes and heavy-lambda stalls (N2 for
     // the commander side). This task wakes on every UART event and at least every wait_ticks
     // (~2 ms), which bounds schedule jitter to ~2 ms + any in-flight frame time. Header TX
-    // and response TX (onID) now share this one task context, so they can never interleave
-    // on the wire; data_mutex_ + the isBusIdle() gate inside commander_send() still guard
+    // and response TX (on_id) now share this one task context, so they can never interleave
+    // on the wire; data_mutex_ + the is_bus_idle() gate inside commander_send() still guard
     // against main-loop table mutation and mid-frame transmission.
     if (self->mode_ == LIN_MODE_COMMANDER) {
       self->lin_protocol_handler_->commander_send();
@@ -220,14 +220,14 @@ bool LINCommunication::lin_process() {
   // stalls the bus. This call only carries the loop-context housekeeping below.
 
   // Built-in self test progression. The self-test's scheduled IDs transmit under the
-  // off-loop engine automatically (selfTestInitIfNeeded() adds them via the mutex-protected
+  // off-loop engine automatically (self_test_init_if_needed_() adds them via the mutex-protected
   // schedule API); this tick is observation/evaluation only, so a loop stall can delay the
   // verdict but never the exercised traffic.
   if (self_test_enabled_) {
-    selfTestTick();
+    self_test_tick_();
   }
 
-  updateStatistics();
+  update_statistics();
   return true;
 }
 
@@ -237,13 +237,13 @@ bool LINCommunication::commander_add_id_schedule(uint8_t id, uint32_t interval_m
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
   // Update existing
-  for (size_t i = 0; i < LIN_MAX_ID_RQ_COUNT; i++) {
-    if (schedule_[i].updateInterval == 0)
+  for (auto &schedule : schedule_) {
+    if (schedule.updateInterval == 0)
       continue;  // skip free
-    if (schedule_[i].id == id) {
-      schedule_[i].updateInterval = interval_ms;
-      schedule_[i].last_send_time_ms = 0;
-      schedule_[i].sent_once = false;
+    if (schedule.id == id) {
+      schedule.updateInterval = interval_ms;
+      schedule.last_send_time_ms = 0;
+      schedule.sent_once = false;
       ESP_LOGV(TAG, "Updated schedule ID 0x%02X interval %" PRIu32 " ms", id, interval_ms);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
@@ -251,12 +251,12 @@ bool LINCommunication::commander_add_id_schedule(uint8_t id, uint32_t interval_m
     }
   }
   // Find free slot
-  for (size_t i = 0; i < LIN_MAX_ID_RQ_COUNT; i++) {
-    if (schedule_[i].updateInterval == 0) {
-      schedule_[i].id = id;
-      schedule_[i].updateInterval = interval_ms;
-      schedule_[i].last_send_time_ms = 0;
-      schedule_[i].sent_once = false;
+  for (auto &schedule : schedule_) {
+    if (schedule.updateInterval == 0) {
+      schedule.id = id;
+      schedule.updateInterval = interval_ms;
+      schedule.last_send_time_ms = 0;
+      schedule.sent_once = false;
       ESP_LOGV(TAG, "Added schedule ID 0x%02X interval %" PRIu32 " ms", id, interval_ms);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
@@ -272,13 +272,13 @@ bool LINCommunication::commander_add_id_schedule(uint8_t id, uint32_t interval_m
 bool LINCommunication::commander_remove_id_schedule(uint8_t id) {
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
-  for (size_t i = 0; i < LIN_MAX_ID_RQ_COUNT; i++) {
-    if (schedule_[i].updateInterval == 0)
+  for (auto &schedule : schedule_) {
+    if (schedule.updateInterval == 0)
       continue;
-    if (schedule_[i].id == id) {
-      schedule_[i].updateInterval = 0;  // mark free
-      schedule_[i].last_send_time_ms = 0;
-      schedule_[i].sent_once = false;
+    if (schedule.id == id) {
+      schedule.updateInterval = 0;  // mark free
+      schedule.last_send_time_ms = 0;
+      schedule.sent_once = false;
       ESP_LOGV(TAG, "Removed schedule ID 0x%02X", id);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
@@ -303,14 +303,14 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
 
   // If caller wants to clear: data_length == 0
   if (data_length == 0) {
-    for (size_t i = 0; i < LIN_MAX_RESPONSES; ++i) {
-      if (responses_[i].dataLength == 0)
+    for (auto &response : responses_) {
+      if (response.dataLength == 0)
         continue;
-      if (responses_[i].id == id) {
-        responses_[i].dataLength = 0;  // mark free
+      if (response.id == id) {
+        response.dataLength = 0;  // mark free
         // (optional) zero buffer
-        memset(responses_[i].responseData, 0, sizeof(responses_[i].responseData));
-        responses_[i].enhancedChecksum = true;
+        memset(response.responseData, 0, sizeof(response.responseData));
+        response.enhancedChecksum = true;
         if (data_mutex_ != nullptr)
           xSemaphoreGive(data_mutex_);
         return true;
@@ -322,32 +322,32 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
   }
 
   // Update existing
-  for (size_t i = 0; i < LIN_MAX_RESPONSES; ++i) {
-    if (responses_[i].dataLength == 0)
+  for (auto &response : responses_) {
+    if (response.dataLength == 0)
       continue;
-    if (responses_[i].id == id) {
-      bool checksum_enhanced = preserve_existing_checksum ? responses_[i].enhancedChecksum : enhanced;
-      memcpy(responses_[i].responseData, data, data_length);
-      uint8_t cs = lin_protocol_handler_->calculateChecksum(id, data, data_length, checksum_enhanced);
-      responses_[i].responseData[data_length] = cs;
-      responses_[i].enhancedChecksum = checksum_enhanced;
-      responses_[i].dataLength = data_length + 1;
+    if (response.id == id) {
+      bool checksum_enhanced = preserve_existing_checksum ? response.enhancedChecksum : enhanced;
+      memcpy(response.responseData, data, data_length);
+      uint8_t cs = lin_protocol_handler_->calculate_checksum(id, data, data_length, checksum_enhanced);
+      response.responseData[data_length] = cs;
+      response.enhancedChecksum = checksum_enhanced;
+      response.dataLength = data_length + 1;
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
       return true;
     }
   }
   // Find free (dataLength == 0)
-  for (size_t i = 0; i < LIN_MAX_RESPONSES; ++i) {
-    if (responses_[i].dataLength != 0)
+  for (auto &response : responses_) {
+    if (response.dataLength != 0)
       continue;
-    responses_[i].id = id;  // keep ID
-    memcpy(responses_[i].responseData, data, data_length);
-    uint8_t cs = lin_protocol_handler_->calculateChecksum(id, data, data_length, enhanced);
-    responses_[i].responseData[data_length] = cs;
-    responses_[i].enhancedChecksum = enhanced;
-    responses_[i].dataLength = data_length + 1;
-    responses_[i].lastResponseTime = 0;
+    response.id = id;  // keep ID
+    memcpy(response.responseData, data, data_length);
+    uint8_t cs = lin_protocol_handler_->calculate_checksum(id, data, data_length, enhanced);
+    response.responseData[data_length] = cs;
+    response.enhancedChecksum = enhanced;
+    response.dataLength = data_length + 1;
+    response.lastResponseTime = 0;
     if (data_mutex_ != nullptr)
       xSemaphoreGive(data_mutex_);
     return true;
@@ -361,28 +361,28 @@ void LINCommunication::configure_rx_hint(uint8_t id, uint8_t length, int8_t chec
   if (lin_protocol_handler_ == nullptr)
     return;
   if (length > 0)
-    lin_protocol_handler_->setRxExpectedLength(id, length);
+    lin_protocol_handler_->set_rx_expected_length(id, length);
   if (checksum_mode >= 0)
-    lin_protocol_handler_->setRxChecksumMode(id, checksum_mode != 0);
+    lin_protocol_handler_->set_rx_checksum_mode(id, checksum_mode != 0);
 }
 
 void LINCommunication::note_frames_coalesced(uint32_t n) {
   if (lin_protocol_handler_ != nullptr)
-    lin_protocol_handler_->noteCoalesced(n);
+    lin_protocol_handler_->note_coalesced(n);
 }
 
-bool LINCommunication::get_response_4id(uint8_t id, lin_discovered_id_t *lindata) {
+bool LINCommunication::get_response_4id(uint8_t id, LinDiscoveredId *lindata) {
   if (!lindata) {
     return false;
   }
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
 
-  // Search for the ID in discoveredIDs_ array
-  for (size_t i = 0; i < LIN_MAX_DISCOVERED_PIDS; i++) {
-    if (discoveredIDs_[i].dataLength > 0 && discoveredIDs_[i].id == id) {
+  // Search for the ID in discovered_ids_ array
+  for (const auto &discovered_id : discovered_ids_) {
+    if (discovered_id.dataLength > 0 && discovered_id.id == id) {
       // Found the ID, copy data
-      *lindata = discoveredIDs_[i];
+      *lindata = discovered_id;
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
       return true;
@@ -394,25 +394,25 @@ bool LINCommunication::get_response_4id(uint8_t id, lin_discovered_id_t *lindata
   return false;
 }
 
-void LINCommunication::dumpReceivedPIDsToLog() const {
+void LINCommunication::dump_received_pids_to_log() const {
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return;
   ESP_LOGV(TAG, "| %-5s | %-4s | %-3s | %-7s | %-8s | %-24s |", "Idx", "ID", "Len", "Count", "Last(ms)", "Data(hex)");
   ESP_LOGV(TAG, "|-------|------|-----|---------|----------|--------------------------|");
-  for (size_t i = 0; i < LIN_MAX_DISCOVERED_PIDS; i++) {
-    if (discoveredIDs_[i].dataLength == 0)
+  for (const auto &discovered_id : discovered_ids_) {
+    if (discovered_id.dataLength == 0)
       continue;  // skip free slot (ID may be 0 validly)
 
-    char dataStr[3 * LIN_MAX_DATA_SIZE + 1] = {0};
-    char *p = dataStr;
-    for (uint8_t j = 0; j < discoveredIDs_[i].dataLength; ++j) {
-      snprintf(p, sizeof(dataStr) - (p - dataStr), "%02X ", discoveredIDs_[i].data[j]);
+    char data_str[3 * LIN_MAX_DATA_SIZE + 1] = {0};
+    char *p = data_str;
+    for (uint8_t j = 0; j < discovered_id.dataLength; ++j) {
+      snprintf(p, sizeof(data_str) - (p - data_str), "%02X ", discovered_id.data[j]);
       p += 3;
     }
 
-    ESP_LOGV(TAG, "| %-5zu | 0x%02X | %-3u | %-7" PRIu32 " | %-8" PRId64 " | %-24s |", i, discoveredIDs_[i].id,
-             discoveredIDs_[i].dataLength, discoveredIDs_[i].updateCount,
-             (esp_timer_get_time() - discoveredIDs_[i].lastUpdateTime) / 1000, dataStr);
+    ESP_LOGV(TAG, "| %-5zu | 0x%02X | %-3u | %-7" PRIu32 " | %-8" PRId64 " | %-24s |",
+             static_cast<size_t>(&discovered_id - discovered_ids_), discovered_id.id, discovered_id.dataLength,
+             discovered_id.updateCount, (esp_timer_get_time() - discovered_id.lastUpdateTime) / 1000, data_str);
   }
   if (data_mutex_ != nullptr)
     xSemaphoreGive(data_mutex_);
@@ -420,35 +420,35 @@ void LINCommunication::dumpReceivedPIDsToLog() const {
 
 // TEST stuff
 
-void LINCommunication::enableSelfTest(bool enable) {
+void LINCommunication::enable_self_test(bool enable) {
   self_test_enabled_ = enable;
   if (!enable) {
     self_test_initialized_ = false;
     // Clear the slot count too, or a re-arm evaluates stale stats from the
-    // previous run before selfTestInitIfNeeded() has refilled them.
+    // previous run before self_test_init_if_needed_() has refilled them.
     self_test_count_ = 0;
     self_test_passed_ = false;
   }
 }
 
-void LINCommunication::selfTestTick() {
+void LINCommunication::self_test_tick_() {
   if (mode_ != LIN_MODE_COMMANDER)
     return;
   if (!lin_protocol_handler_)
     return;
   if (!self_test_initialized_) {
-    selfTestInitIfNeeded();
+    self_test_init_if_needed_();
     return;
   }
   if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
     return;
   for (size_t i = 0; i < self_test_count_; ++i) {
     auto &st = self_test_stats_[i];
-    for (size_t d = 0; d < LIN_MAX_DISCOVERED_PIDS; ++d) {
-      if (discoveredIDs_[d].dataLength == 0)
+    for (const auto &discovered_id : discovered_ids_) {
+      if (discovered_id.dataLength == 0)
         continue;
-      if (discoveredIDs_[d].id == st.id) {
-        const int64_t t = discoveredIDs_[d].lastUpdateTime;
+      if (discovered_id.id == st.id) {
+        const int64_t t = discovered_id.lastUpdateTime;
         // A new update is one whose timestamp differs from the last one RECORDED.
         // Anchoring this on first_update_time_us (as it did until 2026-07-29)
         // re-counted on every loop pass as soon as an id had updated twice: the
@@ -480,17 +480,17 @@ void LINCommunication::selfTestTick() {
   }
   if (data_mutex_ != nullptr)
     xSemaphoreGive(data_mutex_);
-  selfTestEvaluate();
+  self_test_evaluate_();
 }
 
-void LINCommunication::selfTestInitIfNeeded() {
+void LINCommunication::self_test_init_if_needed_() {
   struct CaseDef {
-    uint8_t id;
     uint32_t interval_ms;
+    uint8_t id;
     uint8_t payload_len;
   };
-  static const CaseDef CASES[] = {{0x00, 120, 3}, {0x01, 150, 2}, {0x15, 180, 4}, {0x1F, 200, 8}, {0x3B, 220, 3},
-                                  {0x3C, 250, 2}, {0x3D, 280, 2}, {0x3E, 300, 6}, {0x3F, 330, 1}};
+  static const CaseDef CASES[] = {{120, 0x00, 3}, {150, 0x01, 2}, {180, 0x15, 4}, {200, 0x1F, 8}, {220, 0x3B, 3},
+                                  {250, 0x3C, 2}, {280, 0x3D, 2}, {300, 0x3E, 6}, {330, 0x3F, 1}};
   const size_t case_count = sizeof(CASES) / sizeof(CASES[0]);
   if (case_count > SELF_TEST_MAX_IDS) {
     ESP_LOGV(TAG, "SelfTest truncated: too many cases (%zu)", case_count);
@@ -523,7 +523,7 @@ void LINCommunication::selfTestInitIfNeeded() {
   ESP_LOGV(TAG, "LIN self-test initialized with %zu IDs", added);
 }
 
-void LINCommunication::selfTestEvaluate() {
+void LINCommunication::self_test_evaluate_() {
   int64_t elapsed_us = esp_timer_get_time() - self_test_start_time_us_;
   if (elapsed_us - self_test_last_eval_us_ < 2'000'000)
     return;
@@ -537,12 +537,12 @@ void LINCommunication::selfTestEvaluate() {
   bool all_have_updates = self_test_count_ > 0;
   for (size_t i = 0; i < self_test_count_; ++i) {
     const auto &st = self_test_stats_[i];
-    int64_t expected_interval_us = (int64_t) st.scheduled_interval_ms * 1000;
     bool pass = st.seen_updates >= 2;
     all_have_updates &= pass;
     ESP_LOGV(TAG, "ID 0x%02X upd=%" PRIu32 " miss=%" PRIu32 " min=%.1fms max=%.1fms exp=%.1fms %s", st.id,
              st.seen_updates, st.missed_windows, st.min_interval_us / 1000.0, st.max_interval_us / 1000.0,
-             expected_interval_us / 1000.0, pass ? LOG_STR_LITERAL("OK") : LOG_STR_LITERAL("WAIT"));
+             ((int64_t) st.scheduled_interval_ms * 1000) / 1000.0,
+             pass ? LOG_STR_LITERAL("OK") : LOG_STR_LITERAL("WAIT"));
   }
   if (all_have_updates && elapsed_us > 5'000'000) {
     self_test_passed_ = true;
@@ -551,30 +551,30 @@ void LINCommunication::selfTestEvaluate() {
 }
 
 // Statistics methods (low overhead wrappers)
-const lin_statistics_t &LINCommunication::getStatistics() const {
+const LinStatistics &LINCommunication::get_statistics() const {
   if (lin_protocol_handler_) {
-    return lin_protocol_handler_->getStatistics();
+    return lin_protocol_handler_->get_statistics();
   }
   // Return empty statistics if not initialized
-  static lin_statistics_t empty_stats = {};
+  static LinStatistics empty_stats = {};
   return empty_stats;
 }
 
-void LINCommunication::logStatistics() const {
+void LINCommunication::log_statistics() const {
   if (lin_protocol_handler_) {
-    lin_protocol_handler_->logStatistics();
+    lin_protocol_handler_->log_statistics();
   }
 }
 
-void LINCommunication::resetStatistics() {
+void LINCommunication::reset_statistics() {
   if (lin_protocol_handler_) {
-    lin_protocol_handler_->resetStatistics();
+    lin_protocol_handler_->reset_statistics();
   }
 }
 
-void LINCommunication::updateStatistics() {
+void LINCommunication::update_statistics() {
   if (lin_protocol_handler_) {
-    lin_protocol_handler_->updateStatistics();
+    lin_protocol_handler_->update_statistics();
   }
 }
 
