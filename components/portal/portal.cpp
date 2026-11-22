@@ -379,10 +379,11 @@ void Portal::perform_action_(size_t index, const core::ActionValue &value) {
     case core::Control::SWITCH:
 #ifdef USE_SWITCH
       if (bind.sw != nullptr) {
-        if (value.boolean)
+        if (value.boolean) {
           bind.sw->turn_on();
-        else
+        } else {
           bind.sw->turn_off();
+        }
       }
 #endif
       break;
@@ -409,7 +410,7 @@ void Portal::perform_action_(size_t index, const core::ActionValue &value) {
 
 // ---- request copy-out ------------------------------------------------------------------------
 
-bool Portal::flush_chunk_(void *ctx, const char *data, size_t size) {
+bool Portal::flush_chunk(void *ctx, const char *data, size_t size) {
   return httpd_resp_send_chunk(static_cast<httpd_req_t *>(ctx), data, size) == ESP_OK;
 }
 
@@ -645,7 +646,7 @@ void Portal::serve_state_(httpd_req_t *req) {
   core::resolve(snapshot, resolved);
 
   core::ChunkWriter writer;
-  writer.init(this->chunk_buf_, sizeof(this->chunk_buf_), &Portal::flush_chunk_, req);
+  writer.init(this->chunk_buf_, sizeof(this->chunk_buf_), &Portal::flush_chunk, req);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   if (!core::write_envelope(writer, snapshot, resolved, path) || !writer.finish())
@@ -726,7 +727,7 @@ void Portal::serve_action_(AsyncWebServerRequest *request, const core::RouteMatc
     xSemaphoreGive(this->mutex_);
     httpd_resp_set_status(req, "409 Conflict");
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"busy\"}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, R"({"error":"busy"})", HTTPD_RESP_USE_STRLEN);
     return;
   }
 
@@ -763,7 +764,7 @@ void Portal::serve_action_(AsyncWebServerRequest *request, const core::RouteMatc
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   core::ChunkWriter writer;
-  writer.init(this->chunk_buf_, sizeof(this->chunk_buf_), &Portal::flush_chunk_, req);
+  writer.init(this->chunk_buf_, sizeof(this->chunk_buf_), &Portal::flush_chunk, req);
   if (!core::detail::write_action_response(writer, seq, found_node->id, def.key, result, def.decimals) ||
       !writer.finish())
     return;
