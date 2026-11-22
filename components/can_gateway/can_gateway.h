@@ -1,12 +1,13 @@
 #pragma once
 
+#include "esphome/core/defines.h"
+
 #ifdef USE_ESP32
 
 #include "gateway_core.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
-#include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 
 #ifdef USE_BINARY_SENSOR
@@ -476,6 +477,7 @@ class GatewayPort {
 
   twai_node_handle_t node_{nullptr};
   bool hw_filter_engaged_{false};
+  const char *hw_filter_reason_{"not initialized"};
   /// Written by on_state_change (ISR), read by the fast path (peer bus-off
   /// check) and the control plane (recovery).
   std::atomic<uint8_t> state_{static_cast<uint8_t>(TWAI_ERROR_ACTIVE)};
@@ -488,7 +490,11 @@ class GatewayPort {
   const std::atomic<bool> *gateway_enabled_{nullptr};
   SlotPool<CAN_GATEWAY_INJECT_SLOTS> inject_pool_{};
   TxSlot inject_slots_[CAN_GATEWAY_INJECT_SLOTS]{};
+#ifdef CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS
   std::atomic<uint32_t> last_inject_warn_ms_{0};
+#else
+  InjectRefusalLog inject_refusal_log_{};
+#endif
   /// Previous TEC/REC read, for deriving bus_err from their upward movement in
   /// loop_() (loop context only; see the bus_err comment there).
   static constexpr uint32_t ERR_POLL_INTERVAL_MS = 500;

@@ -224,6 +224,71 @@ enum class FrameAction : uint8_t {
   DROP_FILTERED = 1,  ///< Dropped by a rule or the default action (counter: filtered).
 };
 
+/// Caller-serialized refusal episodes (GatewayPort uses its task/ISR mux). A successful send does not end an
+/// episode: only a full second without refusals does. Unsigned time wraps safely.
+class InjectRefusalLog {
+ public:
+  bool refuse(uint32_t now) {
+    bool start = !this->active_;
+    this->active_ = true;
+    this->last_ms_ = now;
+    if (start)
+      this->count_ = 0;
+    ++this->count_;
+    return start;
+  }
+  bool stop(uint32_t now) {
+    if (!this->active_ || now - this->last_ms_ < 1000)
+      return false;
+    this->active_ = false;
+    return true;
+  }
+  uint32_t count() const { return this->count_; }
+
+ protected:
+  uint32_t last_ms_{0}, count_{0};
+  bool active_{false};
+};
+
+/// Strict idle-event match, shared with host tests. Null groups never match.
+template<typename Callback, typename Group>
+CAN_GATEWAY_CORE_INLINE bool matches_idle_notify(Callback callback, Callback expected, Group group, Group owned,
+                                                 uint32_t bits) {
+  return callback == expected && group != nullptr && group == owned && bits == 1;
+}
+
+/// A mask covering every accepting rule; software still decides RTR, drops,
+/// ordering and patches. A superset is safe only without RX observers/stats.
+struct AllowlistFilter {
+  uint32_t id{0}, mask{0};
+  bool extended{false};
+};
+inline bool derive_allowlist_filter(const RouteTable &table, AllowlistFilter &out, const char *&reason) {
+  reason = "default accept";
+  if (!table.default_drop)
+    return false;
+  bool found = false;
+  for (uint8_t i = 0; i < table.rule_count; ++i) {
+    const auto &rule = table.rules[i];
+    if (rule.is_drop())
+      continue;
+    bool extended = (rule.flags & RULE_FLAG_EXTENDED) != 0;
+    if (!found) {
+      out = {rule.match_id, rule.match_mask, extended};
+      found = true;
+    } else {
+      if (extended != out.extended) {
+        reason = "mixed standard/extended accepts";
+        return false;
+      }
+      out.mask &= rule.match_mask & ~(out.id ^ rule.match_id);
+    }
+    out.id &= out.mask;
+  }
+  reason = !found ? "no accepting rules" : out.mask == 0 ? "accept-all mask" : "accepting-rule superset";
+  return found && out.mask != 0;  // accept-all has no offload benefit
+}
+
 /// First matching rule in table order, or nullptr when nothing matches (first match wins;
 /// standard and extended ID spaces are strictly separate).
 CAN_GATEWAY_CORE_INLINE const RuleEntry *match_rule(const RouteTable &table, uint32_t can_id, bool extended, bool rtr) {
@@ -434,6 +499,7 @@ struct RouteCounters {
 /// is expected to climb on any bus the gateway transmits into a lower-id flood.
 struct PortCounters {
   std::atomic<uint32_t> injected{0};
+  std::atomic<uint32_t> inject_refused{0};
   std::atomic<uint32_t> tx_fail{0};
   std::atomic<uint32_t> bus_err{0};
   std::atomic<uint32_t> err_events{0};

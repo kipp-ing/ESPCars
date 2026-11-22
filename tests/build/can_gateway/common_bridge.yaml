@@ -25,13 +25,19 @@ can_gateway:
       tx_pin: ${bridge_b_tx_pin}
       bit_rate: 125kbps
   routes:
-    # default_action: drop with a single accept rule is the shape
-    # try_hw_filter_offload_ looks for.
+    # Same-format default-drop allowlist: hardware admits a conservative
+    # superset; first-match drops and RTR still run in software.
     - from: port_a
       to: port_b
       default_action: drop
       filters:
         - can_id: 0x123
+          remote_transmission_request: false
+          action: drop
+        - can_id: 0x123
+          action: accept
+        - can_id: 0x12A
+          remote_transmission_request: true
           action: accept
     - from: port_b
       to: port_a

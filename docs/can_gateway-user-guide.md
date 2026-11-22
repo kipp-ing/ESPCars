@@ -745,3 +745,49 @@ and the log.
 - `docs/CONVENTIONS.md` §"Known sharp edges" and `docs/HANDOVER.md` §3 — the
   full Issue #1–#4 findings ledger (bus-off/shed-path fix, the cyclic-send
   floor, the C5 HAL contract, and more), with bench verdicts.
+
+### Driver optimizations (D-101)
+
+Three optimizations are enabled automatically, with no new YAML options:
+
+- On single-core ESP-IDF 5.5.x targets (C6, C3, H2, S2), suppress only the
+  gateway-owned TWAI TX-idle event's BIT0 deferred callback. Other groups,
+  callbacks and bit values pass through. The gateway does not use
+  `twai_node_transmit_wait_all_done`; **calling that API on these gateway-owned
+  nodes is incompatible with suppression**. A changed event allocation contract
+  prevents the port from enabling. Other targets/frameworks get no wrap flags.
+  The suppressed count appears in `dump_config` and is available through
+  `idle_notify_suppressed(port_index)` for runtime diagnostics.
+- Under default-drop, derive one conservative hardware mask covering all
+  same-format accepting rules. Software still applies first-match drops, RTR
+  conditions and patches. Mixed standard/extended accepts, all-drop and
+  accept-all masks keep offload disengaged. Compiled statistics, active
+  observation, log taps, snapshots and direct RX hooks also disengage it so
+  every required frame remains visible. `dump_config` reports engagement and
+  its reason. RX consumers must register before gateway setup.
+- Count every inject refusal in `PortCounters::inject_refused` and the existing
+  statistics log. Emit one WARN when an episode starts, then one with its total
+  when a full second passes without refusals. Successful sends between refusals
+  do not reset an episode. Sustained overload therefore costs two lines total.
+
+Measured on C6: at 1,000 frames/s, TX-idle suppression reduced Tmr_Svc from
+12.3% to 0% (approximately 7 percentage points of exclusive CPU), with identical
+delivery. At saturation, hardware filtering reduced CAN ISR count by 25% and
+ISR time by 17%. Removing periodic refusal warnings reduced the worst loop
+pass from 1,080 to 626 microseconds; the new episode-edge warnings retain the
+information. Evidence is maintained in the esp_timing project's D-101 driver
+A/B studies; these measurements are workload-specific.
+
+Storage cost on 32-bit ESP32: refusal counter 4 bytes/port, episode state
+12 bytes/port replacing a 4-byte warning timestamp (net +8), filter-reason
+pointer 4 bytes/port, and idle capture/counters 32 bytes globally on eligible
+builds. Thus field payload grows by 16 bytes/port before enclosing-structure padding,
+plus 32 bytes globally when idle suppression is enabled. Final linked RAM/flash
+deltas remain to be measured.
+Run `script/d101_compile_matrix.sh` on an IDF-capable host for the C6 and classic
+ESP32 default builds and paired per-feature off/on flash/RAM reports. The
+`CAN_GATEWAY_TEST_DISABLE_IDLE_NOTIFY`, `CAN_GATEWAY_TEST_DISABLE_HW_FILTER`
+and `CAN_GATEWAY_TEST_DISABLE_QUIET_REFUSALS` defines are measurement controls,
+not component configuration. The idle-off build retains pass-through wrappers;
+all pairs retain the refusal counter and filter-reason field. Flash cost and
+linked RAM totals are unverified until that matrix is run.
