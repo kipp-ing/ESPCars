@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 PY=.venv/bin/python
 ESPHOME=.venv/bin/esphome
 if [ ! -x "$PY" ]; then
-  echo "No .venv — run: python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt" >&2
+  echo "No .venv — run: python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt -r requirements_lint.txt" >&2
   exit 1
 fi
 
@@ -39,5 +39,11 @@ for y in tests/build/*/test*.yaml; do
   "$ESPHOME" config "$y" > /dev/null
   echo "VALID $y"
 done
+
+# P1a stays advisory until P2/P3 clean the baseline. CI uses this same runner
+# with requirements_lint.txt. Fixers operate on temporary copies only.
+echo "== upstream lint (report-only; pins: requirements_lint.txt) =="
+"$PY" script/lint_report.py --report-only --summary
+echo "For details, run: .venv/bin/python script/lint_report.py"
 
 echo "All checks passed."

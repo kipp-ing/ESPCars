@@ -1,0 +1,12 @@
+# Adapted from esphome/esphome dev @ 03eebae7b6e4cc81058f36a00a7f8c0c98eba341.
+# Shared by script/check.sh's report runner and CI; hook revs are checked against these pins.
+ruff==0.17.5
+pyupgrade==3.22.0
+yamllint==1.38.0
+prek==0.5.11
+pre-commit-hooks==5.0.0
+# Runner dependency for the same file-type selection used by pre-commit.
+# Upstream uses prek's native classifier; this Python helper needs identify.
+identify==2.6.20
+# Deliberate P1a exception to upstream 23.1.3; upgrade/reformat in P3 step 1.
+clang-format==13.0.1

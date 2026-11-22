@@ -117,6 +117,51 @@ wiring). **P1b** is item 4 (clang-tidy) plus its own CI wiring.
 **Done:** each tool runs locally and in CI and reports a finding count that
 matches the baseline.
 
+#### P1a reproducible baseline
+
+Reference: esphome/esphome dev at
+`03eebae7b6e4cc81058f36a00a7f8c0c98eba341`. Use
+`.venv/bin/python script/lint_report.py` with `requirements_lint.txt` installed.
+The runner is read-only, includes tracked and non-ignored new files, and shares
+the pre-commit byte-exact exclusions. `ci_custom.py` scans tracked `components/`
+only. The existing blocking clang-format gate still scans only `components/`.
+
+Measured against the pre-P1a tree (`ab95f7d`) with the new configuration, and
+again after P1a; no existing source findings were fixed:
+
+| Tool | Before | After | Count unit |
+|---|---:|---:|---|
+| ruff | 242 | 242 | diagnostics |
+| ruff-format | 72 | 72 | files |
+| pyupgrade | 4 | 4 | files |
+| yamllint | 7 | 7 | diagnostics (all warnings) |
+| clang-format 13.0.1, all hook-selected C/C++ | 86 | 86 | replacements in 11 test files |
+| clang-format 13.0.1, existing components gate | 0 | 0 | replacements |
+| end-of-file-fixer | 1 | 1 | files |
+| trailing-whitespace | 1 | 1 | files |
+| no-commit-to-branch | 0 | 0 | protected-branch findings |
+| ci-custom | 120 | 120 | diagnostics |
+| prek hook-config validation | 0 | 0 | errors |
+
+These measurements supersede the preliminary counts above for P1a tooling.
+Ruff's component-layout configuration reports 37 in `components/`, 100 in
+`script/`, 100 in `tests/`, 4 in `custom_components/`, and 1 in `tests_ha/`.
+The preliminary 42/100/91/4 and 27 formatter files were not reproduced against
+this reference/configuration; the source tree was unchanged during measurement.
+The wider pre-commit C/C++ scope accounts for the 86 formatting replacements
+outside the existing clean component gate. Both whitespace hooks flag only
+`CLAUDE.md`.
+
+The full applicable upstream custom-check set finds 6 missing domains, 8 integer
+defines, 1 missing pragma, 7 namespace findings, 11 legacy tag declarations,
+30 unbraced log bodies, 44 bare log ternary literals, 5 `std::nothrow` uses,
+7 inclusive-language findings, and 1 `sprintf` call. No `std::to_string` call was
+found; the preliminary combined count of 6 banned calls was not reproduced.
+All other ported checks report zero. Each of the 36 checks has bad/good snippet
+coverage. The port documents its two upstream scanner corrections (offset-zero
+matches and the extension check's empty-suffix wildcard) and every omitted check.
+Clang-tidy remains P1b; clang-format's upgrade remains the P3 reformat-only PR.
+
 ### P2 — Python cleanup · mechanical
 
 One PR each for `components/`, `script/`, `tests/` and `custom_components/`.
@@ -148,6 +193,13 @@ findings by hand. Add `DOMAIN` to every component.
 Put everything in namespace `esphome::linbus`. Rename files to snake_case
 (`LinSerial.cpp` → `lin_serial.cpp` etc.), use the TAG form upstream requires,
 and remove the Arduino-isms. LIN timing must not change.
+
+The inclusive-language check flags linbus's public YAML `mode: master|slave`
+and the corresponding C++ names. Rename them to the ISO 17987 terms
+`commander`/`responder`. Keep `master`/`slave` accepted for one release cycle
+with a deprecation warning, following [CONVENTIONS](CONVENTIONS.md)'s
+"Don't break released YAML schemas silently" rule. Update the linbus user guide,
+schema tests, and `tests/build/` YAMLs to use the new terms.
 
 **Done:** compiles on all three linbus targets; `verify.py` exit 0 once the
 bench is back.

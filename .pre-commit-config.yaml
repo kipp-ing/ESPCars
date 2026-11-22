@@ -1,0 +1,63 @@
+# Adapted from esphome/esphome dev @ 03eebae7b6e4cc81058f36a00a7f8c0c98eba341.
+---
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+ci:
+  autoupdate_commit_msg: 'pre-commit: autoupdate'
+  autoupdate_schedule: off  # Disabled until ruff versions are synced between deps and pre-commit
+
+# Mutating hooks must preserve catalogs, golden wire data and served HTML bytes.
+exclude: |
+  (?x)^(
+    tests/uds/fixtures/.*|
+    tests/sd_logger/fixtures/.*|
+    tests/portal/fixtures/envelopes/.*|
+    tests/portal/page/[^/]+\.json|
+    components/portal/index\.html|
+    tests/build/portal/custom_page\.html
+  )$
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.17.5
+    hooks:
+      # Run the linter.
+      - id: ruff
+        args: [--fix]
+      # Run the formatter.
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: no-commit-to-branch
+        args:
+          - --branch=main
+          - --branch=dev
+          - --branch=release
+          - --branch=beta
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.22.0
+    hooks:
+      - id: pyupgrade
+        args: [--py312-plus]
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        exclude: ^(\.clang-format|\.clang-tidy)$
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    # Keep 13.0.1 until P3 step 1: the upstream upgrade is a reformat-only PR.
+    rev: v13.0.1
+    hooks:
+      - id: clang-format
+        types_or: [c, c++]
+  - repo: local
+    hooks:
+      - id: ci-custom
+        name: ci-custom (external components)
+        entry: python script/ci_custom.py
+        language: system
+        files: ^components/
