@@ -1,6 +1,6 @@
 # Portal bench checklist (PS-M2-06..13, PS-M3-06/07, PS-M5-*)
 
-Board: identified by MAC, test image `tests/build/portal/test.esp32-c6-idf.yaml` (no bus
+Board: identified by MAC, test image `tests/components/portal/test.esp32-c6-idf.yaml` (no bus
 component; template entities only). `H=<board ip>`, `U=demo:demo-pass` (the fixture's `auth:`).
 Before flashing record the running image; restore it afterwards. Schema check of live JSON:
 `curl -s http://$H/api/v1/state | python3 script/portal_schema.py /dev/stdin`.

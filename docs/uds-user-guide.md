@@ -1,5 +1,8 @@
 # Using `uds` — diagnostics in an ESPHome project
 
+Supported platform: **ESP32 with ESP-IDF only**. Arduino and non-ESP32
+targets are rejected during config validation. Requires isotp and can_gateway; their TWAI variant limits apply, including the ESP32-C5 rejection (V27).
+
 A practical guide: what the component does, how a project is actually put
 together with ESPHome `packages:`, and the end-to-end workflow from a catalog
 file to a value on a dashboard. For *why* it is built this way, see
@@ -192,9 +195,9 @@ text_sensor: {...}
 Two concrete reasons this split earns its keep, both visible in this repo:
 
 - **Swap the catalog source without touching a single field name.**
-  `tests/build/uds/common.yaml` (`catalog: {embed: true}`, the `mini` fixture —
+  `tests/components/uds/common.yaml` (`catalog: {embed: true}`, the `mini` fixture —
   the config CI can compile with nothing flashed) and
-  `tests/build/uds/common_partition.yaml` (`catalog: {partition: diag, size:
+  `tests/components/uds/common_partition.yaml` (`catalog: {partition: diag, size:
   256KB}`, the same fixture through a real 256 KiB partition) are the *same*
   sensors and field names, included by two near-identical leaf files
   (`test.esp32-c6-idf.yaml` / `test-partition.esp32-c6-idf.yaml`) that differ
@@ -309,7 +312,7 @@ need it, and keep it observe-first the way the rest of this repo does.
 - [`uds-catalog-format.md`](uds-catalog-format.md) — the normative `.dcat`
   binary format, if you're compiling your own catalog or debugging one.
 - `script/uds_catalog.py --help` — `compile` / `dump` / `verify` / `flash`.
-- `tests/build/uds/common.yaml` + `common_partition.yaml` — minimal,
+- `tests/components/uds/common.yaml` + `common_partition.yaml` — minimal,
   fully-annotated worked examples of both catalog sources, including two hubs
   sharing one catalog on two address pairs (an ECU and a responder rig
   shape), all against the checked-in `mini` fixture.

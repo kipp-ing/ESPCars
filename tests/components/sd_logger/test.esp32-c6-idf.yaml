@@ -1,0 +1,2 @@
+packages:
+  sd_logger: !include common.yaml

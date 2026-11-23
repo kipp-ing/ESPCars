@@ -1745,7 +1745,7 @@ def test_m6_keys_are_wired_into_codegen_exactly_when_the_setters_exist(
 
     This round is schema and validation only: the C++ setters do not exist, and
     emitting calls to them would break `esphome compile` for everyone. So
-    `tests/build/sd_logger/common.yaml` carries both keys and the firmware ignores
+    `tests/components/sd_logger/common.yaml` carries both keys and the firmware ignores
     them — acceptable while it is true on *both* sides, and invisible the moment it
     is not. A build that accepts `retention_percent: 80` and never arms retention
     looks exactly like one that does.

@@ -1,0 +1,6 @@
+substitutions:
+  sniff_tx_pin: GPIO2
+  sniff_rx_pin: GPIO3
+
+packages:
+  can_gateway: !include common_sniffer.yaml

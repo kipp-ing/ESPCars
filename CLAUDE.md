@@ -11,7 +11,7 @@ Detail lives in three docs; read the one you need rather than guessing:
 ```bash
 script/check.sh                                    # pytest + clang-format + config — before every commit
 make -C tests/host                                 # host C++ (~10 s) — when gateway_core.h changes
-.venv/bin/esphome compile tests/build/<c>/<t>.yaml # minutes — when C++ changed
+.venv/bin/python script/test_build_components.py compile tests/components/<c>/<t>.yaml # minutes — when C++ changed
 .venv/bin/python script/hil/selftest.py            # START HERE on the bench; writes tests/hil/BENCH-STATE.md
 .venv/bin/python script/hil/verify.py --seconds 45 --min-laps 75   # the release gate
 ```

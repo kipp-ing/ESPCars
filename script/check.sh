@@ -4,7 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY=.venv/bin/python
-ESPHOME=.venv/bin/esphome
 if [ ! -x "$PY" ]; then
   echo "No .venv — run: python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt -r requirements_lint.txt" >&2
   exit 1
@@ -35,10 +34,7 @@ else
 fi
 
 echo "== esphome config =="
-for y in tests/build/*/test*.yaml; do
-  "$ESPHOME" config "$y" > /dev/null
-  echo "VALID $y"
-done
+"$PY" script/test_build_components.py config > /dev/null
 
 # All clean source/configuration hooks block locally and in CI.
 # clang-tidy analyzes available local builds and skips missing/stale targets.

@@ -1,0 +1,6 @@
+substitutions:
+  mon_tx_pin: GPIO2
+  mon_rx_pin: GPIO3
+
+packages:
+  can_gateway: !include common_monitor.yaml

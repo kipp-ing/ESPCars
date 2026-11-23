@@ -303,7 +303,7 @@ def test_the_server_is_started_from_loop_and_never_from_setup() -> None:
     first time Phase B was flashed on hardware at all, and it never reached the point
     of serving a byte.
 
-    Nothing else in this repo can catch it. `tests/build/sd_logger/common.yaml`
+    Nothing else in this repo can catch it. `tests/components/sd_logger/common.yaml`
     compiles `serve: true` but CI never runs the binary; `test_collect.py`'s 66 cases
     drive a Python `FakeDevice`; `tests/host/` is IDF-free by construction. The fix is
     ordering, not error handling — `httpd_start()` never gets to return a code — so

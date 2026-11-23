@@ -773,7 +773,7 @@ class SdLogger : public Component {
   // FreeRTOS rather than in any code here — `assert failed: xQueueSemaphoreTake queue.c:1709
   // (( pxQueue ))`, on every boot, ~1.3 s in. Measured on Mr. Orange 2026-07-29, the first time
   // Phase B was ever flashed; nothing in the test suite can see it, because
-  // tests/build/sd_logger/common.yaml compiles this path and CI never runs it on hardware.
+  // tests/components/sd_logger/common.yaml compiles this path and CI never runs it on hardware.
   //
   // The earlier "the socket binds on 0.0.0.0, so it does not need WiFi to be associated yet" is
   // still true and is not what was wrong: *association* is not needed, *initialisation* is, and the

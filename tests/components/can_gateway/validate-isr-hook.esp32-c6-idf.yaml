@@ -1,0 +1,16 @@
+external_components:
+  - source:
+      type: local
+      path: ${component_dir}/fixtures
+    components: [isr_hook_compile]
+
+can_gateway:
+  id: gateway
+  ports:
+    - id: wire
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 500kbps
+
+isr_hook_compile:
+  port: wire

@@ -107,7 +107,7 @@ wiring). **P1b** is item 4 (clang-tidy) plus its own CI wiring.
    and alias-registry checks. Each check that is left out gets a one-line reason
    in the file.
 4. clang-tidy: adopt upstream `.clang-tidy`. Get `compile_commands.json` from
-   an `esphome compile` of each `tests/build/` target, then run
+   a `script/test_build_components.py compile` of each `tests/components/` target, then run
    `clang-tidy` (the upstream-pinned version) on `components/` only.
    This is the hardest step, so it goes in its own PR.
 5. Every new check goes into both `script/check.sh` and `ci.yml`
@@ -319,7 +319,7 @@ and the corresponding C++ names. Rename them to the ISO 17987 terms
 `commander`/`responder`. Keep `master`/`slave` accepted for one release cycle
 with a deprecation warning, following [CONVENTIONS](CONVENTIONS.md)'s
 "Don't break released YAML schemas silently" rule. Update the linbus user guide,
-schema tests, and `tests/build/` YAMLs to use the new terms.
+schema tests, and `tests/components/` YAMLs to use the new terms.
 
 **P4 implemented; compile and bench evidence pending:** all C++ declarations
 and definitions now use the C++17 namespace `esphome::linbus`; the seven mixed-case
@@ -399,9 +399,9 @@ fresh builds; local missing/stale builds alone remain non-fatal. P5e merges only
 after #40/#41 and the zero-finding CI-equivalent run, preserving P1's rule that
 report-only jobs join Required checks only at zero findings.
 
-### P6 — Test layout like upstream · mechanical
+### P6 — Test layout like upstream · bench-pending (schema limits)
 
-Move `tests/build/<name>/` → `tests/components/<name>/`, with `common*.yaml` as
+Use `tests/components/<name>/`, with `common*.yaml` as
 named packages and `test.<target>-<framework>.yaml` named the upstream way.
 Add `validate.*.yaml` for configs that are only validated. Spell out each
 component's platform limits in its schema (ESP32 + ESP-IDF only; the C5 is
@@ -409,7 +409,20 @@ rejected, V27), and document them. Update `ci.yml`, `check.sh`,
 `docs/CONVENTIONS.md` and every path that refers to the old location.
 
 **Done:** CI runs the same set of configs as before under the new paths, and
-nothing refers to `tests/build/` any more.
+only historical records refer to the old layout; the old→new codegen equivalence was verified once with a temporary mapping before merge.
+
+P6 uses shared platform bases plus a small composer, preserving the existing
+boards, partition defaults and logger level instead of upstream's larger test
+boards/partitions and VERY_VERBOSE logger. Every composed config has its own
+node name and build directory. CI's compile matrix remains 17 configs; the
+seven-target clang-tidy job additionally compiles the standalone sd_logger
+fixture (18 distinct compiled configs total). Three fixtures remain config-only:
+LIN dual, CAN ISR-hook API and sd_logger CAN tap. The pinned sparse reference has
+no `tests/components/sdmmc/` directory; the available CAN/UART/web_server examples
+and runner define the layout.
+
+The move is mechanical; explicit unsupported-platform errors change the YAML
+schema, so the complete phase is bench-pending under "Behavior neutrality".
 
 ### P7 — Docs in esphome.io format · mechanical
 
@@ -456,6 +469,7 @@ the same YAML on the same boards.
 | P4 | P4 | Listener RX path after namespace/file/role renames and constant conversion; intended passive behavior unchanged, with no new low-level RX/TX/event-task log calls at DEBUG. | Confirm zero TX; compare decoded IDs/data/checksums, inter-byte finalization, hardware-break/error resynchronization and reboot-on-busy-bus recovery against reference at DEBUG. | |
 | P4 | P4 | The six existing low-level ERROR calls now route through ESPHome instead of IDF. All 28 former W/I/D calls are VERBOSE, compiled out at DEBUG; no dump/action exceptions. VERBOSE diagnosis deliberately adds logging cost. | At DEBUG, confirm no new low-level diagnostics during RX/TX/event-task traffic and no timing/counter regression; exercise existing initialization-error paths and compare reporting through ESPHome. Record any timing impact separately when explicitly enabling VERBOSE diagnosis. | |
 | P4 | P4 | YAML modes normalize old spellings with warnings; commander_requests keeps the released sensor spelling as an alias. | Build reference/new firmware from unchanged bench YAML; confirm mode/TX conditions, counters, sensor totals and self-test outcome match. Schema/codegen equivalence is also covered by pytest. | |
+| P6 | P6 | Explicit ESP32/ESP-IDF schema guards reject unsupported platform/framework combinations earlier. Existing supported configs and generated runtime code must remain equivalent; can_gateway retains V27 C5 rejection and sd_logger retains C6-only support. | Build unchanged supported bench YAML on reference/new firmware and run selftest/verify; schema rejection tests and old-to-new codegen comparison cover config behavior outside the bench. | |
 
 **Done:** every row is checked off, with no regression against the reference
 outside what the rows allow.

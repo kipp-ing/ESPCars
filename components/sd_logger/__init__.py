@@ -734,6 +734,8 @@ VCC_MONITOR_SCHEMA = cv.Schema(
 )
 
 CONFIG_SCHEMA = cv.All(
+    cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(SdLogger),

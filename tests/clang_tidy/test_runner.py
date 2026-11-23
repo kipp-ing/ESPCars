@@ -21,6 +21,9 @@ REPO = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def tree(tmp_path, monkeypatch):
     monkeypatch.setattr(tidy, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        tidy.component_tests, "compose", lambda target, **kwargs: tmp_path / target
+    )
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     source = tmp_path / "components/demo/demo.cpp"
     source.parent.mkdir(parents=True)
@@ -36,7 +39,7 @@ def tree(tmp_path, monkeypatch):
 
 
 def database(tree, name="one", *, arguments=True):
-    build = tree / f"tests/build/demo/.esphome/build/{name}/build"
+    build = tree / f".esphome/build/{name}/build"
     build.mkdir(parents=True)
     copied = build.parent / "src/esphome/components/demo/demo.cpp"
     copied.parent.mkdir(parents=True)
@@ -101,7 +104,9 @@ def test_path_mapping(tree):
 def test_parse_and_header_coverage_use_current_repo_sources(tree, arguments):
     db = database(tree, arguments=arguments)
     temporary = tree / "temporary"
-    jobs, components = tidy.prepare_jobs(db, temporary, "tests/build/demo/test.yaml")
+    jobs, components = tidy.prepare_jobs(
+        db, temporary, "tests/components/demo/test.yaml"
+    )
     assert components == ["demo"]
     assert jobs[0][0] == tree / "components/demo/demo.cpp"
     assert (
@@ -371,7 +376,7 @@ def test_partial_builds_analyze_available_targets(
     assert tidy.main(args) == (2 if strict else int(findings and not report_only))
     assert len(calls) == 2
     output = capsys.readouterr().out
-    assert "run: esphome compile missing.yaml" in output
+    assert "run: python script/test_build_components.py compile missing.yaml" in output
     assert ("SKIP [clang-tidy]: missing.yaml:" in output) == (not strict)
     assert f"  tool errors: {int(strict)}\n" in output
     assert f"  TOTAL: {int(findings)}\n" in output
@@ -392,9 +397,9 @@ def test_component_table_distinguishes_skips_from_measured_zero(
     linbus = tree / "components/linbus"
     linbus.mkdir()
     (linbus / "linbus.h").write_text("#pragma once\n", encoding="utf-8")
-    ready = "tests/build/demo/ready.yaml"
-    skipped = "tests/build/linbus/skipped.yaml"
-    measured = "tests/build/linbus/ready.yaml"
+    ready = "tests/components/demo/ready.yaml"
+    skipped = "tests/components/linbus/skipped.yaml"
+    measured = "tests/components/linbus/ready.yaml"
     databases = {
         target: database(tree, name)
         for target, name in (
@@ -470,7 +475,7 @@ def test_empty_database_is_an_error(tree):
     db = database(tree)
     db.write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match=r"no component C\+\+ translation units"):
-        tidy.prepare_jobs(db, tree / "temp", "tests/build/demo/test.yaml")
+        tidy.prepare_jobs(db, tree / "temp", "tests/components/demo/test.yaml")
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -504,7 +509,7 @@ def test_ci_targets_and_blocking_wiring(capsys):
     assert not any(step.get("continue-on-error", False) for step in job["steps"])
     runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "script/clang_tidy.py --list-targets" in runs
-    assert 'esphome compile "$config"' in runs
+    assert 'python script/test_build_components.py compile "$config"' in runs
     assert "python script/clang_tidy.py --strict" in runs
     assert "--report-only" not in runs
     assert "~/.esphome-idf" in str(job)
@@ -540,7 +545,7 @@ def test_new_component_file_requires_compile(tree, monkeypatch, capsys, suffix, 
         "run_tidy",
         lambda *args: pytest.fail("stale build must be detected before clang-tidy"),
     )
-    target = "tests/build/demo/test.yaml"
+    target = "tests/components/demo/test.yaml"
     args = [target, "--summary", *(["--strict"] if strict else [])]
     assert tidy.main(args) == (2 if strict else 0)
     output = capsys.readouterr().out
@@ -548,7 +553,7 @@ def test_new_component_file_requires_compile(tree, monkeypatch, capsys, suffix, 
         f"New component file missing from build: components/demo/nested/new{suffix}"
         in output
     )
-    assert f"esphome compile {target}" in output
+    assert f"python script/test_build_components.py compile {target}" in output
     assert ("SKIP [clang-tidy]:" in output) == (not strict)
     assert f"  tool errors: {int(strict)}\n" in output
     assert "targets analyzed (0/1): (none)" in output
@@ -570,19 +575,21 @@ def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state, stri
         os.utime(generated, ns=(timestamp, timestamp))
     monkeypatch.setattr(tidy, "locate_database", lambda target: db)
     monkeypatch.setattr(tidy, "run_tidy", lambda *args: set())
-    target = "tests/build/demo/test.yaml"
+    target = "tests/components/demo/test.yaml"
     stale = state in ("missing", "older")
     args = [target, "--summary", *(["--strict"] if strict else [])]
     assert tidy.main(args) == (2 if stale and strict else 0)
     output = capsys.readouterr().out
     if stale:
         assert "defines.h" in output
-        assert f"esphome compile {target}" in output
+        assert f"python script/test_build_components.py compile {target}" in output
         assert ("SKIP [clang-tidy]:" in output) == (not strict)
         assert f"  tool errors: {int(strict)}\n" in output
         assert "targets analyzed (0/1): (none)" in output
     if state == "older":
         assert "components/demo/__init__.py" in output
+        assert "no content stamp" in output
+        assert "runner compile writes a stamp" in output
 
 
 @pytest.mark.parametrize("summary", [False, True])
@@ -655,7 +662,9 @@ def test_lint_report_partial_builds_keep_coverage_visible(
         assert "clang-tidy crashed" in output
     else:
         assert output.count("SKIP [clang-tidy]: unavailable.yaml:") == 1
-        assert "esphome compile unavailable.yaml" in output
+        assert (
+            "python script/test_build_components.py compile unavailable.yaml" in output
+        )
         assert "targets analyzed (1/2): ready.yaml" in output
         assert "INCOMPLETE" in output
         assert f"  clang-tidy: {int(findings)}\n" in output
@@ -671,7 +680,7 @@ def test_dependency_codegen_also_requires_compile(tree):
     # A header-only dependency has no compile-command entry of its own.
     (db.parent.parent / "src/esphome/components/dependency").mkdir()
     with pytest.raises(RuntimeError, match="components/dependency/__init__.py"):
-        tidy.prepare_jobs(db, tree / "temp", "tests/build/demo/test.yaml")
+        tidy.prepare_jobs(db, tree / "temp", "tests/components/demo/test.yaml")
 
 
 def test_repo_source_edits_are_passed_to_clang_tidy(tree, monkeypatch):
@@ -680,7 +689,7 @@ def test_repo_source_edits_are_passed_to_clang_tidy(tree, monkeypatch):
     original = copied.read_bytes()
     source = tree / "components/demo/demo.cpp"
     source.write_text("int UpdatedName = 3;\n", encoding="utf-8")
-    jobs, _ = tidy.prepare_jobs(db, tree / "temp", "tests/build/demo/test.yaml")
+    jobs, _ = tidy.prepare_jobs(db, tree / "temp", "tests/components/demo/test.yaml")
 
     def fake_tidy(command, **kwargs):
         input_path = Path(command[command.index("--") - 1])
@@ -716,7 +725,7 @@ def test_preprocessor_uses_repo_headers_even_from_generated_header(tree):
     copied_header.write_text(
         '#error "stale build copy must never be read"\n', encoding="utf-8"
     )
-    jobs, _ = tidy.prepare_jobs(db, tree / "temp", "tests/build/demo/test.yaml")
+    jobs, _ = tidy.prepare_jobs(db, tree / "temp", "tests/components/demo/test.yaml")
     for input_path, options, directory in jobs:
         # Exercise the real include/VFS options, with a host preprocessor and
         # no firmware compilation, SDK, or cross compiler required.
@@ -739,3 +748,90 @@ def test_preprocessor_uses_repo_headers_even_from_generated_header(tree):
         if input_path == source:
             assert "int cpp_edit = 1;" in result.stdout
             assert "int generated_value = 42;" in result.stdout
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_content_stamp_ignores_checkout_mtime(tree, monkeypatch, capsys, strict):
+    import hashlib
+
+    db = database(tree)
+    subprocess.run(["git", "init", "--quiet", str(tree)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    target = "tests/components/demo/test.esp32-idf.yaml"
+    files = {
+        path.relative_to(tree).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (tree / "components/demo").iterdir()
+    }
+    (db.parent.parent / "espcars-build-stamp.json").write_text(
+        json.dumps({"target": target, "files": files}), encoding="utf-8"
+    )
+    os.utime(tree / "components/demo/__init__.py", ns=(3_000_000_000, 3_000_000_000))
+    monkeypatch.setattr(tidy, "locate_database", lambda target: db)
+    monkeypatch.setattr(tidy, "run_tidy", lambda *args: set())
+    assert tidy.main([target, "--summary", *(["--strict"] if strict else [])]) == 0
+    output = capsys.readouterr().out
+    assert "targets analyzed (1/1)" in output
+    assert "INCOMPLETE" not in output
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("change", ["added", "removed", "changed"])
+@pytest.mark.parametrize("filename", ["__init__.py", "unused.h", "demo.cpp"])
+def test_content_stamp_distinguishes_codegen_changes_from_source_edits(
+    tree, monkeypatch, capsys, strict, change, filename
+):
+    db = database(tree)
+    subprocess.run(["git", "init", "--quiet", str(tree)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    target = "tests/components/demo/test.esp32-idf.yaml"
+    tidy.component_tests.write_build_stamp(target, db.parent.parent, root=tree)
+    path = tree / "components/demo" / filename
+    if change == "added":
+        path = path.with_name("new" + path.suffix)
+        path.write_text("new component source\n", encoding="utf-8")
+        subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    elif change == "removed":
+        path.unlink()
+    else:
+        previous = path.stat()
+        path.write_text("changed source\n", encoding="utf-8")
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    stale = change != "changed" or path.suffix == ".py"
+    calls = []
+
+    def run(*args):
+        assert not stale, "stale input must not be analyzed"
+        calls.append(args)
+        return set()
+
+    monkeypatch.setattr(tidy, "locate_database", lambda target: db)
+    monkeypatch.setattr(tidy, "run_tidy", run)
+    assert tidy.main([target, "--summary", *(["--strict"] if strict else [])]) == (
+        2 if strict and stale else 0
+    )
+    output = capsys.readouterr().out
+    if stale:
+        assert (
+            f"{change.capitalize()} component file: {path.relative_to(tree)}" in output
+        )
+        assert "demo: skipped (stale)" in output
+        assert "INCOMPLETE" in output
+        assert ("SKIP [clang-tidy]:" in output) == (not strict)
+        assert not calls
+    else:
+        assert "targets analyzed (1/1)" in output
+        assert "INCOMPLETE" not in output
+        assert "Changed component file" not in output
+        assert len(calls) == 2
+
+
+def test_stamp_for_another_target_is_stale(tree):
+    db = database(tree)
+    subprocess.run(["git", "init", "--quiet", str(tree)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    tidy.component_tests.write_build_stamp("other target", db.parent.parent, root=tree)
+    with pytest.raises(
+        tidy.BuildUnavailable, match="Build stamp target other target differs"
+    ) as error:
+        tidy.check_build_freshness(db.parent.parent / "src", ["demo"], "this target")
+    assert error.value.reason == "stale"

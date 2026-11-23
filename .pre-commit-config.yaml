@@ -14,7 +14,7 @@ exclude: |
     tests/portal/fixtures/envelopes/.*|
     tests/portal/page/[^/]+\.json|
     components/portal/index\.html|
-    tests/build/portal/custom_page\.html
+    tests/components/portal/custom_page\.html
   )$
 
 repos:

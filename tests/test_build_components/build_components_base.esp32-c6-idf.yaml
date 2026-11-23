@@ -1,0 +1,23 @@
+# Preserve the existing board, partition defaults and DEBUG logger for codegen parity.
+esphome:
+  name: $node_name
+  build_path: $component_build_path
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: $repo_root/components
+
+packages:
+  component_under_test: !include
+    file: $component_test_file
+    vars:
+      component_dir: $component_dir
+      repo_root: $repo_root

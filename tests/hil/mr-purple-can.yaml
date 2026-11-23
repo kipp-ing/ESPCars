@@ -5,7 +5,7 @@
 #   .venv/bin/esphome run tests/hil/mr-purple-partner.yaml --device <c6-port>
 #
 # Pins: TX GPIO26 / RX GPIO25 into SN65HVD230 U4 -> J1.1/J1.2. 125 kbps, to
-# match mr-purple-partner.yaml. (tests/build/can_gateway/test-monitor.esp32-idf.yaml
+# match mr-purple-partner.yaml. (tests/components/can_gateway/test-monitor.esp32-idf.yaml
 # is the *compile* target and runs at 500 kbps — do not flash that one here and
 # expect traffic.)
 #

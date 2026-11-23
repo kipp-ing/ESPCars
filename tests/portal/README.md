@@ -2,7 +2,7 @@
 
 Everything here is fictional (vehicle "demo", MACs `02:00:00:00:00:xx`). Contract:
 `docs/portal-spec.md`. Run: `.venv/bin/python -m pytest tests/portal -q`, `make -C tests/host`,
-`.venv/bin/esphome config tests/build/portal/test*.yaml`.
+`.venv/bin/python script/test_build_components.py config tests/components/portal/test*.yaml`.
 
 <!--
 COVERAGE  PS ID -> test (a "-" is a gap, "bench" means the PR carries the bench record)
@@ -22,7 +22,7 @@ PS-M1-08     test_envelope_parity (byte-identical golden, schema), test_wire_sch
 PS-M1-09     test_wire_schema.py (RULES table, never-raises, CLI)
 PS-M1-10     test_codegen::test_web_asset_*, test_default_asset_*, test_config_full web_asset, test_schema asset keys
 PS-M1-11     test_asset::test_page_*
-PS-M1-12     tests/build/portal/test-minimal (cfg here, cc in CI)
+PS-M1-12     tests/components/portal/test-minimal (cfg here, cc in CI)
 PS-M2-01     test_asset::test_no_own_httpd_*, test_component_registers_via_web_server_base, test_codegen::test_web_server_base_is_loaded_*
 PS-M2-02     test_config_full::test_portal_with_web_server_is_rejected
 PS-M2-03     test_codegen::test_port_reaches_web_server_base, test_config_full::..._captive_portal_and_ap
@@ -42,8 +42,8 @@ PS-M3-08     test_asset::test_page_renders_each_control, test_page_sends_json_vi
 PS-M3-07/v1.3 rules  test_handler_rules.py (503 on lock timeout, shutdown B1, body reset N1: grep-level); 411/form>1KiB/503 behaviour: bench (BENCH.md)
 PS-M3-10     test_page_core.py (node), bench (BENCH.md page rows)
 PS-M3-09     test_asset::test_entity_calls_are_not_made_from_the_request_handler (grep level; review by the spec owner)
-PS-M4-01     tests/build/portal/test.esp32-c6-idf.yaml, test_asset::test_build_yamls_transmit_on_no_bus
-PS-M4-02     tests/build/portal/test-asset.esp32-c6-idf.yaml
+PS-M4-01     tests/components/portal/test.esp32-c6-idf.yaml, test_asset::test_build_yamls_transmit_on_no_bus
+PS-M4-02     tests/components/portal/test-asset.esp32-c6-idf.yaml
 PS-M4-03     review
 PS-M5-*      bench
 -->
@@ -61,4 +61,4 @@ PS-M5-*      bench
 | `test_asset.py` | py: component sources, built-in page, privacy |
 | `test_page_core.py` | py + node: page core repaint hold and local clocks |
 | `tests/host/test_portal_core.cpp`, `test_portal_actions.cpp` | host C++ (ASan/UBSan) |
-| `tests/build/portal/` | cfg + cc |
+| `tests/components/portal/` | cfg + cc |

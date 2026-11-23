@@ -386,7 +386,7 @@ emitted, because the flashed catalog may legitimately be newer than the firmware
 |---|---|
 | `tests/host` | catalog reader against a truncated-at-every-length blob under ASan, with no out-of-bounds read and no crash; extraction truth table (signed, byteswap, cross-byte, ASCII); scale evaluation incl. sentinel → NaN and no-row-matches → NaN; response validation incl. the identifier-echo and short-response guards; NRC classification; scheduler due order, backoff schedule and one-in-flight |
 | `tests/uds` (pytest) | schema accept **and** reject paths; unknown/ambiguous `field:` diagnostics; the `SAFE_READ` gate; partition sizing; compiler round-trip; byte-identical golden `mini.dcat`; **cross-check of a compiled catalog against a hand-curated reference table for the same ECU, when that private fixture is present locally** |
-| `tests/build/uds` | `embed: true` config compiled by CI (no partition needed) and a partition config compiled beside it |
+| `tests/components/uds` | `embed: true` config compiled by CI (no partition needed) and a partition config compiled beside it |
 | `tests/hil` | a responder rig (§9) proving multi-frame reassembly on our own hardware, then real hardware |
 
 The cross-check is the interesting one, where it can run. Two independent

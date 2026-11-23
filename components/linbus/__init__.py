@@ -179,6 +179,8 @@ def _validate_mode_config(config):
 
 # Main configuration schema
 CONFIG_SCHEMA = cv.All(
+    cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(LinBusComponent),

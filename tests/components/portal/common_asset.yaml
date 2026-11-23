@@ -1,0 +1,20 @@
+# Replaces the built-in page with a custom one (web_asset, relative to this YAML).
+packages:
+  entities: !include common_entities.yaml
+
+wifi:
+  ssid: demo-network
+  password: demo-password-1
+
+portal:
+  build: demo-asset
+  web_asset: ${component_dir}/custom_page.html
+  tree:
+    - segment: vehicle
+      kind: vehicle
+      label: Demo vehicle
+      values:
+        - key: supply
+          label: Supply
+          unit: V
+          sensor: supply_voltage

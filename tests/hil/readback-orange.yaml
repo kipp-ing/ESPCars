@@ -3,7 +3,7 @@
 # M6 Phase B is built and committed (fd0a071) and **has never been on hardware**. No board has
 # served a chunk, no `#gap` line has ever been read off a card, no v1 file has ever been read back
 # at all. This rig is the config that was missing: every other `tests/hil/` rig with a
-# `collection:` block sets `serve: false` on purpose, and `tests/build/sd_logger/common.yaml` — the
+# `collection:` block sets `serve: false` on purpose, and `tests/components/sd_logger/common.yaml` — the
 # only config in the tree with `serve: true` — is compiled by CI and never flashed.
 #
 #   .venv/bin/esphome run tests/hil/readback-orange.yaml \

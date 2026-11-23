@@ -1,5 +1,8 @@
 # Using `sd_logger` — a bus datalogger in an ESPHome project
 
+Supported platform: **ESP32 with ESP-IDF only**. Arduino and non-ESP32
+targets are rejected during config validation. Only ESP32-C6 is supported; the existing variant restriction and ESP-IDF 5.5 minimum remain in force.
+
 A practical guide: what the component does, how a project is actually put
 together, and the end-to-end workflow from a wired-up card to a checked-out
 `.LOG` file on your desk. For *why* it is built this way — the ring/writer
@@ -349,7 +352,7 @@ logging setup (a new `max_file_seconds`, a `collection:` block) from ever
 touching the file that proves the board's core behavior still works, and
 keeps the reverse true too — see `tests/hil/mr-orange-sdlog.yaml` for the
 worked example this guide's §3 examples are drawn from, and
-`tests/build/sd_logger/common.yaml` / `common_cantap.yaml` for the two
+`tests/components/sd_logger/common.yaml` / `common_cantap.yaml` for the two
 minimal, fully-annotated configs (action-only, and native CAN-tap) that CI
 compiles on every change.
 
@@ -512,7 +515,7 @@ being deliberate about anyway:
   both have to satisfy, if you're writing an alternative puller.
 - `script/sdlog.py --help` / `script/sdlog_collect.py --help` — `check` /
   `extract` / `head`, and `index` / `pull`.
-- `tests/build/sd_logger/common.yaml` (action-only) + `common_cantap.yaml`
+- `tests/components/sd_logger/common.yaml` (action-only) + `common_cantap.yaml`
   (native CAN tap) — minimal, fully-annotated worked examples of every
   config key.
 - `tests/hil/mr-orange-sdlog.yaml` — a full real-world configuration:

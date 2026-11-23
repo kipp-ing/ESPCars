@@ -89,26 +89,30 @@ DAQ_ANCHOR_SCHEMA = cv.Schema(
 )
 
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.Required(CONF_ID): cv.declare_id(CcpHub),
-        cv.Required(CONF_CAN_GATEWAY_ID): cv.use_id(GatewayPort),
-        cv.Optional(CONF_COMMAND_ID, default=0x700): _can_id,
-        cv.Optional(CONF_RESPONSE_ID, default=0x701): _can_id,
-        cv.Optional(CONF_STATION_ADDRESS, default=0x0001): cv.hex_uint16_t,
-        cv.Optional(CONF_BYTE_ORDER, default="little"): _byte_order,
-        cv.Optional(
-            CONF_RESPONSE_TIMEOUT, default="100ms"
-        ): cv.positive_time_period_milliseconds,
-        cv.Optional(CONF_ALLOW_WRITE, default=False): cv.boolean,
-        cv.Optional(CONF_DAQ_ANCHOR): DAQ_ANCHOR_SCHEMA,
-        cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(),
-        cv.Optional(CONF_ON_RESPONSE): automation.validate_automation(),
-        cv.Optional(CONF_ON_ERROR): automation.validate_automation(),
-        cv.Optional(CONF_ON_DAQ): automation.validate_automation(),
-        cv.Optional(CONF_ON_DAQ_READ): automation.validate_automation(),
-    }
-).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(
+    cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.declare_id(CcpHub),
+            cv.Required(CONF_CAN_GATEWAY_ID): cv.use_id(GatewayPort),
+            cv.Optional(CONF_COMMAND_ID, default=0x700): _can_id,
+            cv.Optional(CONF_RESPONSE_ID, default=0x701): _can_id,
+            cv.Optional(CONF_STATION_ADDRESS, default=0x0001): cv.hex_uint16_t,
+            cv.Optional(CONF_BYTE_ORDER, default="little"): _byte_order,
+            cv.Optional(
+                CONF_RESPONSE_TIMEOUT, default="100ms"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_ALLOW_WRITE, default=False): cv.boolean,
+            cv.Optional(CONF_DAQ_ANCHOR): DAQ_ANCHOR_SCHEMA,
+            cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(),
+            cv.Optional(CONF_ON_RESPONSE): automation.validate_automation(),
+            cv.Optional(CONF_ON_ERROR): automation.validate_automation(),
+            cv.Optional(CONF_ON_DAQ): automation.validate_automation(),
+            cv.Optional(CONF_ON_DAQ_READ): automation.validate_automation(),
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+)
 
 
 def _final_validate(config):

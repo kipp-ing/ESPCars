@@ -1,4 +1,5 @@
 .venv/
+# Composed test wrappers and per-config ESPHome build directories.
 .esphome/
 __pycache__/
 *.pyc

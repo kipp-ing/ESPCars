@@ -1,0 +1,2 @@
+packages:
+  uds: !include common_partition.yaml

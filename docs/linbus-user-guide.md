@@ -1,5 +1,8 @@
 # Using `linbus` — LIN commander/responder/sniffer in an ESPHome project
 
+Supported platform: **ESP32 with ESP-IDF only**. Arduino and non-ESP32
+targets are rejected during config validation. The compile fixtures cover classic ESP32, ESP32-C3 and ESP32-C6.
+
 A practical guide: what the component does, how a project is actually put
 together, and the end-to-end workflow from a wired-up transceiver to
 statistics and frame data flowing into ESPHome. This document only covers the
@@ -237,7 +240,7 @@ packages:
   lin: !include my-lin-segment.yaml   # linbus: + its sensor:/binary_sensor: block
 ```
 
-`tests/build/linbus/common_dual.yaml` is the worked example for **two**
+`tests/components/linbus/common_dual.yaml` is the worked example for **two**
 segments on one chip — a responder on `UART_NUM_1` answering a partner's poll,
 and a listener on `UART_NUM_2` sniffing the same wire — proving two instances
 stay independently addressable (`linbus_id:` on every sensor/action). Two
@@ -394,10 +397,10 @@ what you're answering or scheduling. Confirm what's actually flashed from the
   registration, and the self-test's fixed nine-id loopback table.
 - `components/linbus/linbus.cpp` — `dump_config()` and the 10 s statistics
   block, if you're chasing an exact log format.
-- `tests/build/linbus/common.yaml` — a single commander instance exercising
+- `tests/components/linbus/common.yaml` — a single commander instance exercising
   every config key (`schedule`, `responses`, `rx_ids`, `on_frame`,
   `on_error`, both actions, every sensor).
-- `tests/build/linbus/common_dual.yaml` — two independent instances (a responder
+- `tests/components/linbus/common_dual.yaml` — two independent instances (a responder
   and a listener) on one chip, the worked `packages:`-style example for §4.
 - `tests/hil/mr-purple-lin.yaml` — a real two-transceiver board bring-up,
   including the CAN/LIN cross-talk lesson cited in §4.

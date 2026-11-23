@@ -1,0 +1,8 @@
+esphome:
+  # Compiles the `project=` branch of `#ident` (spec F1j); the other two targets compile without it.
+  project:
+    name: example.sdlog-taponly
+    version: "1.0.0"
+
+packages:
+  sd_logger: !include common_taponly.yaml

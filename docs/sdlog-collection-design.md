@@ -477,5 +477,5 @@ httpd allocation.
   rotation that used to be the only witness scrolls past on a soak.
 
 Per the repo's definition of done, each ships with acceptance *and* rejection
-tests in `tests/sd_logger/`, and every new key appears in a `tests/build/` yaml
+tests in `tests/sd_logger/`, and every new key appears in a `tests/components/` yaml
 so CI compiles it.
