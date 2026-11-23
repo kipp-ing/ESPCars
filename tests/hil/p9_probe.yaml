@@ -1,0 +1,9 @@
+# Only new P9 number: heap immediately after setup (before the first load window).
+# Loop maximum/loop count and loaded heap already exist in heap_loop_probe.yaml.
+# CPU/task packages already exist. runtime_stats stays out of gate runs (overhead).
+packages:
+  heap_loop: !include heap_loop_probe.yaml
+  cpu: !include cpu_stats.yaml
+  tasks: !include task_stats.yaml
+
+  setup_heap: !include p9_setup.yaml

@@ -1,0 +1,5 @@
+# Workloads already include CPU stats; include that sampler only once.
+packages:
+  heap_loop: !include heap_loop_probe.yaml
+  tasks: !include task_stats.yaml
+  setup_heap: !include p9_setup.yaml

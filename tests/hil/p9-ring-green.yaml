@@ -1,0 +1,4 @@
+# Existing ring TX only; same optimisation as the 19.4 laps/s gate.
+packages:
+  ring: !include mr-green.yaml
+  probe: !include p9_probe.yaml

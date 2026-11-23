@@ -1,0 +1,61 @@
+# Radio-free heap/loop sampler reused by wifi_probe.yaml and P9.
+globals:
+  - id: loop_max_us
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: loop_slow_count
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: loop_count
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: loop_last_us
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+interval:
+  # The main-loop sampler. `interval: 0s` is ESPHome's spelling for "every loop iteration", which
+  # makes this measurement self-referential in the right way: it sits in the queue it is timing.
+  # Cost is one micros() and three compares per loop — no allocation, no log line.
+  - interval: 0s
+    then:
+      - lambda: |-
+          const uint32_t now = micros();
+          if (id(loop_last_us) != 0) {
+            const uint32_t delta = now - id(loop_last_us);  // wraps correctly at 2^32 us (~71 min)
+            if (delta > id(loop_max_us))
+              id(loop_max_us) = delta;
+            if (delta > 50000)
+              id(loop_slow_count) += 1;
+          }
+          id(loop_last_us) = now;
+          id(loop_count) += 1;
+
+  # Everything else on one 10 s cadence, matching cpu_stats/task_stats so the lines interleave
+  # readably in a single capture.
+  - interval: 10s
+    then:
+      - lambda: |-
+          // Heap: TWO numbers, and the second is the one that decides §9.3. The total is not what
+          // an allocation has to fit into — a heap fragmented into 2 kB pieces cannot serve a
+          // 10 kB httpd allocation however much of it is free. Report both or neither.
+          ESP_LOGI("heap", "free %u B, largest block %u B, min since boot %u B",
+                   (unsigned) esp_get_free_heap_size(),
+                   (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                   (unsigned) esp_get_minimum_free_heap_size());
+
+          // The main loop, then reset the window. Labelled as the main loop, never as LIN.
+          //
+          // Cast, like the heap line above: these globals are uint32_t, which on the C6's 32-bit
+          // RISC-V target is `long unsigned int`, so a bare `%u` is three -Wformat warnings per
+          // build. Harmless at runtime — same width — but it is the only warning the WiFi rigs
+          // emit, and a build that is not silent is one nobody reads.
+          ESP_LOGI("loop", "max %u us, %u gaps > 50 ms, %u loops", (unsigned) id(loop_max_us),
+                   (unsigned) id(loop_slow_count), (unsigned) id(loop_count));
+          id(loop_max_us) = 0;
+          id(loop_slow_count) = 0;
+          id(loop_count) = 0;

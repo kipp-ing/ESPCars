@@ -1,0 +1,19 @@
+# Fictional parser fixture only. No measured telemetry.
+[00:00:10.000][I][p9:10]: after_setup heap free 180000 B, largest block 140000 B, min since boot 175000 B
+[00:00:10.001][I][heap:11]: free 160000 B, largest block 120000 B, min since boot 150000 B
+[00:00:10.002][I][loop:12]: max 2200 us, 0 gaps > 50 ms, 10000 loops
+[00:00:10.003][I][cpu:13]: CPU 23.5% (idle 76.5%, 12 tasks)
+[00:00:10.004][I][task:14]:   loopTask        11.2%  prio  1  stack_hw  4096 B
+[00:00:10.005][I][can_gateway:15]: Port 0 stats: bus load 20.0% (rx 10.0% / tx 10.0%), bus_err 0, err_events 0, tx_fail 0, TEC 0, REC 0
+[00:00:10.006][I][linbus:16]: Checksum Errors: 0 | 0
+[00:00:10.007][I][linbus:17]: Send Failures: 0 | 0
+[00:00:10.008][I][linbus:18]: Error Rate: 0.00%
+[00:00:10.009][C][can_gateway:19]:     Slots in use: 2/16
+[00:00:10.010][I][can_gateway:20]:   Port 0 ID 0x150: avg 10005 us, n 90
+[00:00:10.011][I][LIN_COMM:21]: ID 0x30 upd=200 miss=0 min=49.0ms max=51.0ms exp=50.0ms OK
+[00:00:10.012][I][sd_logger:22]: records=400 dropped=0 tap_dropped=0 text_dropped=0 card_dropped=0 index_refused=0
+[00:00:10.013][W][component:23]: linbus took a long time for an operation (61 ms)
+[00:00:10.014][I][ring:24]: RING lap 25 closed
+[00:00:50.014][I][ring:24]: RING lap 825 closed
+[00:00:50.015][I][heap:25]: free 155000 B, largest block 115000 B, min since boot 145000 B
+[00:00:50.016][I][runtime_stats:26]:   main_loop: iters=28000, active_avg=0.041ms, active_max=2.10ms

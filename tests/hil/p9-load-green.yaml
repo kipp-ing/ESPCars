@@ -1,0 +1,7 @@
+# Existing bench workload, no new bus transmissions.
+substitutions:
+  burst: "2"
+
+packages:
+  workload: !include stress-green-load.yaml
+  probe: !include p9_loaded_probe.yaml

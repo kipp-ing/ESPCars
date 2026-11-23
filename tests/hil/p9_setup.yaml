@@ -1,0 +1,28 @@
+# Retain setup heap so attaching after upload cannot miss the one-shot snapshot.
+globals:
+  - id: p9_setup_free
+    type: uint32_t
+    initial_value: "0"
+  - id: p9_setup_largest
+    type: uint32_t
+    initial_value: "0"
+  - id: p9_setup_min
+    type: uint32_t
+    initial_value: "0"
+
+esphome:
+  on_boot:
+    - priority: -100
+      then:
+        - lambda: |-
+            id(p9_setup_free) = esp_get_free_heap_size();
+            id(p9_setup_largest) = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+            id(p9_setup_min) = esp_get_minimum_free_heap_size();
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          ESP_LOGI("p9", "after_setup heap free %u B, largest block %u B, min since boot %u B",
+                   (unsigned) id(p9_setup_free), (unsigned) id(p9_setup_largest),
+                   (unsigned) id(p9_setup_min));
