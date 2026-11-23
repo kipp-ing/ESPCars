@@ -8,6 +8,7 @@ Generated wrappers and distinct per-config builds live under .esphome/.
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -16,6 +17,62 @@ import sys
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+BUILD_STAMP = "espcars-build-stamp.json"
+# ESPHome's SOURCE_FILE_EXTENSIONS plus the C++ TU suffixes clang-tidy accepts.
+COMPONENT_SOURCE_EXTENSIONS = {
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".hpp",
+    ".h",
+    ".c",
+    ".tcc",
+    ".ino",
+}
+STAMP_EXTENSIONS = COMPONENT_SOURCE_EXTENSIONS | {".py"}
+
+
+def component_hashes(source_root, *, root=None):
+    """Hash tracked sources of every repository component present in this build."""
+    root = ROOT if root is None else root
+    copied = source_root / "esphome/components"
+    active = {
+        path.name
+        for path in copied.iterdir()
+        if path.is_dir() and (root / "components" / path.name).is_dir()
+    }
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "components/"],
+        cwd=root,
+        capture_output=True,
+        check=True,
+    )
+    hashes = {}
+    for name in result.stdout.decode().split("\0"):
+        path = Path(name)
+        if (
+            len(path.parts) >= 3
+            and path.parts[1] in active
+            and path.suffix in STAMP_EXTENSIONS
+            and (root / path).is_file()
+        ):
+            hashes[path.as_posix()] = hashlib.sha256(
+                (root / path).read_bytes()
+            ).hexdigest()
+    return hashes
+
+
+def write_build_stamp(target, directory, *, root=None):
+    """Record successful generation/compilation without depending on file mtimes."""
+    files = component_hashes(directory / "src", root=root)
+    stamp = directory / BUILD_STAMP
+    temporary = stamp.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps({"target": target, "files": files}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(stamp)
+    return stamp
 
 
 def list_targets(*, include_validate=False, root=None):
@@ -145,7 +202,9 @@ def main(argv=None):
             result = subprocess.run(command, cwd=ROOT, check=False)
             if result.returncode:
                 return result.returncode
-    except (OSError, ValueError) as error:
+            if args.command == "compile":
+                write_build_stamp(target, build_path(target))
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(2, f"{error}\n")
     return 0
 

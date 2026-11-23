@@ -70,6 +70,10 @@ sanitizers. If `.venv` is missing:
   hook-config and clang-tidy block both `script/check.sh` and CI. Local
   clang-tidy analyzes available builds and skips missing/stale targets; CI's
   dedicated Required check uses `--strict` and requires all seven builds.
+  Successful runner compile/codegen writes per-target source hashes to
+  `.esphome/build/<node>/espcars-build-stamp.json` (already covered by `.gitignore`'s
+  `.esphome/` rule), so checkout mtime changes are harmless; unstamped builds use
+  the legacy mtime fallback.
 - Only no-commit-to-branch remains advisory in `check.sh` and CI: the commit-time
   hook rejects `main`, including legitimate post-merge CI runs on that branch.
 - Merge with a merge commit, as the history does.

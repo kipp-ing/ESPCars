@@ -588,6 +588,8 @@ def test_generated_config_freshness_guard(tree, monkeypatch, capsys, state, stri
         assert "targets analyzed (0/1): (none)" in output
     if state == "older":
         assert "components/demo/__init__.py" in output
+        assert "no content stamp" in output
+        assert "runner compile writes a stamp" in output
 
 
 @pytest.mark.parametrize("summary", [False, True])
@@ -746,3 +748,90 @@ def test_preprocessor_uses_repo_headers_even_from_generated_header(tree):
         if input_path == source:
             assert "int cpp_edit = 1;" in result.stdout
             assert "int generated_value = 42;" in result.stdout
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_content_stamp_ignores_checkout_mtime(tree, monkeypatch, capsys, strict):
+    import hashlib
+
+    db = database(tree)
+    subprocess.run(["git", "init", "--quiet", str(tree)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    target = "tests/components/demo/test.esp32-idf.yaml"
+    files = {
+        path.relative_to(tree).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (tree / "components/demo").iterdir()
+    }
+    (db.parent.parent / "espcars-build-stamp.json").write_text(
+        json.dumps({"target": target, "files": files}), encoding="utf-8"
+    )
+    os.utime(tree / "components/demo/__init__.py", ns=(3_000_000_000, 3_000_000_000))
+    monkeypatch.setattr(tidy, "locate_database", lambda target: db)
+    monkeypatch.setattr(tidy, "run_tidy", lambda *args: set())
+    assert tidy.main([target, "--summary", *(["--strict"] if strict else [])]) == 0
+    output = capsys.readouterr().out
+    assert "targets analyzed (1/1)" in output
+    assert "INCOMPLETE" not in output
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("change", ["added", "removed", "changed"])
+@pytest.mark.parametrize("filename", ["__init__.py", "unused.h", "demo.cpp"])
+def test_content_stamp_distinguishes_codegen_changes_from_source_edits(
+    tree, monkeypatch, capsys, strict, change, filename
+):
+    db = database(tree)
+    subprocess.run(["git", "init", "--quiet", str(tree)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    target = "tests/components/demo/test.esp32-idf.yaml"
+    tidy.component_tests.write_build_stamp(target, db.parent.parent, root=tree)
+    path = tree / "components/demo" / filename
+    if change == "added":
+        path = path.with_name("new" + path.suffix)
+        path.write_text("new component source\n", encoding="utf-8")
+        subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    elif change == "removed":
+        path.unlink()
+    else:
+        previous = path.stat()
+        path.write_text("changed source\n", encoding="utf-8")
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    stale = change != "changed" or path.suffix == ".py"
+    calls = []
+
+    def run(*args):
+        assert not stale, "stale input must not be analyzed"
+        calls.append(args)
+        return set()
+
+    monkeypatch.setattr(tidy, "locate_database", lambda target: db)
+    monkeypatch.setattr(tidy, "run_tidy", run)
+    assert tidy.main([target, "--summary", *(["--strict"] if strict else [])]) == (
+        2 if strict and stale else 0
+    )
+    output = capsys.readouterr().out
+    if stale:
+        assert (
+            f"{change.capitalize()} component file: {path.relative_to(tree)}" in output
+        )
+        assert "demo: skipped (stale)" in output
+        assert "INCOMPLETE" in output
+        assert ("SKIP [clang-tidy]:" in output) == (not strict)
+        assert not calls
+    else:
+        assert "targets analyzed (1/1)" in output
+        assert "INCOMPLETE" not in output
+        assert "Changed component file" not in output
+        assert len(calls) == 2
+
+
+def test_stamp_for_another_target_is_stale(tree):
+    db = database(tree)
+    subprocess.run(["git", "init", "--quiet", str(tree)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tree, check=True)
+    tidy.component_tests.write_build_stamp("other target", db.parent.parent, root=tree)
+    with pytest.raises(
+        tidy.BuildUnavailable, match="Build stamp target other target differs"
+    ) as error:
+        tidy.check_build_freshness(db.parent.parent / "src", ["demo"], "this target")
+    assert error.value.reason == "stale"

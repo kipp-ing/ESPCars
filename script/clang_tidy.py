@@ -11,8 +11,10 @@ compiler/tool errors. Exit codes: 0 clean/advisory, 1 findings, 2 tool errors.
 Options ported from esphome/esphome script/clang-tidy at
 03eebae7b6e4cc81058f36a00a7f8c0c98eba341 (ESP-IDF Xtensa/RISC-V only).
 CMake entries replace upstream's idedata; no PlatformIO project is required.
-Existing source/header edits are read from the working tree. New C++ files or
-codegen edits newer than generated defines require another `esphome compile`.
+Existing source/header edits are read from the working tree via the overlay.
+Runner builds record content hashes; Python codegen changes and component
+file additions/removals require regeneration.
+Unstamped builds retain the conservative codegen-mtime fallback.
 """
 
 import argparse
@@ -68,18 +70,8 @@ OMIT_FLAGS = frozenset(
         "-mno-target-align",
     )
 )
-# ESPHome's SOURCE_FILE_EXTENSIONS, plus the C++ TU suffixes accepted below.
-# Python and assets (e.g. portal/index.html) are not copied into the C++ build.
-COMPONENT_SOURCE_EXTENSIONS = {
-    ".cpp",
-    ".cc",
-    ".cxx",
-    ".hpp",
-    ".h",
-    ".c",
-    ".tcc",
-    ".ino",
-}
+# Python is hashed in build stamps, but is not a build-copyable C++ source.
+COMPONENT_SOURCE_EXTENSIONS = component_tests.COMPONENT_SOURCE_EXTENSIONS
 
 
 class BuildUnavailable(RuntimeError):
@@ -355,9 +347,27 @@ def run_tidy(executable, source, options, directory, fixes):
 
 
 def check_build_freshness(source_root, components, target):
-    """Reject missing build inputs and defines older than component codegen."""
+    """Reject missing inputs, file-set changes and changed Python codegen."""
     generated = source_root / "esphome/core/defines.h"
     problems = []
+    stamp_path = source_root.parent / component_tests.BUILD_STAMP
+    stamped = stamp_path.is_file()
+    if stamped:
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+        if stamp["target"] != target:
+            problems.append(
+                f"Build stamp target {stamp['target']} differs from {target}"
+            )
+        current = component_tests.component_hashes(source_root, root=ROOT)
+        previous = stamp["files"]
+        for name in sorted(previous.keys() | current.keys()):
+            if name not in previous:
+                problems.append(f"Added component file: {name}")
+            elif name not in current:
+                problems.append(f"Removed component file: {name}")
+            # Existing C++ edits are read through the working-tree overlay.
+            elif Path(name).suffix == ".py" and previous[name] != current[name]:
+                problems.append(f"Changed component file: {name}")
     if not generated.is_file():
         problems.append(f"Missing generated config: {generated}")
     for component in components:
@@ -372,12 +382,14 @@ def check_build_freshness(source_root, components, target):
                     )
         codegen = repo_component / "__init__.py"
         if (
-            generated.is_file()
+            not stamped
+            and generated.is_file()
             and codegen.is_file()
             and codegen.stat().st_mtime_ns > generated.stat().st_mtime_ns
         ):
             problems.append(
-                f"Generated config {generated} is older than {codegen.relative_to(ROOT)}"
+                f"Generated config {generated} is older than {codegen.relative_to(ROOT)} "
+                "(no content stamp; re-running the runner compile writes a stamp)"
             )
     if problems:
         raise BuildUnavailable(
@@ -396,8 +408,6 @@ def prepare_jobs(database, temporary, target):
         name = repo_path(entry["file"], Path(entry["directory"]))
         if name and Path(name).suffix in (".cpp", ".cc", ".cxx"):
             selected.append((entry, name))
-    if not selected:
-        raise ValueError(f"{database}: no component C++ translation units")
     components = sorted(
         {Path(name).parts[1] for _, name in selected}
         | {
@@ -407,6 +417,8 @@ def prepare_jobs(database, temporary, target):
         }
     )
     check_build_freshness(source_root, components, target)
+    if not selected:
+        raise ValueError(f"{database}: no component C++ translation units")
     overlay = temporary / "include"
     remappings = []
     for component in components:
@@ -606,6 +618,7 @@ def main(argv=None):
         ImportError,
         ValueError,
         RuntimeError,
+        subprocess.CalledProcessError,
         KeyError,
         TypeError,
         StopIteration,

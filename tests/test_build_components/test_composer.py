@@ -1,5 +1,7 @@
 """Composition, target coverage and command dispatch regression tests."""
 
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 
@@ -96,6 +98,8 @@ def test_locate_database_uses_exact_composed_target(monkeypatch, tmp_path):
 @pytest.mark.parametrize("code", [0, 7])
 def test_dispatch_and_failure_propagation(monkeypatch, command, code):
     calls = []
+    stamps = []
+    monkeypatch.setattr(runner, "write_build_stamp", lambda *args: stamps.append(args))
     target = runner.list_targets()[0]
 
     def invoke(args, **kwargs):
@@ -106,6 +110,7 @@ def test_dispatch_and_failure_propagation(monkeypatch, command, code):
     options = ["--only-generate"] if command == "compile" else []
     assert runner.main([command, target, *options]) == code
     assert len(calls) == 1
+    assert len(stamps) == int(command == "compile" and code == 0)
     assert calls[0][1:4] == ["-m", "esphome", command]
     assert Path(calls[0][4]) == runner.compose(target)
     assert (calls[0][-1] == "--only-generate") == (command == "compile")
@@ -153,3 +158,82 @@ def test_long_names_are_distinct_and_valid():
     second = first.replace("variant", "other")
     assert len(runner.node_name(first)) == 31
     assert runner.node_name(first) != runner.node_name(second)
+
+
+@pytest.mark.parametrize("only_generate", [False, True])
+@pytest.mark.parametrize("code", [0, 7])
+@pytest.mark.parametrize("existing", [False, True])
+def test_compile_writes_stamp_only_on_success(
+    tmp_path, monkeypatch, only_generate, code, existing
+):
+    target = "tests/components/demo/test.esp32-idf.yaml"
+    component = tmp_path / "components/demo"
+    component.mkdir(parents=True)
+    source = component / "__init__.py"
+    source.write_text("# codegen\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tmp_path, check=True)
+    directory = tmp_path / ".esphome/build/demo-esp32"
+    (directory / "src/esphome/components/demo").mkdir(parents=True)
+    stamp = directory / runner.BUILD_STAMP
+    if existing:
+        stamp.write_text("old stamp\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "compose", lambda target: tmp_path / "generated.yaml")
+    invoke = subprocess.run
+
+    def run(args, **kwargs):
+        if args[1:3] == ["-m", "esphome"]:
+            assert (args[-1] == "--only-generate") == only_generate
+            # Stamping must happen after a successful subprocess.
+            assert stamp.exists() == existing
+            if existing:
+                assert stamp.read_text(encoding="utf-8") == "old stamp\n"
+            return subprocess.CompletedProcess(args, code)
+        return invoke(args, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    args = ["compile", target, *(["--only-generate"] if only_generate else [])]
+    assert runner.main(args) == code
+    if code:
+        assert stamp.exists() == existing
+        if existing:
+            assert stamp.read_text(encoding="utf-8") == "old stamp\n"
+    else:
+        assert json.loads(stamp.read_text(encoding="utf-8")) == {
+            "target": target,
+            "files": {
+                "components/demo/__init__.py": hashlib.sha256(
+                    source.read_bytes()
+                ).hexdigest()
+            },
+        }
+
+
+def test_stamp_hashes_all_tracked_active_component_sources(tmp_path):
+    source_root = tmp_path / "build/src"
+    for name in ("demo", "dependency"):
+        (source_root / "esphome/components" / name).mkdir(parents=True)
+        (tmp_path / "components" / name).mkdir(parents=True)
+    expected = {}
+    for suffix in runner.COMPONENT_SOURCE_EXTENSIONS | {".py"}:
+        relative = "components/demo/nested/source" + suffix
+        path = tmp_path / relative
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"source bytes")
+        expected[relative] = hashlib.sha256(b"source bytes").hexdigest()
+    dependency = "components/dependency/__init__.py"
+    (tmp_path / dependency).write_bytes(b"dependency bytes")
+    expected[dependency] = hashlib.sha256(b"dependency bytes").hexdigest()
+    (tmp_path / "components/demo/README.md").write_text(
+        "not a source", encoding="utf-8"
+    )
+    inactive = tmp_path / "components/inactive/unused.cpp"
+    inactive.parent.mkdir()
+    inactive.write_text("not used", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    subprocess.run(["git", "add", "components"], cwd=tmp_path, check=True)
+    (tmp_path / "components/demo/untracked.py").write_text(
+        "not tracked", encoding="utf-8"
+    )
+    assert runner.component_hashes(source_root, root=tmp_path) == expected
