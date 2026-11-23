@@ -34,8 +34,12 @@ ccp:
 - **response_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Command response timeout. Defaults to
   `100ms`.
 - **allow_write** (*Optional*, boolean): Compile and permit the guarded write opcodes. Defaults to `false`.
-  Read commands still transmit when this is false. Calibration page selection and DAQ start/stop are not
-  blocked by this flag in the current implementation.
+  Memory and status reads still transmit when this is false. Calibration page selection requires `true`: it switches
+  the calibration data page the ECU runs on, with ECU-defined effects, even though it writes no memory.
+  `SET_S_STATUS` also requires `true`: it can request STORE (save calibration to non-volatile memory at shutdown)
+  or RESUME (save DAQ setup at shutdown and restart DAQ after power-up).
+  DAQ reads need `allow_write: true` because they configure DAQ with `WRITE_DAQ`; this requirement already existed.
+  Gating the subsequent `SET_S_STATUS(0x82)` step therefore does not change measurement. DAQ start/stop remain ungated.
 - **daq_anchor** (*Optional*, mapping): Known bytes checked to establish a DAQ result's identity.
   - **address** (**Required**, int): 32-bit anchor memory address.
   - **ext** (*Optional*, int): Address extension, 0–255. Defaults to `0`.
@@ -277,8 +281,9 @@ then:
 ### `ccp.select_cal_page` Action
 
 Warning: this action transmits commands on the CAN bus.
-Select a calibration page. The current write-opcode gate does not block this command. Commission a transmit-capable port
-before use.
+Select a calibration page; requires `allow_write: true`. This switches the calibration data page the ECU runs on,
+with ECU-defined effects. With `allow_write: false`, the action still validates and compiles, but is refused at runtime
+with a warning and no command is sent. Commission a transmit-capable port before use.
 
 ```yaml
 then:
@@ -368,8 +373,9 @@ then:
 ### `ccp.daq_read` Action
 
 Warning: this action transmits commands on the CAN bus.
-Configure and collect a bounded DAQ burst. Requires `allow_write: true` and, with the default
-`require_anchor: true`, a configured `daq_anchor`. The anchor bytes plus all field bytes must fit seven bytes.
+Configure and collect a bounded DAQ burst. Requires `allow_write: true` because it configures DAQ with `WRITE_DAQ`;
+this requirement already existed. With the default `require_anchor: true`, it also requires a configured `daq_anchor`.
+The anchor bytes plus all field bytes must fit seven bytes.
 
 ```yaml
 then:

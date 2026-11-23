@@ -61,7 +61,14 @@ TEST(ccp_proto_return_codes_and_write_classification) {
   CHECK(std::string(return_code_name(0x33)) == "access denied");
   CHECK(is_write_command(DNLOAD));
   CHECK(is_write_command(PROGRAM_6));
+  CHECK(is_write_command(SELECT_CAL_PAGE));
+  CHECK(is_write_command(SET_S_STATUS));
   CHECK(!is_write_command(UPLOAD));
+  CHECK(!is_write_command(SHORT_UP));
+  CHECK(!is_write_command(GET_S_STATUS));
+  CHECK(!is_write_command(GET_ACTIVE_CAL_PAGE));
+  CHECK(!is_write_command(START_STOP));
+  CHECK(!is_write_command(START_STOP_ALL));
 }
 
 TEST(ccp_proto_daq_layout_totals_fit_and_offsets) {

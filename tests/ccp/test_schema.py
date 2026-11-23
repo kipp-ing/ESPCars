@@ -90,6 +90,23 @@ def test_codegen_emits_observe_and_configured_write_defines() -> None:
     assert "USE_CCP_WRITE" in defines
 
 
+@pytest.mark.parametrize("allow_write", [False, True])
+def test_select_cal_page_action_validates_regardless_of_write_permission(
+    set_core_config, allow_write: bool
+) -> None:
+    setup_c6(set_core_config)
+    config = validate(hub(allow_write=allow_write))
+    action = automation.ACTION_REGISTRY["ccp.select_cal_page"].schema(
+        {"id": str(config["id"])}
+    )
+    assert str(action["id"]) == str(config["id"])
+
+
+def test_select_cal_page_action_requires_hub_id() -> None:
+    with pytest.raises(cv.Invalid, match="required key not provided"):
+        automation.ACTION_REGISTRY["ccp.select_cal_page"].schema({})
+
+
 def test_daq_anchor_accepted(set_core_config) -> None:
     setup_c6(set_core_config)
     config = validate(

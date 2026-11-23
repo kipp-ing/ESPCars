@@ -204,9 +204,13 @@ inline Dto decode_dto(const uint8_t *data, uint8_t len) {
   return out;
 }
 inline bool matches_response(const Dto &dto, uint8_t ctr) { return dto.kind == DtoKind::RESPONSE && dto.ctr == ctr; }
+// SELECT_CAL_PAGE switches the active calibration page (ECU-defined effects), without writing memory.
+// SET_S_STATUS can request STORE (save calibration to non-volatile memory) or RESUME (save/restart DAQ).
+// CcpHub::daq_read() already requires allow_write via WRITE_DAQ before continue_daq_write_ sends SET_S_STATUS(0x82),
+// so gating SET_S_STATUS does not change measurement.
 inline bool is_write_command(uint8_t code) {
   return code == DNLOAD || code == DNLOAD_6 || code == WRITE_DAQ || code == MOVE || code == CLEAR_MEMORY ||
-         code == PROGRAM || code == PROGRAM_6;
+         code == PROGRAM || code == PROGRAM_6 || code == SELECT_CAL_PAGE || code == SET_S_STATUS;
 }
 inline const char *return_code_name(uint8_t code) {
   switch (code) {
