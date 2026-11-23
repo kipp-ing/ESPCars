@@ -1,0 +1,5 @@
+# Existing collection workload includes WiFi's heap/loop sampler and CPU stats.
+packages:
+  workload: !include stress-orange-sdcollect.yaml
+  setup_heap: !include p9_setup.yaml
+  tasks: !include task_stats.yaml

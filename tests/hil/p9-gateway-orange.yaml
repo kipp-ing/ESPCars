@@ -1,0 +1,4 @@
+# Existing bench workload, no new bus transmissions.
+packages:
+  workload: !include stress-orange-gateway.yaml
+  probe: !include p9_loaded_probe.yaml

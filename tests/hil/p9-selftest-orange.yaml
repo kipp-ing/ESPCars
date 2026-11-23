@@ -1,0 +1,23 @@
+# Same pin/color profiles as selftest.py; old mode spellings work on both refs.
+substitutions:
+  node_name: mr-orange
+  id_r: 100.0%
+  id_g: 34.9%
+  id_b: 0.0%
+  port_a_id: seg1
+  pin_a_tx: GPIO2
+  pin_a_rx: GPIO3
+  beacon_a: '0x0C4'
+  port_b_id: seg2
+  pin_b_tx: GPIO10
+  pin_b_rx: GPIO11
+  beacon_b: '0x0C5'
+  pin_a_tx_num: '2'
+  pin_a_rx_num: '3'
+  pin_b_tx_num: '10'
+  pin_b_rx_num: '11'
+  lin_mode: listener
+  sd_expected: 'true'
+
+packages:
+  selftest: !include selftest.yaml

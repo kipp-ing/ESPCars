@@ -1,0 +1,7 @@
+# Existing bench workload, no new bus transmissions.
+substitutions:
+  retention_at: "98"
+
+packages:
+  workload: !include stress-orange-sdrotate.yaml
+  probe: !include p9_loaded_probe.yaml

@@ -343,7 +343,9 @@ the same validated configuration and generated code for one release cycle.
 The renamed `commander_requests` sensor likewise retains `master_requests` as
 a warning alias, rejecting simultaneous old/new keys. The guide, build YAMLs
 and schema/codegen tests use the new names except explicit compatibility cases.
-`tests/hil/` and `script/hil/` are deliberately unchanged until after P9.
+Existing bench mode spellings remain unchanged through P9 so the reference can
+accept the same YAML. P9 preparation may add host harnesses and bench-only probe
+wrappers; see `tests/hil/P9-RUNBOOK.md`.
 The operator reported all four configs (ESP32, ESP32 dual, ESP32-C3 and ESP32-C6)
 compiled with zero warnings before the logging-level correction. The available
 ESP32 build supports a scoped clang-tidy run on the corrected repository sources:
@@ -507,6 +509,7 @@ the same YAML on the same boards.
 | P4 | P4 | The six existing low-level ERROR calls now route through ESPHome instead of IDF. All 28 former W/I/D calls are VERBOSE, compiled out at DEBUG; no dump/action exceptions. VERBOSE diagnosis deliberately adds logging cost. | At DEBUG, confirm no new low-level diagnostics during RX/TX/event-task traffic and no timing/counter regression; exercise existing initialization-error paths and compare reporting through ESPHome. Record any timing impact separately when explicitly enabling VERBOSE diagnosis. | |
 | P4 | P4 | YAML modes normalize old spellings with warnings; commander_requests keeps the released sensor spelling as an alias. | Build reference/new firmware from unchanged bench YAML; confirm mode/TX conditions, counters, sensor totals and self-test outcome match. Schema/codegen equivalence is also covered by pytest. | |
 | P6 | P6 | Explicit ESP32/ESP-IDF schema guards reject unsupported platform/framework combinations earlier. Existing supported configs and generated runtime code must remain equivalent; can_gateway retains V27 C5 rejection and sd_logger retains C6-only support. | Build unchanged supported bench YAML on reference/new firmware and run selftest/verify; schema rejection tests and old-to-new codegen comparison cover config behavior outside the bench. | |
+| P9 harness | P9 | Bench-only retained setup heap snapshot and existing CPU/task/loop probes add RAM and sampling cost; separate runtime_stats images add per-dispatch timer reads. No component or TX-default changes. | Same frozen YAML at cb0db60/HEAD; gate images omit runtime_stats; compare separate profiles and setup/load heap. True ISR-entry→forward latency and unprinted tracker diagnostics remain missing evidence requiring a separately reviewed instrumentation change; wire latency is labelled separately. | Pending bench; no measurements claimed. |
 
 **Done:** every row is checked off, with no regression against the reference
 outside what the rows allow.

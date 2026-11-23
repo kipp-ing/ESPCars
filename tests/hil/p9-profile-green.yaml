@@ -1,0 +1,5 @@
+# Separate diagnostic run: runtime_stats adds timer reads to every dispatch.
+# Never use these images for the 19.4 laps/s baseline gate.
+packages:
+  ring: !include p9-ring-green.yaml
+  runtime: !include runtime_stats.yaml
