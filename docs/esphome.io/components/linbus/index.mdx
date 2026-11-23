@@ -1,0 +1,165 @@
+---
+title: "LIN Bus"
+description: "Observe LIN frames and optionally schedule headers or publish responses."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+The `linbus` component supports ESP32 with ESP-IDF only. Tested targets are classic ESP32, ESP32-C3 and ESP32-C6.
+There is no independent ESP32-C5 exclusion; CAN Gateway rejects C5 if also configured.
+Each segment needs a distinct UART and distinct GPIO pins. This component manages its own UART rather than using
+[UART Bus](/components/uart/).
+
+## Passive Observation
+
+Always set `mode: listener` for commissioning. The schema's `commander` default is a bus-driving role.
+
+```yaml
+linbus:
+  id: lin_monitor
+  tx_pin: GPIOXX
+  rx_pin: GPIOXX
+  mode: listener
+```
+
+## Configuration variables
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Instance identifier; specify it explicitly with multiple
+  segments.
+- **tx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Transceiver transmit pin.
+- **rx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Transceiver receive pin.
+- **cs_pin** (*Optional*, [Pin](/guides/configuration-types/#pin)): Transceiver enable pin, driven high once during
+  setup.
+- **baud_rate** (*Optional*, int): Bus speed, 1000–20000 bits/s. Defaults to `19200`.
+- **uart_port** (*Optional*, enum): Select a UART physically present on the target.
+  - `UART_NUM_0`
+  - `UART_NUM_1` *(default)*
+  - `UART_NUM_2`
+- **mode** (*Optional*, enum): Operating role. Select `listener` explicitly to start observing.
+  - `listener`: Never transmits.
+  - `responder`: Answers registered identifiers.
+  - `commander`: Drives scheduled headers. *(default)*
+  - `master`: Deprecated alias for `commander`; warns for one release cycle.
+  - `slave`: Deprecated alias for `responder`; warns for one release cycle.
+- **rx_ids** (*Optional*, list): Receive framing hints, at most 32 unique identifiers. Each needs length or checksum.
+  - **lin_id** (**Required**, int): Identifier, 0–63.
+  - **length** (*Optional*, int): Expected payload length, 1–8 bytes.
+  - **checksum** (*Optional*, enum): Expected checksum; omission allows inference/fallback.
+    - `classic`
+    - `enhanced`
+- **on_frame** (*Optional*, automation): Runs when a selected checksum-valid frame updates.
+- **on_error** (*Optional*, automation): Runs on a transport fault; `x` is a string naming the fault.
+- **schedule** (*Optional*, list): Commander-only header schedule, at most 16 unique identifiers. Transmits from boot.
+  - **lin_id** (**Required**, int): Identifier, 0–63.
+  - **interval** (**Required**, [Time](/guides/configuration-types/#time)): Header interval, at least `1ms`.
+  - **length** (*Optional*, int): Receive length hint, 1–8 bytes; otherwise inferred.
+- **responses** (*Optional*, list): Published responses, at most 16 unique identifiers; forbidden in listener mode.
+  - **lin_id** (**Required**, int): Identifier, 0–63.
+  - **data** (**Required**, byte list): Zero to eight payload bytes.
+  - **checksum** (*Optional*, enum): Response checksum. Diagnostic identifiers always use classic.
+    - `enhanced` *(default)*
+    - `classic`
+- **self_test** (*Optional*, boolean): Commander-only physical loopback exerciser; transmits. Defaults to `false`.
+- All other options from [Component](/components/esphome/).
+
+## Automations
+
+### `on_frame` Trigger
+
+Receives `data` (byte vector) and `data_length`. Read within the supplied length.
+
+```yaml
+linbus:
+  tx_pin: GPIOXX
+  rx_pin: GPIOXX
+  mode: listener
+  on_frame:
+    - lin_id: 0x22
+      then:
+        - logger.log: "LIN frame observed"
+```
+
+**Configuration variables:**
+
+- **lin_id** (**Required**, int): Selected identifier, 0–63.
+- **length** (*Optional*, int): Receive length hint, 1–8 bytes.
+- **checksum** (*Optional*, enum): Expected checksum; omission allows inference/fallback.
+  - `classic`
+  - `enhanced`
+- **trigger_id** (*Optional*, [ID](/guides/configuration-types/#id)): Generated trigger identifier; normally omit it.
+- **then** (**Required**, automation): Actions to run on a frame update.
+
+### `on_error` Trigger
+
+Runs on a fault; the string `x` identifies its class.
+
+```yaml
+linbus:
+  tx_pin: GPIOXX
+  rx_pin: GPIOXX
+  mode: listener
+  on_error:
+    then:
+      - logger.log: "LIN transport fault"
+```
+
+**Configuration variables:**
+
+- **trigger_id** (*Optional*, [ID](/guides/configuration-types/#id)): Generated trigger identifier; normally omit it.
+- **then** (**Required**, automation): Fault handling actions.
+
+### `linbus.update_response` Action
+
+Warning: publishing response bytes enables transmission on a responder or commander bus.
+An existing entry keeps its checksum mode; a new entry uses enhanced checksum. A listener remains passive.
+
+```yaml
+then:
+  - linbus.update_response:
+      id: lin_monitor
+      lin_id: 0x22
+      data: [0x01]
+```
+
+**Configuration variables:**
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): LIN instance; inferred if unambiguous.
+- **lin_id** (**Required**, templatable int): Response identifier, 0–63.
+- **data** (**Required**, templatable byte list): Zero to eight response bytes.
+
+### `linbus.run_self_test` Action
+
+Warning: enabling this exerciser transmits on the LIN bus; it requires commander mode and a live transceiver.
+
+```yaml
+then:
+  - linbus.run_self_test:
+      id: lin_monitor
+      enable: false
+```
+
+**Configuration variables:**
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): LIN instance.
+- **enable** (*Optional*, templatable boolean): Start or stop self-test. Defaults to `true`.
+
+## Transmitting Roles
+
+Warning: commander schedules and responder publications transmit on the LIN bus.
+The following is a fictional schedule for an isolated test segment, after observing that segment.
+
+```yaml
+linbus:
+  tx_pin: GPIOXX
+  rx_pin: GPIOXX
+  mode: commander
+  schedule:
+    - lin_id: 0x22
+      interval: 100ms
+```
+
+## See Also
+
+- [LIN Sensors](/components/linbus/sensor/)
+- [LIN Binary Sensors](/components/linbus/binary_sensor/)
+- <APIRef text="linbus.h" path="linbus/linbus.h" />

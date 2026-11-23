@@ -1,0 +1,58 @@
+---
+title: "CAN Gateway Forwarding Switch"
+description: "Control forwarding separately from frame observation and explicit sends."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [CAN Gateway](/components/can_gateway/) on ESP32 with ESP-IDF 5.5 or later. ESP32-C5 is rejected.
+Keep the referenced port in `listen_only: true` with no routes or transmit producers for passive observation.
+A forwarding switch requires routes; a passive monitor with no routes deliberately cannot declare one.
+
+## Passive Observation
+
+Begin with a port observation counter before commissioning forwarding. This sensor does not change the bus state.
+
+```yaml
+sensor:
+  - platform: can_gateway
+    port_id: observed_port
+    observed:
+      name: "Observed Frames"
+```
+
+## Forwarding Control
+
+Warning: enabling this switch allows configured routes to transmit on the CAN bus.
+Add it only after commissioning a two-port route. This gates forwarding alone; explicit sends, cyclic sends
+and controller ACKs have separate behavior. A source port's receive taps keep working while forwarding is off.
+
+```yaml
+switch:
+  - platform: can_gateway
+    can_gateway_id: gateway
+    name: "Forwarding"
+    restore_mode: ALWAYS_OFF
+```
+
+## Configuration variables
+
+- **can_gateway_id** (*Optional*, [ID](/guides/configuration-types/#id)): Gateway whose routes are controlled; inferred
+  when unambiguous.
+- **restore_mode** (*Optional*, enum): Standard switch restoration policy. The schema default is
+  `RESTORE_DEFAULT_ON`; use `ALWAYS_OFF` while commissioning forwarding.
+  - `RESTORE_DEFAULT_ON` *(default)*
+  - `RESTORE_DEFAULT_OFF`
+  - `ALWAYS_OFF`
+  - `ALWAYS_ON`
+  - `RESTORE_INVERTED_DEFAULT_OFF`
+  - `RESTORE_INVERTED_DEFAULT_ON`
+  - `DISABLED`
+- All other options from [Switch](/components/switch/).
+
+## See Also
+
+- [CAN Gateway](/components/can_gateway/)
+- [Gateway Sensors](/components/can_gateway/sensor/)
+- [Switch](/components/switch/)
+- <APIRef text="can_gateway.h" path="can_gateway/can_gateway.h" />

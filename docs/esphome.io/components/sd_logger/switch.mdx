@@ -1,0 +1,43 @@
+---
+title: "SD Logger Writer Freeze Switch"
+description: "Pause the SD writer task for controlled buffering diagnostics."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [SD Logger](/components/sd_logger/) on ESP32-C6 with ESP-IDF 5.5 or later only. Other variants,
+including ESP32-C5, are rejected. This debugging switch affects storage only and sends no vehicle-bus frames.
+
+## Passive Logging
+
+Leave the switch off to keep the writer draining normally.
+
+```yaml
+switch:
+  - platform: sd_logger
+    sd_logger_id: card_log
+    name: "Freeze SD Writer"
+    restore_mode: ALWAYS_OFF
+```
+
+## Configuration variables
+
+- **sd_logger_id** (**Required**, [ID](/guides/configuration-types/#id)): Logger whose writer is frozen when the switch
+  is on.
+- **restore_mode** (*Optional*, enum): Standard switch restoration policy.
+  - `ALWAYS_OFF` *(default)*
+  - `ALWAYS_ON`
+  - `RESTORE_DEFAULT_OFF`
+  - `RESTORE_DEFAULT_ON`
+  - `RESTORE_INVERTED_DEFAULT_OFF`
+  - `RESTORE_INVERTED_DEFAULT_ON`
+  - `DISABLED`
+- All other options from [Switch](/components/switch/).
+
+Freezing for longer than the RAM rings can absorb causes record loss; use this only for controlled diagnostics.
+
+## See Also
+
+- [SD Logger](/components/sd_logger/)
+- [Switch](/components/switch/)
+- <APIRef text="sd_logger.h" path="sd_logger/sd_logger.h" />

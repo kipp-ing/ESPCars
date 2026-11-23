@@ -1,0 +1,166 @@
+---
+title: "UDS Diagnostics"
+description: "Catalog-based UDS response decoding and explicitly requested diagnostic reads."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+The `uds` component uses [ISO-TP](/components/isotp/) and a compiled `.dcat` catalog.
+It supports ESP32 with ESP-IDF only; its CAN Gateway dependency rejects ESP32-C5.
+Use a fictional catalog such as the repository's `tests/uds/fixtures/mini.dcat` while developing examples.
+Real diagnostic databases and vehicle-specific catalogs belong outside this repository.
+
+## Passive Observation
+
+Start with a transport on a gateway port configured with `listen_only: true`, with no routes or cyclic sends.
+This hub has no bound polling entities and queues no requests. Copy the fictional mini fixture beside the YAML.
+This is an idle hub for observing errors; it does not snoop conversations between other testers and ECUs.
+
+```yaml
+uds:
+  id: diagnostic_hub
+  isotp_id: transport
+  catalog:
+    file: mini.dcat
+    embed: true
+```
+
+The catalog supplies field names, scaling, units and invalid sentinels. A partition-backed catalog is flashed
+separately after firmware; embedding a tiny catalog keeps this example self-contained at firmware build time.
+Only one hub may own an ISO-TP instance.
+
+## Configuration variables
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Hub identifier.
+- **isotp_id** (**Required**, [ID](/guides/configuration-types/#id)): ISO-TP transport instance.
+- **catalog** (**Required**, mapping): Decode catalog and storage source. Select partition or embedding, exactly one.
+  - **file** (**Required**, string): Host-side `.dcat` file, validated at configuration time.
+  - **partition** (*Optional*, string): Flash partition label, 1–16 letters, digits or underscores.
+  - **embed** (*Optional*, boolean): Compile the file into the firmware. Defaults to `false`.
+  - **size** (*Optional*, int or size string): Partition capacity, a nonzero multiple of 4096 bytes.
+    Defaults to `256KB` for a partition; forbidden with embedding. `KB` means 1024 bytes.
+- **ecu** (*Optional*, string): Catalog ECU name; required when the catalog contains more than one ECU.
+- **max_consecutive_failures** (*Optional*, int): Failure threshold, 1–255, before suspension/unavailable values.
+  Defaults to `3`.
+- **allow_active_services** (*Optional*, boolean): Permit `uds.execute` and `uds.raw`. Defaults to `false`.
+  Read requests still transmit when this is false.
+- **on_value** (*Optional*, automation): Runs for a decoded field.
+- **on_error** (*Optional*, automation): Runs for a timeout, negative response or transport error.
+- All other options from [Component](/components/esphome/).
+
+## Automations
+
+### `on_value` Trigger
+
+Receives `x` with `field`, `value`, `unit`, `text` and `valid`. Invalid numeric values are NaN.
+This callback queues no request by itself.
+
+```yaml
+uds:
+  isotp_id: transport
+  catalog:
+    file: mini.dcat
+    embed: true
+  on_value:
+    then:
+      - logger.log: "UDS field decoded"
+```
+
+**Configuration variables:**
+
+- **then** (**Required**, automation): Actions run for the field.
+
+### `on_error` Trigger
+
+Receives `x.what` and `x.nrc`; the response code is zero for timeout/transport errors.
+
+```yaml
+uds:
+  isotp_id: transport
+  catalog:
+    file: mini.dcat
+    embed: true
+  on_error:
+    then:
+      - logger.log: "UDS request failed"
+```
+
+**Configuration variables:**
+
+- **then** (**Required**, automation): Error handling actions.
+
+### `uds.read` Action
+
+Warning: even a read-only UDS request transmits on the CAN bus.
+Only catalog groups marked `SAFE_READ` are accepted. Commission a transmit-capable transport first.
+The service below belongs to the fictional mini fixture.
+
+```yaml
+then:
+  - uds.read:
+      id: diagnostic_hub
+      service: 0x0102
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Hub identifier.
+- **service** (**Required**, string or int): Canonical group name, alias or DID, 0–0xFFFE.
+
+### `uds.execute` Action
+
+Warning: this action transmits a service that may change ECU state on the CAN bus.
+Requires `allow_active_services: true`; select an intentionally authorized service from your catalog.
+
+```yaml
+then:
+  - uds.execute:
+      id: diagnostic_hub
+      service: RT_Mini_Routine_Start
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Hub identifier.
+- **service** (**Required**, string or int): Catalog service name, alias or DID.
+
+### `uds.raw` Action
+
+Warning: this action transmits exact request bytes on the CAN bus and may change ECU state.
+Requires `allow_active_services: true`. This example reads the fictional mini DID.
+
+```yaml
+then:
+  - uds.raw:
+      id: diagnostic_hub
+      data: [0x22, 0x01, 0x02]
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Hub identifier.
+- **data** (**Required**, templatable byte list): Request of 1–32 bytes.
+
+### `uds.set_enabled` Action
+
+Warning: resuming a hub with polled bindings transmits requests on the CAN bus.
+Disabling pauses its scheduler; this action does not change the active-service permission.
+
+```yaml
+then:
+  - uds.set_enabled:
+      id: diagnostic_hub
+      enabled: false
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Hub identifier.
+- **enabled** (**Required**, templatable boolean): Pause or resume scheduling.
+
+## See Also
+
+- [ISO-TP](/components/isotp/)
+- [UDS Sensors](/components/uds/sensor/)
+- [UDS Text Sensors](/components/uds/text_sensor/)
+- <APIRef text="uds.h" path="uds/uds.h" />

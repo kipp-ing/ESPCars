@@ -1,0 +1,39 @@
+---
+title: "LIN Bus Self-Test Status"
+description: "Observe the result of the LIN loopback exerciser."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [LIN Bus](/components/linbus/) on ESP32 with ESP-IDF only. Use a parent in `mode: listener`
+for passive observation. There is no independent ESP32-C5 exclusion; CAN Gateway rejects C5 if also present.
+This entity observes status; declaring it does not start self-test.
+
+## Passive Observation
+
+```yaml
+binary_sensor:
+  - platform: linbus
+    linbus_id: lin_monitor
+    self_test_pass:
+      name: "LIN Self-Test Pass"
+```
+
+## Configuration variables
+
+- **linbus_id** (*Optional*, [ID](/guides/configuration-types/#id)): Parent LIN instance; inferred when unambiguous.
+- **self_test_pass** (*Optional*, binary sensor): True after every self-test identifier updates at least twice
+  and at least five seconds elapse. It stays false on an ordinary listener.
+- All other options from [Binary Sensor](/components/binary_sensor/) apply to the nested sensor.
+
+## Running Self-Test
+
+Warning: the physical LIN self-test transmits on the bus.
+Run it only on a commissioned commander segment with a live transceiver and loopback/pull-up.
+Use the [LIN Bus automations](/components/linbus/) to enable it deliberately.
+
+## See Also
+
+- [LIN Bus](/components/linbus/)
+- [Binary Sensor](/components/binary_sensor/)
+- <APIRef text="linbus.h" path="linbus/linbus.h" />

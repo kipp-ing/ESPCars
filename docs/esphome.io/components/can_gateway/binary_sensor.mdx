@@ -1,0 +1,39 @@
+---
+title: "CAN Gateway Binary Sensors"
+description: "Observe a CAN signal bit or the controller bus-off state."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [CAN Gateway](/components/can_gateway/) on ESP32 with ESP-IDF 5.5 or later. ESP32-C5 is rejected.
+Keep the referenced port in `listen_only: true` with no routes or transmit producers for passive observation.
+
+## Passive Observation
+
+```yaml
+binary_sensor:
+  - platform: can_gateway
+    port_id: observed_port
+    can_id: 0x600
+    bit: 0
+    name: "Demo Flag"
+```
+
+## Configuration variables
+
+A decode entry contains `can_id` and `bit`; a diagnostics entry contains a nested `bus_off` sensor.
+
+- **port_id** (**Required**, [ID](/guides/configuration-types/#id)): Observed gateway port.
+- **can_id** (*Optional*, int): Required for decode; identifier fitting the selected frame type.
+- **use_extended_id** (*Optional*, boolean): Decode 29-bit identifiers. Defaults to `false`.
+- **bit** (*Optional*, int): Required for decode; bit index 0–63, numbered as `byte × 8 + bit`.
+- **can_gateway_id** (*Optional*, [ID](/guides/configuration-types/#id)): Gateway hub for bus-off diagnostics; inferred
+  when unambiguous.
+- **bus_off** (*Optional*, binary sensor): Required for diagnostics; true while the selected port is bus-off.
+- All other options from [Binary Sensor](/components/binary_sensor/) apply to the decoded entity or nested sensor.
+
+## See Also
+
+- [CAN Gateway](/components/can_gateway/)
+- [Binary Sensor](/components/binary_sensor/)
+- <APIRef text="can_gateway.h" path="can_gateway/can_gateway.h" />

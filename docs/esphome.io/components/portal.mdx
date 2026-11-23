@@ -1,0 +1,178 @@
+---
+title: "Local Portal"
+description: "Serve a device state tree and optional controls through a local web interface."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+The `portal` component supports ESP32 with ESP-IDF only. It has no independent ESP32-C5 restriction;
+CAN Gateway rejects C5 when also configured. It requires [WiFi](/components/wifi/) or another network interface.
+It uses `web_server_base` (the shared HTTP server implementation) and replaces [Web Server](/components/web_server/);
+the two cannot be configured together.
+
+## Passive Observation
+
+A tree without controls reads existing entities and sends no vehicle-bus frames. The smallest tree describes
+an empty fictional subsystem; add observed entities under `values` as needed.
+
+```yaml
+portal:
+  build: "demo"
+  tree:
+    - segment: monitor
+      kind: subsystem
+      label: "Monitor"
+```
+
+Viewing the page and state API is always unauthenticated. If controls are declared later, optional digest
+authentication protects their POST requests. A login does not protect the read-only state endpoint.
+
+## Configuration variables
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Portal instance identifier.
+- **web_server_base_id** (*Optional*, [ID](/guides/configuration-types/#id)): Shared web server base; inferred when
+  unambiguous.
+- **web_asset_id** (*Optional*, [ID](/guides/configuration-types/#id)): Generated embedded page array identifier;
+  normally omit it.
+- **port** (*Optional*, int): HTTP port. Defaults to `80`; 32767 and 65535 are rejected.
+- **board** (*Optional*, string): Board description advertised in device identity; omitted by default.
+- **node_id** (*Optional*, int or integer string): Device identity, normalized to a hexadecimal string.
+- **mac** (*Optional*, string): Advertised identity override, six colon-separated hexadecimal octets.
+- **build** (**Required**, string): Firmware/build identity text.
+- **owns** (*Optional*, string list): Dotted tree node IDs owned by this device. Defaults to an empty list;
+  must be nonempty when `board`, `node_id` and `mac` are all supplied.
+- **root_label** (*Optional*, string): Nonempty synthetic root label. Defaults to `Vehicle`.
+- **budget_ms** (*Optional*, rejected): Removed at component level; validation always errors. Put freshness budgets
+  on tree nodes instead; there is no component-wide fallback.
+- **text_max** (*Optional*, int): Text buffer capacity, 16–256 bytes. Defaults to `48`.
+- **submodule_size** (*Optional*, positive int): Elements per submodule, needed to derive pack offsets from positions.
+- **web_asset** (*Optional*, string): HTML file replacing the bundled page; relative paths resolve beside the YAML.
+  The `/*PORTAL_UI*/null` placeholder, if present, receives generated UI hints.
+- **auth** (*Optional*, mapping): Digest authentication for controls, with both fields nonempty.
+  - **username** (**Required**, string): Control login name.
+  - **password** (**Required**, string): Control login password.
+- **lang** (*Optional*, enum): Interface language.
+  - `en` *(default)*
+  - `de`
+- **layout** (*Optional*, mapping): Static page tabs.
+  - **tabs** (*Optional*, list): Up to five tab definitions. Defaults to `[]`.
+    - **label** (**Required**, string): Nonempty tab label.
+    - **glance** (*Optional*, string list): Up to four value references, `node.path/key`. Defaults to `[]`.
+    - **nodes** (*Optional*, string list): Dotted node identifiers shown in the tab. Defaults to `[]`.
+- **tree** (**Required**, list): One or more nodes, with unique sibling segments. Nodes accept:
+  - **segment** (**Required**, string): Stable path segment matching `[a-z][a-z0-9_]*`.
+  - **kind** (**Required**, string): Nonempty node classification.
+  - **label** (**Required**, string): Nonempty display name.
+  - **budget_ms** (*Optional*, positive int or null): Freshness budget in milliseconds. Explicit null means unknown.
+    If omitted, derives three times the slowest own value cadence, or null if any cadence is unknown/no values exist.
+    A node containing a binary sensor cannot use a positive explicit budget.
+  - **children** (*Optional*, list): One or more recursively configured nodes using this same schema.
+  - **values** (*Optional*, list): One or more bindings to existing entities. Exactly one entity
+    selector is required in each entry.
+    - **key** (**Required**, string): Stable local key matching `[a-z][a-z0-9_]*`.
+    - **label** (**Required**, string): Nonempty display name.
+    - **unit** (*Optional*, string): Unit display override.
+    - **decimals** (*Optional*, int): Display precision, 0–6. Defaults to `0`.
+    - **cadence_ms** (*Optional*, positive int): Expected publishing cadence, in milliseconds. Forbidden for binary
+      sensors because unchanged boolean publications produce no observable callback.
+    - **expert** (*Optional*, boolean): Mark as an expert display value. Defaults to `false`.
+    - **sensor** (*Optional*, [ID](/guides/configuration-types/#id)): Numeric sensor binding; mutually exclusive with
+      the other entity selectors.
+    - **text_sensor** (*Optional*, [ID](/guides/configuration-types/#id)): Text binding; mutually exclusive with other
+      entity selectors.
+    - **binary_sensor** (*Optional*, [ID](/guides/configuration-types/#id)): Boolean binding; mutually exclusive with
+      other entity selectors.
+    - **warn** (*Optional*, mapping): Numeric warning limits, for numeric sensors only; at least one bound required.
+      - **below** (*Optional*, float): Warn below this threshold.
+      - **above** (*Optional*, float): Warn above this threshold.
+    - **bad** (*Optional*, mapping): Numeric fault limits, for numeric sensors only; at least one bound required.
+      - **below** (*Optional*, float): Fault below this threshold.
+      - **above** (*Optional*, float): Fault above this threshold.
+    - **warn_when** (*Optional*, boolean): Warning state of a binary sensor.
+    - **bad_when** (*Optional*, boolean): Fault state of a binary sensor. Text bindings accept no limits.
+  - **role** (*Optional*, string): Current role, matching `[a-z][a-z0-9_]*`; requires a nonempty available-role list.
+  - **roles_available** (*Optional*, string list): Available role names, including the selected role.
+  - **absent** (*Optional*, string): Reason code. Without a predicate, marks a statically absent node and excludes
+    values, children, role, unknown rule, series and controls. With a predicate, excludes only role and unknown rule.
+  - **absent_when** (*Optional*, mapping): Registered absence predicate. The bundled `switch_off` provider defaults
+    the absent reason to `switched_off`; other providers must supply a default or require an explicit reason.
+    - **provider** (**Required**, string): Predicate name; `switch_off` is bundled.
+    - **source** (**Required**, [ID](/guides/configuration-types/#id)): Provider source; a switch ID for `switch_off`,
+      which accepts no extra arguments.
+  - **unknown_when** (*Optional*, mapping): Text-value rule for unknown state; forbidden with children.
+    - **value** (**Required**, string): Key of one of this node's own values.
+    - **equals** (**Required**, string): State text to compare.
+    - **why** (**Required**, string): Reason matching `[a-z][a-z0-9_]*`. Evidence-only codes `never_announced`,
+      `no_transfer`, `crc_fail` and `negative_response` are refused here.
+  - **trust_from** (*Optional*, string): Key of an own value whose state establishes trust.
+  - **series** (*Optional*, mapping): Repeated indexed data. Its key must differ from all own value keys.
+    - **key** (**Required**, string): Stable local series key.
+    - **label** (**Required**, string): Nonempty display name.
+    - **unit** (*Optional*, string): Display unit.
+    - **index_base** (**Required**, int): Nonnegative first displayed index.
+    - **index_frame** (**Required**, string or null): Named index coordinate frame, or explicitly unknown.
+    - **count** (**Required**, int): Number of elements, 1–64.
+    - **decimals** (*Optional*, int): Precision, 0–6. Defaults to `0`.
+    - **source** (*Optional*, [ID](/guides/configuration-types/#id)): Registered provider source; required together with
+      a provider.
+    - **provider** (*Optional*, string): Registered series provider; none are bundled. External providers define
+      and validate any additional arguments. Without a provider, series metadata is served without element readings.
+  - **submodule_position** (*Optional*, positive int): One-based physical position. Together with `submodule_size`,
+    derives pack index offsets for the explicit `submodule_cell` coordinate frame.
+  - **on_demand** (*Optional*, boolean): Mark a node not requested until an own value has a reading; requires values.
+    Defaults to `false`.
+  - **actions** (*Optional*, list): Existing entity controls; see the transmitting-controls section below.
+    - **key** (**Required**, string): Unique stable local control key.
+    - **label** (**Required**, string): Nonempty display name.
+    - **switch** (*Optional*, [ID](/guides/configuration-types/#id)): Switch control; exactly one of the four control
+      selectors is required.
+    - **button** (*Optional*, [ID](/guides/configuration-types/#id)): Button control.
+    - **select** (*Optional*, [ID](/guides/configuration-types/#id)): Select control.
+    - **number** (*Optional*, [ID](/guides/configuration-types/#id)): Number control.
+    - **decimals** (*Optional*, int): Number control precision, 0–6; defaults to `2`, forbidden on other controls.
+    - **confirm** (*Optional*, enum): Additional hold gesture; omitted by default.
+      - `hold`
+    - **group** (*Optional*, string): Nonempty control grouping label.
+    - **before** (*Optional*, list): Nonempty prerequisite assignments; targets must be number, select or switch
+      controls.
+      - **action** (**Required**, string): Control reference, `node.path/key`.
+      - **value** (**Required**, float, string or boolean): Target value, checked against number bounds or select
+        options.
+  - **borrow** (*Optional*, list): Display another node's control here.
+    - **action** (**Required**, string): Existing control reference, `node.path/key`.
+    - **before** (*Optional*, list): Nonempty prerequisite assignments, using the same schema as controls.
+      - **action** (**Required**, string): Number/select/switch control reference.
+      - **value** (**Required**, float, string or boolean): Assigned value.
+- All other options from [Component](/components/esphome/).
+
+Evidence-only absence reasons require an external provider carrying matching evidence; naming a reason alone
+never grants that evidence. References in tabs, borrowing and prerequisites must resolve within the same tree.
+
+## Transmitting Controls
+
+Warning: operating a control can transmit on a vehicle bus through its target entity or attached automation.
+Only expose controls after observing and commissioning their targets. This example references an existing
+button; it defines no automatic press. Merge it into an otherwise observed tree deliberately.
+
+```yaml
+portal:
+  build: "demo"
+  tree:
+    - segment: monitor
+      kind: subsystem
+      label: "Monitor"
+      actions:
+        - key: request
+          label: "Request"
+          button: commissioned_request
+          confirm: hold
+```
+
+Portal controls are tree bindings, not registered ESPHome automation actions, conditions or triggers.
+
+## See Also
+
+- [Web Server](/components/web_server/)
+- [Sensor](/components/sensor/)
+- [CAN Gateway](/components/can_gateway/)
+- <APIRef text="portal.h" path="portal/portal.h" />

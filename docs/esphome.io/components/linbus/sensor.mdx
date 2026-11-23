@@ -1,0 +1,51 @@
+---
+title: "LIN Bus Sensors"
+description: "Publish LIN frame statistics, errors and bus utilization."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [LIN Bus](/components/linbus/) on ESP32 with ESP-IDF only. Use a parent in `mode: listener`
+for passive observation. There is no independent ESP32-C5 exclusion; CAN Gateway rejects C5 if also present.
+These are bus statistics rather than decoded payload values.
+
+## Passive Observation
+
+```yaml
+sensor:
+  - platform: linbus
+    linbus_id: lin_monitor
+    frames_received:
+      name: "LIN Frames"
+```
+
+## Configuration variables
+
+- **linbus_id** (*Optional*, [ID](/guides/configuration-types/#id)): Parent LIN instance; inferred when unambiguous.
+- **commander_requests** (*Optional*, sensor): Headers sent by this instance.
+- **master_requests** (*Optional*, sensor): Deprecated alias for `commander_requests`, accepted with a warning for one
+  release cycle.
+  Declaring both names is an error.
+- **id_requests_answered** (*Optional*, sensor): Polls answered by this instance.
+- **data_bytes_received** (*Optional*, sensor): Received payload bytes.
+- **frames_received** (*Optional*, sensor): Checksum-valid frames received.
+- **uart_breaks** (*Optional*, sensor): UART break conditions.
+- **checksum_errors** (*Optional*, sensor): Frames failing both checksum modes.
+- **checksum_fallback** (*Optional*, sensor): Frames accepted using the non-preferred checksum mode.
+- **pid_errors** (*Optional*, sensor): Identifier parity errors.
+- **framing_errors** (*Optional*, sensor): UART framing, parity or overflow errors.
+- **collisions** (*Optional*, sensor): Transmit echo mismatches.
+- **frames_coalesced** (*Optional*, sensor): Frame updates skipped between automation deliveries.
+- **send_failures** (*Optional*, sensor): Commander transmission failures.
+- **bus_load** (*Optional*, sensor): Bus utilization percentage over the statistics window.
+- **error_rate** (*Optional*, sensor): Error percentage over the statistics window.
+- All other options from [Sensor](/components/sensor/) apply to each nested sensor.
+
+Counters report lifetime totals with total-increasing state class, not reset-per-window counts.
+Bus load and error rate are windowed percentages. No update interval is configured by this platform.
+
+## See Also
+
+- [LIN Bus](/components/linbus/)
+- [Sensor](/components/sensor/)
+- <APIRef text="linbus.h" path="linbus/linbus.h" />
