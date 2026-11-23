@@ -1,0 +1,121 @@
+---
+title: "ISO-TP Transport"
+description: "ISO 15765-2 message transport over a CAN gateway port."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+The `isotp` component reassembles classic CAN messages on a [CAN Gateway](/components/can_gateway/) port.
+It supports ESP32 with ESP-IDF only; the gateway rejects ESP32-C5. The maximum message length is 4095 bytes.
+
+## Passive Observation
+
+Start with a gateway port configured with `listen_only: true`, no routes and no cyclic sends.
+The following instance queues no requests. Listen-only blocks flow-control transmission too: single-frame
+messages can be observed, but this is not a passive multi-frame conversation decoder.
+
+```yaml
+isotp:
+  id: transport
+  port_id: observed_port
+  tx_id: 0x600
+  rx_id: 0x601
+```
+
+The identifiers here are fictional. Configure the referenced port separately as described in the gateway page.
+
+## Configuration variables
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Identifies this transport instance.
+- **port_id** (**Required**, [ID](/guides/configuration-types/#id)): Gateway port receiving the peer's frames.
+- **addressing** (*Optional*, enum): Addressing mode.
+  - `normal`: Explicit identifiers. *(default)*
+  - `normal_fixed`: Derives 29-bit identifiers as `0x18DA<target><source>` and the reverse.
+  - `extended`: Adds an address byte to the CAN payload.
+- **tx_id** (*Optional*, int): Transmit identifier; required for `normal` and `extended`.
+- **rx_id** (*Optional*, int): Receive identifier; required for `normal` and `extended`. Must differ from `tx_id`.
+- **use_extended_id** (*Optional*, boolean): Selects 29-bit CAN identifiers. Defaults to `false`;
+  `normal_fixed` forces it to `true`.
+- **source** (*Optional*, int): Local address byte; required only for `normal_fixed`.
+- **target** (*Optional*, int): Peer address byte; required only for `normal_fixed`.
+- **target_address** (*Optional*, int): Address-extension byte; required only for `extended`.
+- **max_message_size** (*Optional*, int): Reassembly buffer, 8–4095 bytes. Defaults to `256`.
+- **block_size** (*Optional*, int): Consecutive frames granted per flow-control block, 1–255. Defaults to `8`.
+  The port's observation queue must hold at least this many frames plus four.
+- **st_min** (*Optional*, [Time](/guides/configuration-types/#time)): Requested separation, whole milliseconds 0–127 or
+  100–900 µs in 100 µs steps.
+  Defaults to `0ms`.
+- **padding** (*Optional*, int): Optional padding byte. Omission sends unpadded frames.
+- **n_bs_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Wait for peer flow control. Defaults to
+  `1000ms`.
+- **n_cr_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Wait for the next consecutive frame.
+  Defaults to `1000ms`.
+- **tx_stall_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Maximum stalled transmit duration.
+  Defaults to `1000ms`.
+- **on_message** (*Optional*, automation): Runs after a complete message arrives.
+- **on_error** (*Optional*, automation): Runs after a transport failure.
+- All other options from [Component](/components/esphome/).
+
+## Automations
+
+### `on_message` Trigger
+
+Receives `x`, a `MessageView`; its buffer is only valid during the callback. This logging callback is passive.
+Receiving a first frame on a normal port sends flow control; retain listen-only for passive observation.
+
+```yaml
+isotp:
+  id: transport
+  port_id: observed_port
+  tx_id: 0x600
+  rx_id: 0x601
+  on_message:
+    then:
+      - logger.log: "Complete ISO-TP message"
+```
+
+**Configuration variables:**
+
+- **then** (**Required**, automation): Actions to run for the received message.
+
+### `on_error` Trigger
+
+Receives the `IsoTpError` enum as `x`.
+
+```yaml
+isotp:
+  id: transport
+  port_id: observed_port
+  tx_id: 0x600
+  rx_id: 0x601
+  on_error:
+    then:
+      - logger.log: "ISO-TP transfer failed"
+```
+
+**Configuration variables:**
+
+- **then** (**Required**, automation): Error handling actions.
+
+### `isotp.send` Action
+
+Warning: this action transmits on the CAN bus; receiving multi-frame replies also transmits flow control.
+Use an explicitly commissioned transmit-capable port for this action.
+
+```yaml
+then:
+  - isotp.send:
+      id: transport
+      data: [0x01]
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Transport instance.
+- **data** (**Required**, templatable byte list or string): Nonempty message; strings are encoded as UTF-8 bytes.
+
+## See Also
+
+- [CAN Gateway](/components/can_gateway/)
+- [ISO-TP Sensors](/components/isotp/sensor/)
+- <APIRef text="isotp.h" path="isotp/isotp.h" />

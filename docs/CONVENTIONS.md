@@ -6,6 +6,12 @@ changed in the move.
 ## Layout
 
 - `components/<name>/` — the ESPHome components (Python codegen + C++ runtime)
+- `docs/esphome.io/components/` — MDX component references matching the esphome.io
+  content layout: flat pages for standalone components, folders with `index.mdx`
+  and platform pages otherwise. Existing `docs/<component>-user-guide.md` files
+  remain the longer workflow guides.
+- `CODEOWNERS` — generated from component/platform `CODEOWNERS` lists by
+  `script/build_codeowners.py`; do not edit the generated rules.
 - `tests/<name>/` — pytest schema/codegen suites (`tests/conftest.py` maps
   `esphome.components.<name>` onto `components/`, so suites written in-tree run
   unmodified)
@@ -32,6 +38,8 @@ changed in the move.
 script/check.sh                                      # pytest + clang-format + config
 .venv/bin/python -m pytest tests/ -q                 # fast (<1s), run always
 make -C tests/host                                   # host C++ tests (~10 s)
+.venv/bin/python script/check_docs.py                 # loaded schema → MDX key coverage
+.venv/bin/python script/build_codeowners.py --check   # generated owner rules are current
 .venv/bin/python script/test_build_components.py config tests/components/<c>/<t>.yaml    # fast, run always
 .venv/bin/python script/test_build_components.py compile tests/components/<c>/<t>.yaml   # minutes, run when C++ changed
 ```
@@ -74,6 +82,14 @@ sanitizers. If `.venv` is missing:
   `.esphome/build/<node>/espcars-build-stamp.json` (already covered by `.gitignore`'s
   `.esphome/` rule), so checkout mtime changes are harmless; unstamped builds use
   the legacy mtime fallback.
+- Documentation key coverage (`script/check_docs.py`) and generated ownership
+  (`script/build_codeowners.py --check`) also block `check.sh` and the CI lint
+  job. The docs checker imports hub/platform schemas and automation registries
+  in a fresh process, walks nested mappings and validates each automation section.
+  It requires local keys as bold configuration bullets; inherited ESPHome entity,
+  pin and automation options are covered by links to their upstream references.
+  Deprecated aliases count. Key names in examples/comments alone do not count.
+  Missing/unknown keys, missing platform pages and stale owner rules fail.
 - Only no-commit-to-branch remains advisory in `check.sh` and CI: the commit-time
   hook rejects `main`, including legitimate post-merge CI runs on that branch.
 - Merge with a merge commit, as the history does.
@@ -109,7 +125,7 @@ sanitizers. If `.venv` is missing:
   whose *source*, not just its data, hardcodes real field names/DIDs belongs
   in that consuming project, not here.
   `script/check_no_private_data.py` (run from `script/check.sh`) greps
-  tracked files for the known markers of this — extend its pattern list
+  tracked and non-ignored new text files (including MDX) for the known markers of this — extend its pattern list
   rather than silencing a hit.
 
 ## Known sharp edges

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if any git-tracked file names a real vehicle, a real bench's diagnostic
+"""Fail if any tracked or non-ignored new file names a real vehicle, a real bench's diagnostic
 data, or a sibling private repo by path (docs/CONVENTIONS.md's data-hygiene
 rule).
 
@@ -92,6 +92,7 @@ PATTERNS: list[tuple[re.Pattern[str], str]] = [
 TEXT_SUFFIXES = {
     ".py",
     ".md",
+    ".mdx",
     ".yaml",
     ".yml",
     ".h",
@@ -110,8 +111,13 @@ TEXT_SUFFIXES = {
 
 
 def tracked_files() -> list[Path]:
+    """Include new documentation before it is staged, matching the lint gate scope."""
     out = subprocess.run(
-        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return [REPO_ROOT / line for line in out.stdout.splitlines() if line]
 
@@ -137,7 +143,7 @@ def main() -> int:
 
     if violations:
         print(
-            "Real/private diagnostic data found in tracked files (docs/CONVENTIONS.md):\n"
+            "Real/private diagnostic data found in repository files (docs/CONVENTIONS.md):\n"
         )
         print("\n".join(violations))
         print(
@@ -146,7 +152,7 @@ def main() -> int:
         )
         return 1
 
-    print(f"OK: no private-data markers in {len(tracked_files())} tracked files.")
+    print(f"OK: no private-data markers in {len(tracked_files())} repository files.")
     return 0
 
 

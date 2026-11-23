@@ -1,0 +1,46 @@
+---
+title: "CAN Gateway Text Sensors"
+description: "Observe the last CAN frame or map a raw signal value to text."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [CAN Gateway](/components/can_gateway/) on ESP32 with ESP-IDF 5.5 or later. ESP32-C5 is rejected.
+Keep the referenced port in `listen_only: true` with no routes or transmit producers for passive observation.
+
+## Passive Observation
+
+```yaml
+text_sensor:
+  - platform: can_gateway
+    port_id: observed_port
+    last_frame:
+      name: "Last Frame"
+```
+
+## Configuration variables
+
+Choose a last-frame snapshot, or a decode entry with `can_id` and a numeric-to-text map.
+
+- **can_gateway_id** (*Optional*, [ID](/guides/configuration-types/#id)): Snapshot's gateway hub; inferred when
+  unambiguous.
+- **port_id** (**Required**, [ID](/guides/configuration-types/#id)): Observed port.
+- **last_frame** (*Optional*, text sensor): Required for snapshots; latest received frame, for diagnostics.
+- **throttle** (*Optional*, [Time](/guides/configuration-types/#time)): Minimum publication interval. Defaults to `1s`
+  for snapshots;
+  omitted by default for decoded enums.
+- **can_id** (*Optional*, int): Required for enum decode; identifier fitting the selected frame type.
+- **use_extended_id** (*Optional*, boolean): Use 29-bit identifiers for decode. Defaults to `false`.
+- **offset** (*Optional*, int): Required for decode; byte offset, 0–7.
+- **length** (*Optional*, int): Required for decode; 1–4 bytes after final position validation, within the payload.
+- **byte_order** (*Optional*, enum): Enum field byte order.
+  - `little` *(default)*
+  - `big`
+- **map** (*Optional*, mapping): Required for decode; nonempty mapping from unique raw integers, 0–0xFFFFFFFF, to text.
+- All other options from [Text Sensor](/components/text_sensor/) apply to the decoded entity or nested snapshot.
+
+## See Also
+
+- [CAN Gateway](/components/can_gateway/)
+- [Text Sensor](/components/text_sensor/)
+- <APIRef text="can_gateway.h" path="can_gateway/can_gateway.h" />

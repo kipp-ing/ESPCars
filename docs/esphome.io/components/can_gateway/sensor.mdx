@@ -1,0 +1,75 @@
+---
+title: "CAN Gateway Sensors"
+description: "Decode numeric CAN signals and expose gateway counters and bus load."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [CAN Gateway](/components/can_gateway/) on ESP32 with ESP-IDF 5.5 or later. ESP32-C5 is rejected.
+Keep the referenced port in `listen_only: true` with no routes or transmit producers for passive observation.
+
+## Passive Observation
+
+```yaml
+sensor:
+  - platform: can_gateway
+    port_id: observed_port
+    can_id: 0x600
+    offset: 0
+    length: 1
+    name: "Demo Value"
+```
+
+## Configuration variables
+
+Two shapes are accepted: a signal with `can_id`, or diagnostics with exactly one of `port_id` and `route_id`.
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Entity ID for a decoded signal, or generated diagnostics
+  polling component ID.
+- **port_id** (*Optional*, [ID](/guides/configuration-types/#id)): Port; required for signal decode or port diagnostics.
+- **route_id** (*Optional*, [ID](/guides/configuration-types/#id)): Route; required for route diagnostics and mutually
+  exclusive with port diagnostics.
+- **can_id** (*Optional*, int): Required for signal decode; identifier in the selected 11-bit or 29-bit range.
+- **use_extended_id** (*Optional*, boolean): Decode 29-bit identifiers. Defaults to `false`.
+- **offset** (*Optional*, int): Byte offset, 0–7; required with byte `length`, mutually exclusive with bit position.
+- **length** (*Optional*, int): Byte length; schema accepts 1–8 but final position validation limits numeric decode
+  to at most four bytes and requires the field to fit in the payload.
+- **bit_offset** (*Optional*, int): Bit start, 0–63; requires `bit_length`, mutually exclusive with byte position.
+- **bit_length** (*Optional*, int): Bit width, 1–32, within the eight-byte frame.
+- **byte_order** (*Optional*, enum): Signal layout; big-endian bit offsets use DBC sawtooth MSB numbering.
+  - `little` *(default)*
+  - `big`
+- **signed** (*Optional*, boolean): Sign-extend the extracted value. Defaults to `false`.
+- **sna** (*Optional*, int or enum): Optional unsigned raw invalid sentinel fitting the signal width, checked before
+  sign extension. Omission treats every raw value as data.
+  - `all_ones`: All bits set for this signal's width.
+- **throttle** (*Optional*, [Time](/guides/configuration-types/#time)): Optional minimum interval between decoded
+  publications; omitted by default.
+- **update_interval** (*Optional*, [Time](/guides/configuration-types/#time)): Diagnostics publication interval.
+  Defaults to `60s`;
+  decoded signals publish from reception instead.
+- **forwarded** (*Optional*, sensor): Route frames forwarded.
+- **filtered** (*Optional*, sensor): Route frames dropped by rules.
+- **tx_full** (*Optional*, sensor): Route forwards shed because the destination queue is full.
+- **bus_off** (*Optional*, sensor): Route forwards shed while the destination is bus-off.
+- **disabled** (*Optional*, sensor): Route forwards shed while forwarding is disabled.
+- **injected** (*Optional*, sensor): Port frames submitted through the inject/send path.
+- **tx_fail** (*Optional*, sensor): Port transmit failures.
+- **bus_err** (*Optional*, sensor): Port errors associated with genuine error-counter movement.
+- **recoveries** (*Optional*, sensor): Port recovery count.
+- **tec** (*Optional*, sensor): Port transmit error counter.
+- **rec** (*Optional*, sensor): Port receive error counter.
+- **bus_load** (*Optional*, sensor): Port bus utilization percentage; rejected on a route destination-only port.
+- **observed** (*Optional*, sensor): Port observation count.
+- **observe_overflow** (*Optional*, sensor): Port records lost when the observation ring is full.
+- All other options from [Sensor](/components/sensor/) apply to decoded signals and each nested diagnostic sensor.
+
+Diagnostics require at least one counter/gauge matching the selected owner. Route counters require `route_id`;
+all remaining counters and gauges require `port_id`. Signal decode ignores frames too short for the declared field.
+Scaling can use standard sensor filters.
+
+## See Also
+
+- [CAN Gateway](/components/can_gateway/)
+- [Sensor](/components/sensor/)
+- <APIRef text="can_gateway.h" path="can_gateway/can_gateway.h" />

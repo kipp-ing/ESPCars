@@ -1,0 +1,71 @@
+---
+title: "UDS Sensors"
+description: "Observe UDS diagnostics and optionally poll catalog-defined numeric fields."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [UDS Diagnostics](/components/uds/) on ESP32 with ESP-IDF only; CAN Gateway rejects ESP32-C5.
+Keep the underlying gateway port listen-only during passive commissioning.
+
+## Passive Observation
+
+Diagnostic counters do not schedule requests. Use a hub with no polled bindings or request actions.
+
+```yaml
+sensor:
+  - platform: uds
+    uds_id: diagnostic_hub
+    responses_accepted:
+      name: "Accepted Responses"
+```
+
+## Configuration variables
+
+Select a numeric `field` binding or a diagnostics block containing at least one counter/gauge.
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Value entity ID, or generated diagnostics polling
+  component ID.
+- **uds_id** (*Optional*, [ID](/guides/configuration-types/#id)): Parent hub; inferred when unambiguous.
+- **field** (*Optional*, string): Required for a value binding; exact numeric field name from the catalog manifest.
+- **service** (*Optional*, string or int): Catalog group name, alias or DID. Required if the field occurs in several
+  groups.
+- **element** (*Optional*, int): Zero-based array element, 0–254 and below the catalog repeat count. Defaults to `0`.
+- **update_interval** (*Optional*, [Time](/guides/configuration-types/#time) or `never`): Defaults to `60s` for
+  diagnostics and numeric values.
+  For values, a finite interval schedules bus requests; `never` leaves the field on demand. The fastest binding
+  interval wins for fields sharing a group. For diagnostics, this only schedules counter publication.
+- **requests_sent** (*Optional*, sensor): Requests submitted.
+- **responses_accepted** (*Optional*, sensor): Accepted responses.
+- **timeouts** (*Optional*, sensor): Request timeouts.
+- **negative_responses** (*Optional*, sensor): Negative responses.
+- **decode_unmatched** (*Optional*, sensor): Responses unmatched by decoding.
+- **groups_suspended** (*Optional*, sensor): Suspended polling groups.
+- **partial_responses** (*Optional*, sensor): Successful responses shorter than the catalog's expected minimum.
+- **fields_uncovered** (*Optional*, sensor): Fields not covered by partial responses.
+- **last_nrc** (*Optional*, sensor): Most recent negative-response code.
+- All other options from [Sensor](/components/sensor/) apply to value entities and nested diagnostics.
+
+Units default to the catalog unit unless overridden in the standard sensor options. The catalog controls
+field geometry, sign, scale and invalid sentinels. ASCII, hexdump and enum fields require the text sensor platform.
+
+## Polling Numeric Fields
+
+Warning: a finite value update interval transmits UDS requests on the CAN bus.
+After commissioning the transport, select an authorized fictional mini-fixture field to poll.
+
+```yaml
+sensor:
+  - platform: uds
+    uds_id: diagnostic_hub
+    field: DT_Mini_Temperature_Averaged
+    name: "Demo Temperature"
+    update_interval: 60s
+```
+
+## See Also
+
+- [UDS Diagnostics](/components/uds/)
+- [UDS Text Sensors](/components/uds/text_sensor/)
+- [Sensor](/components/sensor/)
+- <APIRef text="uds.h" path="uds/uds.h" />

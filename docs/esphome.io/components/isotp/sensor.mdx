@@ -1,0 +1,40 @@
+---
+title: "ISO-TP Diagnostic Sensors"
+description: "Observe ISO-TP message and failure counters."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [ISO-TP](/components/isotp/) on ESP32 with ESP-IDF only; CAN Gateway rejects ESP32-C5.
+These entities report counters and send no requests. Keep the transport's gateway port listen-only for passive
+commissioning; receiving multi-frame messages otherwise sends flow control.
+
+## Passive Observation
+
+```yaml
+sensor:
+  - platform: isotp
+    isotp_id: transport
+    messages_received:
+      name: "Messages Received"
+```
+
+## Configuration variables
+
+At least one counter is required. All counters are monotonic totals.
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Generated diagnostics polling component ID.
+- **isotp_id** (*Optional*, [ID](/guides/configuration-types/#id)): Transport instance; inferred when unambiguous.
+- **messages_sent** (*Optional*, sensor): Completed messages sent.
+- **messages_received** (*Optional*, sensor): Completed messages received.
+- **transfers_failed** (*Optional*, sensor): Failed transfers.
+- **frames_ignored** (*Optional*, sensor): Frames ignored by the transport.
+- **update_interval** (*Optional*, [Time](/guides/configuration-types/#time)): Counter publication interval. Defaults to
+  `60s`.
+- All other options from [Sensor](/components/sensor/) apply to each nested counter.
+
+## See Also
+
+- [ISO-TP](/components/isotp/)
+- [Sensor](/components/sensor/)
+- <APIRef text="isotp.h" path="isotp/isotp.h" />

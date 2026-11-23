@@ -1,0 +1,150 @@
+---
+title: "SD Logger"
+description: "Record raw bus frames and ESPHome logs to a buffered SD card."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+The `sd_logger` component supports ESP32-C6 with ESP-IDF 5.5 or later only. All other variants, including
+ESP32-C5, are rejected. It owns a separate SD-over-SPI host; do not declare these pins on [SPI Bus](/components/spi/).
+The logger writes storage records and never sends vehicle-bus frames.
+
+## Passive Logging
+
+Connect a formatted FAT32 card and use distinct pins. This minimal configuration mounts the card without adding
+bus transmission. Add an existing [Logger](/components/logger/) to capture its messages, or tap a gateway port
+configured with `listen_only: true` and `log_tap: true` using `can_ports`.
+
+```yaml
+sd_logger:
+  id: card_log
+  clk_pin: GPIOXX
+  mosi_pin: GPIOXX
+  miso_pin: GPIOXX
+  cs_pin: GPIOXX
+```
+
+## Configuration variables
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Logger identifier.
+- **clk_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): SPI clock pin number.
+- **mosi_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): SPI output pin number.
+- **miso_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): SPI input pin number.
+- **cs_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Card select pin number.
+- **clock** (*Optional*, frequency): SD clock, 400 kHz–20 MHz. Defaults to `20MHz`.
+- **mount_point** (*Optional*, string): FAT mount path. Defaults to `/sdcard`.
+- **card_power_pin** (*Optional*, [Pin](/guides/configuration-types/#pin)): Card supply switch pin number, distinct from
+  all other logger pins.
+- **buffer_depth** (*Optional*, int): RAM record slots, a power of two from 256–16384. Defaults to `2048`.
+- **sync_interval** (*Optional*, [Time](/guides/configuration-types/#time)): File sync cadence. Defaults to `2s`.
+- **max_file_size** (*Optional*, int or size string): Rotation threshold, 64 KB–1 GB. Defaults to `16MB`.
+  `KB` and `MB` use powers of 1024.
+- **max_file_seconds** (*Optional*, [Time](/guides/configuration-types/#time) or seconds): Rotation age, 1–3600 whole
+  seconds. Omission means size-only.
+- **time_id** (*Optional*, [ID](/guides/configuration-types/#id) or list): Time sources whose sync callbacks anchor
+  timestamps to UTC.
+- **origin** (*Optional*, string): Text written as a `#origin` header in each file; omitted by default.
+- **can_ports** (*Optional*, list): Native [CAN Gateway](/components/can_gateway/) taps. Each port needs `log_tap:
+  true`.
+  - **port** (**Required**, [ID](/guides/configuration-types/#id)): Gateway port; a bare ID is accepted instead of a
+    mapping.
+  - **source** (*Optional*, int): Unique tag, 1–255. Defaults to the entry's one-based position.
+  - **label** (*Optional*, string): Unique 1–8 character label from letters, digits, `_` or `-`.
+    Defaults to `C1`, `C2`, and so on by position.
+- **sources** (*Optional*, list): Name generic action sources; tags and labels must be unique across both source lists.
+  - **tag** (**Required**, int): Source tag, 0–255; zero is the action's default tag.
+  - **kind** (**Required**, enum): Record type.
+    - `can`
+    - `lin`
+    - `user`
+  - **label** (**Required**, string): Unique 1–8 character label using letters, digits, `_` or `-`.
+- **esphome_logs** (*Optional*, mapping): Capture firmware logs; requires `logger`.
+  - **level** (*Optional*, enum): Capture ceiling, also bounded by the logger's configured level.
+    - `NONE`
+    - `ERROR`
+    - `WARN`
+    - `INFO` *(default)*
+    - `CONFIG`
+    - `DEBUG`
+    - `VERBOSE`
+    - `VERY_VERBOSE`
+  - **buffer_depth** (*Optional*, int): Text slots, a power of two from 8–256. Defaults to `32`.
+- **recovery** (*Optional*, mapping): Card retry policy; present with defaults even when omitted.
+  - **enabled** (*Optional*, boolean): Retry card failures. Defaults to `true`.
+  - **initial_delay** (*Optional*, [Time](/guides/configuration-types/#time)): First retry delay, 100 ms–300 s. Defaults
+    to `1s`.
+  - **max_delay** (*Optional*, [Time](/guides/configuration-types/#time)): Doubling delay cap, 100 ms–300 s, at least
+    initial delay. Defaults to `30s`.
+  - **max_attempts** (*Optional*, int): Retry count, 0–1000; zero means unlimited. Defaults to `0`.
+  - **power_cycle** (*Optional*, boolean): Cycle card supply during recovery. Defaults to whether `card_power_pin`
+    exists.
+  - **in_band_reset** (*Optional*, boolean): Attempt card protocol reset from the second recovery attempt.
+    Defaults to `true`.
+  - **busy_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Initial reset busy wait, 100 ms–60 s.
+    Defaults to `2s`.
+  - **max_busy_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Doubling busy-wait cap, at least the
+    initial wait. Defaults to `10s`.
+- **collection** (*Optional*, mapping): Opt-in chunk index, retention and optional WiFi serving.
+  - **enabled** (*Optional*, boolean): Enable chunk management. Defaults to `true` within this block.
+  - **serve** (*Optional*, boolean): Run the collection server; requires [WiFi](/components/wifi/).
+    Defaults to `true` within this block. Set `false` for card-only collection.
+  - **port** (*Optional*, int): Server port, separate from `web_server`. Defaults to `8080`.
+  - **retention_percent** (*Optional*, int): Fill threshold, strictly greater than 1 and less than 99.
+    Defaults to `80`. Retention can delete uncollected chunks and records that loss as `#gap`.
+  - **max_chunks** (*Optional*, int): RAM index entries, 16–2048. Defaults to `256`.
+- **vcc_monitor** (*Optional*, mapping): Best-effort emergency close on supply sag; requires board hold-up energy.
+  - **adc_pin** (**Required**, int): ADC1 pin number, 0–6 on C6; distinct from other logger pins.
+  - **threshold** (**Required**, voltage): Rail voltage at which closing begins.
+  - **divider** (**Required**, positive float): Physical ratio in `rail voltage = ADC voltage × divider`.
+  - **adc_full_scale** (*Optional*, int): ADC full scale in millivolts, 1000–3300. Defaults to `3100`.
+- **statistics** (*Optional*, mapping): Periodic diagnostic logging.
+  - **log_interval** (*Optional*, [Time](/guides/configuration-types/#time)): Statistics cadence. Defaults to `60s`.
+- **format_if_mount_failed** (*Optional*, boolean): Erase/reformat after a failed boot mount. Defaults to `false`.
+  Recovery retries never format the card.
+- **confine_bytes** (*Optional*, int or size string): Optional capacity bound, 1 MB–2199023255040 bytes in
+  whole 512-byte sectors. Oversized mounted volumes are refused; this setting does not resize them automatically.
+- All other options from [Component](/components/esphome/).
+
+## Automations
+
+### `sd_logger.log` Action
+
+Append a storage record. This action does not transmit on a vehicle bus. For example, record fictional local bytes:
+
+```yaml
+then:
+  - sd_logger.log:
+      id: card_log
+      data: [0x01]
+```
+
+**Configuration variables:**
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Logger identifier.
+- **can_id** (*Optional*, templatable int): Record identifier, 0–0x1FFFFFFF. Defaults to `0`.
+- **source** (*Optional*, int or string): Tag 0–255, or an already declared source label. Defaults to `0`.
+- **data** (**Required**, templatable byte list or string): Payload; literal lists have at most eight bytes.
+  Strings are encoded as UTF-8 bytes. Payloads longer than eight bytes at runtime are truncated and flagged.
+
+### `sd_logger.confine_format` Action
+
+Warning: this action erases the SD card and writes a new partition/filesystem; it sends no vehicle-bus frames.
+Requires `confine_bytes` and the exact confirmation `ERASE`. Trigger it manually after preserving needed logs.
+
+```yaml
+then:
+  - sd_logger.confine_format:
+      id: card_log
+      confirmation: "ERASE"
+```
+
+**Configuration variables:**
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Logger identifier.
+- **confirmation** (**Required**, templatable string): Exact runtime confirmation `ERASE`.
+
+## See Also
+
+- [CAN Gateway](/components/can_gateway/)
+- [Writer Freeze Switch](/components/sd_logger/switch/)
+- <APIRef text="sd_logger.h" path="sd_logger/sd_logger.h" />

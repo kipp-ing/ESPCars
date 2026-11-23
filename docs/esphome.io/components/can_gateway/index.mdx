@@ -1,0 +1,342 @@
+---
+title: "CAN Gateway"
+description: "Observe, decode and optionally forward classic CAN traffic on ESP32 TWAI controllers."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+The `can_gateway` component observes classic CAN frames, decodes signals and optionally forwards between two
+on-chip TWAI controllers. It requires ESP32 with ESP-IDF 5.5 or later; ESP32-C5 is rejected because its TWAI-FD
+HAL does not satisfy the forwarding slot tracker contract. Classic ESP32, S2, S3, C3 and H2 allow one port;
+C6 allows two; P4 has three controllers but this component uses at most two. It conflicts with `esp32_can`.
+An external CAN transceiver is required for each port.
+
+## Passive Observation
+
+Set `listen_only: true` explicitly: the default participates in CAN acknowledgment. Omit routes, cyclic sends
+and send actions. Replace both placeholder pins with distinct board pins and match the observed bus speed.
+All identifiers and payloads in these pages are fictional test values.
+
+```yaml
+can_gateway:
+  ports:
+    - id: observed_port
+      rx_pin: GPIOXX
+      tx_pin: GPIOXX
+      bit_rate: 500kbps
+      listen_only: true
+      on_frame:
+        then:
+          - logger.log: "CAN frame observed"
+```
+
+## Configuration variables
+
+- **id** (*Optional*, [ID](/guides/configuration-types/#id)): Gateway identifier.
+- **ports** (**Required**, list): One or two ports, limited by the target's controller count.
+  - **id** (**Required**, [ID](/guides/configuration-types/#id)): Unique port identifier.
+  - **rx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Internal receive pin number.
+  - **tx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Internal transmit pin number, required even in
+    listen-only mode.
+  - **bit_rate** (**Required**, int or bitrate): Bus speed, 10000–1000000 bits/s; accepts strings such as `500kbps`.
+  - **listen_only** (*Optional*, boolean): Disable transmission and ACKs. Defaults to `false`;
+    set `true` for passive observation.
+  - **tx_queue_depth** (*Optional*, int): Transmit queue slots, 1–64. Defaults to `8`.
+  - **observe_queue_depth** (*Optional*, int): Observation ring slots, 4–128. Defaults to `32`.
+  - **max_frames_per_loop** (*Optional*, int): Per-loop observation drain cap, 1–128, no larger than the ring.
+    Defaults to `observe_queue_depth`.
+  - **log_tap** (*Optional*, boolean): Enable the raw receive tap for [SD Logger](/components/sd_logger/).
+    Defaults to `false`.
+  - **log_tap_tx** (*Optional*, boolean): Also capture successful own transmissions; requires `log_tap: true`.
+    Defaults to `false`; enabling the tap does not itself cause transmission.
+  - **self_test** (*Optional*, boolean): Allow unacknowledged bench transmission; mutually exclusive with listen-only.
+    Defaults to `false`.
+  - **open_drain_tx** (*Optional*, boolean): Use open-drain transmit signaling. Defaults to `false`.
+  - **on_bus_off** (*Optional*, automation): Runs when this controller enters bus-off.
+  - **on_recovered** (*Optional*, automation): Runs after controller recovery.
+  - **on_frame** (*Optional*, automation): Raw observation of all frames; disables hardware filter offload.
+- **interrupt_priority** (*Optional*, int): TWAI interrupt priority, 1–3. Defaults to `2`.
+- **log_tap_queue_depth** (*Optional*, int): Per-port receive tap slots, 64–8192. Defaults to `1024`.
+- **log_tap_tx_queue_depth** (*Optional*, int): Per-port transmit tap slots, 16–8192. Defaults to `128`.
+- **statistics** (*Optional*, mapping): Optional traffic accounting and periodic logs.
+  - **log_interval** (*Optional*, [Time](/guides/configuration-types/#time)): Statistics cadence; zero disables periodic
+    lines. Defaults to `60s`.
+  - **id_timings** (*Optional*, boolean): Track per-identifier timing. Defaults to `false`.
+  - **id_timings_max** (*Optional*, int): Identifier timing table capacity, 1–128. Defaults to `32`.
+- **routes** (*Optional*, list): One-directional forwarding routes; requires two ports and transmits when enabled.
+  At most one route per source; a route cannot target a listen-only port.
+  - **id** (*Optional*, [ID](/guides/configuration-types/#id)): Route identifier for diagnostics.
+  - **from** (**Required**, [ID](/guides/configuration-types/#id)): Source port belonging to this gateway.
+  - **to** (**Required**, [ID](/guides/configuration-types/#id)): Different destination port belonging to this gateway.
+  - **default_action** (*Optional*, enum): Unmatched frame behavior.
+    - `accept` *(default)*
+    - `drop`
+  - **filters** (*Optional*, list): 1–255 ordered rules when present; first match wins.
+    - **id** (*Optional*, [ID](/guides/configuration-types/#id)): Updatable patch identifier; requires a modify block.
+    - **can_id** (**Required**, int): Match identifier, within the selected 11-bit or 29-bit range.
+    - **can_id_mask** (*Optional*, int): Match mask; defaults to all identifier bits. Match IDs must have no bits
+      outside this mask.
+    - **use_extended_id** (*Optional*, boolean): Match 29-bit identifiers. Defaults to `false`.
+    - **remote_transmission_request** (*Optional*, boolean): Optional RTR match; omission matches either type.
+    - **action** (*Optional*, enum): Rule outcome.
+      - `accept` *(default)*
+      - `drop`
+    - **modify** (*Optional*, mapping): Accepted-frame modifications; at least one ID/type/data/signal edit required.
+      Dropped frames cannot be modified. Payload edits must not overlap.
+      - **can_id** (*Optional*, int): Replacement identifier; omission preserves the original identifier.
+      - **use_extended_id** (*Optional*, boolean): Output frame type; defaults to the matched type. Demotion or a
+        masked type change needs an explicit replacement identifier.
+      - **data** (*Optional*, list): Nonempty byte patches, one per byte index.
+        - **index** (**Required**, int): Payload byte index, 0–7.
+        - **value** (**Required**, int): Replacement bits, 0–255.
+        - **mask** (*Optional*, int): Replaced bit mask, 0–255. Defaults to `0xFF`.
+      - **signals** (*Optional*, list): Nonempty bit-field declarations, each fitting within eight payload bytes.
+        - **bit_offset** (**Required**, int): Start bit, 0–63; LSB for little-endian, DBC sawtooth MSB for big-endian.
+        - **bit_length** (**Required**, int): Field width, 1–32 bits.
+        - **byte_order** (*Optional*, enum): Bit traversal order.
+          - `little` *(default)*
+          - `big`
+        - **value** (*Optional*, int): Unsigned raw boot value fitting the field. Without it, bits pass through until
+          `can_gateway.set_signal`; this requires a rule ID.
+      - **e2e** (*Optional*, mapping): CRC-8 delta repair after a payload patch; the CRC byte cannot be patched
+        directly.
+        - **crc_byte** (**Required**, int): CRC byte index, 0–7, outside the covered range.
+        - **first_byte** (*Optional*, int): First covered byte, 0–7. Defaults to `0`.
+        - **last_byte** (*Optional*, int): Last covered byte, 0–7. Defaults to the byte before the CRC;
+          CRC at byte zero requires an explicit valid range.
+        - **polynomial** (*Optional*, int): MSB-first CRC-8 polynomial, 1–255. Defaults to `0x1D`.
+- **cyclic_sends** (*Optional*, list): At most 32 periodic transmit entries; transmits from boot when enabled.
+  - **id** (**Required**, [ID](/guides/configuration-types/#id)): Cyclic sender identifier.
+  - **port** (**Required**, [ID](/guides/configuration-types/#id)): Transmit-capable port belonging to this gateway.
+  - **can_id** (**Required**, int): Identifier fitting the selected frame type.
+  - **interval** (**Required**, [Time](/guides/configuration-types/#time)): Positive whole-millisecond interval. Actual
+    cadence is limited by the main loop.
+  - **use_extended_id** (*Optional*, boolean): 29-bit identifier. Defaults to `false`.
+  - **remote_transmission_request** (*Optional*, boolean): RTR frame, requiring an empty payload. Defaults to `false`.
+  - **data** (*Optional*, byte list): Zero to eight bytes. Defaults to `[]`.
+  - **enabled** (*Optional*, boolean): Start sending after boot. Defaults to `true`.
+- All other options from [Component](/components/esphome/).
+
+## Automations
+
+### `on_frame` Trigger
+
+Runs under a port for every received frame. Arguments are `can_id`, `data` (byte pointer), `dlc`, `extended`
+and `rtr`. Access only `dlc` bytes during the callback; the buffer is temporary. This subscribes to all IDs,
+so a busy bus can overflow the observation ring if the main loop cannot drain it.
+
+```yaml
+can_gateway:
+  ports:
+    - id: observed_port
+      rx_pin: GPIOXX
+      tx_pin: GPIOXX
+      bit_rate: 500kbps
+      listen_only: true
+      on_frame:
+        then:
+          - logger.log: "Frame received"
+```
+
+**Configuration variables:**
+
+- **trigger_id** (*Optional*, [ID](/guides/configuration-types/#id)): Generated trigger identifier; normally omit it.
+- **then** (**Required**, automation): Observation actions.
+
+### `on_bus_off` Trigger
+
+Runs when the controller enters bus-off. No callback arguments are provided.
+
+```yaml
+can_gateway:
+  ports:
+    - id: observed_port
+      rx_pin: GPIOXX
+      tx_pin: GPIOXX
+      bit_rate: 500kbps
+      listen_only: true
+      on_bus_off:
+        then:
+          - logger.log: "Controller state changed"
+```
+
+**Configuration variables:**
+
+- **then** (**Required**, automation): State change actions.
+
+### `on_recovered` Trigger
+
+Runs after controller recovery. No callback arguments are provided.
+
+```yaml
+can_gateway:
+  ports:
+    - id: observed_port
+      rx_pin: GPIOXX
+      tx_pin: GPIOXX
+      bit_rate: 500kbps
+      listen_only: true
+      on_recovered:
+        then:
+          - logger.log: "Controller state changed"
+```
+
+**Configuration variables:**
+
+- **then** (**Required**, automation): State change actions.
+
+### `can_gateway.send` Action
+
+Warning: this operation transmits on the CAN bus or changes subsequently transmitted frames.
+Send one classic CAN frame. A listen-only target is rejected.
+
+```yaml
+then:
+  - can_gateway.send:
+      port: commissioned_port
+      can_id: 0x600
+      data: [0x01]
+```
+
+**Configuration variables:**
+
+- **port** (*Optional*, [ID](/guides/configuration-types/#id)): Target port; may be omitted only when exactly one port
+  exists.
+- **can_id** (**Required**, templatable int): Identifier fitting the selected frame type.
+- **use_extended_id** (*Optional*, boolean): Use a 29-bit identifier. Defaults to `false`.
+- **remote_transmission_request** (*Optional*, boolean): Send RTR; requires empty data. Defaults to `false`.
+- **data** (*Optional*, templatable byte list or string): Zero to eight bytes; strings use UTF-8. Defaults to `[]`.
+
+### `can_gateway.inject` Action
+
+Warning: this operation transmits on the CAN bus or changes subsequently transmitted frames.
+Deprecated alias for `can_gateway.send`, accepted with a warning for one release cycle.
+
+```yaml
+then:
+  - can_gateway.inject:
+      port: commissioned_port
+      can_id: 0x600
+      data: [0x01]
+```
+
+**Configuration variables:**
+
+- **port** (*Optional*, [ID](/guides/configuration-types/#id)): Target port, inferred only with a single port.
+- **can_id** (**Required**, templatable int): Identifier fitting the frame type.
+- **use_extended_id** (*Optional*, boolean): 29-bit frame. Defaults to `false`.
+- **remote_transmission_request** (*Optional*, boolean): RTR frame. Defaults to `false`.
+- **data** (*Optional*, templatable byte list or string): Up to eight bytes. Defaults to `[]`.
+
+### `can_gateway.set_patch` Action
+
+Warning: this operation transmits on the CAN bus or changes subsequently transmitted frames.
+Atomically update already-declared rule byte/identifier patches. It affects subsequent forwarded frames.
+
+```yaml
+then:
+  - can_gateway.set_patch:
+      id: commissioned_patch
+      data:
+        - index: 0
+          value: 0x01
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Rule patch ID.
+- **can_id** (*Optional*, templatable int): Replacement identifier; the rule must declare an ID modification.
+- **data** (*Optional*, list): Nonempty patch updates. At least one of data or identifier is required.
+  - **index** (**Required**, int): Already-declared byte index, 0–7.
+  - **value** (**Required**, templatable int): New replacement bits, 0–255.
+
+### `can_gateway.set_signal` Action
+
+Warning: this operation transmits on the CAN bus or changes subsequently transmitted frames.
+Update one exactly matching declared signal; converts physical values to saturated raw bits.
+
+```yaml
+then:
+  - can_gateway.set_signal:
+      id: commissioned_patch
+      bit_offset: 0
+      bit_length: 8
+      value: 1
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Rule patch ID.
+- **bit_offset** (**Required**, int): Declared start bit, 0–63.
+- **bit_length** (**Required**, int): Declared field width, 1–32.
+- **byte_order** (*Optional*, enum): Must match the declaration.
+  - `little` *(default)*
+  - `big`
+- **signed** (*Optional*, boolean): Interpret raw field as signed. Defaults to `false`.
+- **value** (**Required**, templatable float): Physical value; NaN restores pass-through.
+- **factor** (*Optional*, float): Nonzero scale in `raw = round((value - offset) / factor)`. Defaults to `1.0`.
+- **offset** (*Optional*, float): Physical offset. Defaults to `0.0`.
+- **enabled** (*Optional*, templatable boolean): Apply the patch; false restores pass-through. Defaults to `true`.
+
+### `can_gateway.set_cyclic_data` Action
+
+Warning: this operation transmits on the CAN bus or changes subsequently transmitted frames.
+Replace a cyclic sender payload; this affects future transmissions.
+
+```yaml
+then:
+  - can_gateway.set_cyclic_data:
+      id: commissioned_cycle
+      data: [0x01]
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Cyclic sender ID.
+- **data** (**Required**, templatable byte list): Zero to eight bytes.
+
+### `can_gateway.start_cyclic` Action
+
+Warning: this operation transmits on the CAN bus or changes subsequently transmitted frames.
+Start a declared cyclic sender.
+
+```yaml
+then:
+  - can_gateway.start_cyclic:
+      id: commissioned_cycle
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Cyclic sender ID; bare-ID shorthand is accepted.
+
+### `can_gateway.stop_cyclic` Action
+
+Stops future cyclic transmission on the CAN bus.
+Stop a declared cyclic sender.
+
+```yaml
+then:
+  - can_gateway.stop_cyclic:
+      id: commissioned_cycle
+```
+
+**Configuration variables:**
+
+- **id** (**Required**, [ID](/guides/configuration-types/#id)): Cyclic sender ID; bare-ID shorthand is accepted.
+
+## Forwarding And Periodic Transmission
+
+Warning: routes and enabled cyclic senders transmit on the CAN bus, beginning at boot.
+Configure transmit-capable ports only after passive observation. A gateway switch controls forwarding only;
+it does not gate send actions, cyclic senders or CAN acknowledgments. Cyclic intervals have a main-loop floor
+of roughly 16 ms, so a requested short interval is not a timing guarantee.
+
+## See Also
+
+- [Gateway Sensors](/components/can_gateway/sensor/)
+- [Gateway Binary Sensors](/components/can_gateway/binary_sensor/)
+- [Gateway Text Sensors](/components/can_gateway/text_sensor/)
+- [Forwarding Switch](/components/can_gateway/switch/)
+- [SD Logger](/components/sd_logger/)
+- <APIRef text="can_gateway.h" path="can_gateway/can_gateway.h" />

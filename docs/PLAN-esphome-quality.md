@@ -431,7 +431,43 @@ actions, triggers, conditions, and observe-first examples. Generate a
 `CODEOWNERS` file from the components' `CODEOWNERS` lists, with a CI check that
 it is up to date.
 
-**Done:** every config key in every component's schema appears in its page.
+**P7 implemented; CI evidence pending:** 17 MDX pages under
+`docs/esphome.io/components/` cover all seven hubs and ten entity platforms.
+Pages follow esphome.io's current MDX/front-matter structure, link inherited
+ESPHome options, retain deprecated aliases, and begin with passive examples.
+Existing user guides remain intact. Transmitting actions and controls have
+separate headings and warnings; the CAN listen-only and LIN commander defaults
+are stated explicitly. No component code or schemas change.
+
+`script/check_docs.py` loads actual hub/platform schemas and action/condition
+registries in a fresh process. It tracks locally declared keys through nested
+schemas, wrapper closures, dispatchers, recursive mappings and inline mapping
+validators. Inherited upstream keys may be documented but are covered by links
+rather than copied exhaustively. Every local key must be a bold configuration
+bullet on its own hub/platform page; each trigger/action/condition needs its
+own heading, example and configuration list. Missing/unknown keys or pages fail.
+Tests remove real nested, platform, alias and per-action descriptions to prove
+failure, and exercise synthetic wrapped schemas and a condition.
+
+`script/build_codeowners.py` generates root `CODEOWNERS` from literal hub and
+platform lists, preserving the former `.github/CODEOWNERS` catch-all policy.
+The shadowing `.github/CODEOWNERS` is removed so GitHub uses the generated file.
+Missing hub owners are reported, never invented. Tests prove owner changes,
+missing files and shadowing fail `--check`. Both new checks block `check.sh`
+and CI's existing required lint job. The private-data guard now includes MDX
+and non-ignored new files so documentation is scanned before staging.
+
+The format reference was read from the local esphome.io checkout (`current`,
+2026-11-23): `CONTRIBUTING.md` and `components/canbus/{index,esp32_can,mcp2515}.mdx`.
+The supplied P7 format takes precedence over legacy explicit anchors in those
+examples. Generation follows esphome's `script/build_codeowners.py` component
+and platform ownership rules. P8 remains deferred; these local pages do not
+schedule upstream submission or a component split.
+
+**Done criteria:** every locally declared config key in every loaded hub,
+platform and registered automation schema appears on its page, including nested
+keys and deprecated aliases; both checks and their negative tests pass locally
+and in CI. Inherited configuration is linked using esphome.io conventions.
 
 ### P8 — Upstream split · only when upstreaming is scheduled
 

@@ -12,6 +12,12 @@ fi
 echo "== no private data =="
 "$PY" script/check_no_private_data.py
 
+echo "== documentation schema coverage =="
+"$PY" script/check_docs.py
+
+echo "== generated CODEOWNERS =="
+"$PY" script/build_codeowners.py --check
+
 echo "== pytest =="
 "$PY" -m pytest -q
 

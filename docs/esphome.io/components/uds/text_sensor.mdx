@@ -1,0 +1,51 @@
+---
+title: "UDS Text Sensors"
+description: "Bind catalog-defined ASCII, hexdump or enum fields without automatic polling."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires [UDS Diagnostics](/components/uds/) on ESP32 with ESP-IDF only; CAN Gateway rejects ESP32-C5.
+Keep the underlying gateway port listen-only during passive commissioning.
+The catalog decides which fields are textual; declaring a numeric field here is a validation error.
+
+## Passive Observation
+
+Keep `update_interval: never` and use a hub with no other polling bindings or request actions.
+This binding queues no requests; it remains unavailable until its group is read deliberately.
+The field below belongs to the fictional mini catalog.
+
+```yaml
+text_sensor:
+  - platform: uds
+    uds_id: diagnostic_hub
+    field: PRES_Mini_State
+    name: "Demo State"
+    update_interval: never
+```
+
+## Configuration variables
+
+- **uds_id** (*Optional*, [ID](/guides/configuration-types/#id)): Parent hub; inferred when unambiguous.
+- **field** (**Required**, string): Exact field name from the catalog manifest.
+- **service** (*Optional*, string or int): Group name, alias or DID; required for ambiguous field names.
+- **element** (*Optional*, int): Zero-based array element, 0–254 and below the repeat count. Defaults to `0`.
+- **update_interval** (*Optional*, [Time](/guides/configuration-types/#time) or `never`): Group polling interval.
+  Defaults to `never`.
+  A finite interval schedules requests; another binding to the same group can also schedule reads.
+- All other options from [Text Sensor](/components/text_sensor/).
+
+Rendered text must fit the 63-byte usable slot: ASCII width, twice the hexdump byte width, or the longest UTF-8
+enum label. Configuration validation rejects fields wider than the slot.
+
+## Reading Text Fields
+
+Warning: requesting a text field's group or configuring a finite interval transmits on the CAN bus.
+Commission the transport before invoking [UDS read actions](/components/uds/).
+
+## See Also
+
+- [UDS Diagnostics](/components/uds/)
+- [UDS Sensors](/components/uds/sensor/)
+- [Text Sensor](/components/text_sensor/)
+- <APIRef text="uds.h" path="uds/uds.h" />
