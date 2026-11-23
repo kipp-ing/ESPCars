@@ -23,7 +23,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 HEAP = re.compile(r"free (\d+) B, largest block (\d+) B, min since boot (\d+) B")
 LOOP = re.compile(r"max (\d+) us, (\d+) gaps > 50 ms, (\d+) loops")
 MISSING = {
-    "gateway.rx_isr_to_forward_us": "not printed; scope/CAN trace required; callback timestamps are not ISR latency",
+    "gateway.rx_isr_to_forward_us": "not printed; current esp_timing excludes IRAM callbacks; scope wire latency is separate evidence",
     "lin.break_us": "not printed; scope LIN wire in commander/responder/listener runs",
     "lin.sync_us": "not printed; scope sync/PID order",
     "lin.first_response_us": "not printed; scope PID-to-first-byte latency",
