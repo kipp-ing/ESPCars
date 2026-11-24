@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include "esp_timer.h"  // ensure own direct dependency
 #include "lin_common.h"
 
@@ -145,6 +146,16 @@ class LinProtocolHandler {
   void set_rx_expected_length(uint8_t id, uint8_t len);  // len 0..8; 0 = unknown (timeout fallback)
   void set_rx_checksum_mode(uint8_t id, bool enhanced);  // declare classic/enhanced for this ID
 
+  // Called under the TX table mutex. Derived lengths may change with actions;
+  // the event task snapshots one at the header, never in the middle of a frame.
+  bool rx_length_conflicts(uint8_t id, uint8_t length) const {
+    return this->rx_expected_len_[id] != 0 && this->rx_expected_len_[id] != length;
+  }
+  void set_response_length(uint8_t id, uint8_t length) {
+    this->response_lengths_[id].store(length, std::memory_order_relaxed);
+  }
+  uint8_t get_response_length(uint8_t id) const { return this->response_lengths_[id].load(std::memory_order_relaxed); }
+
   void on_inter_byte_timeout();
 
   // Count frames dropped by main-loop-rate coalescing on the on_frame trigger (H3/N6). Called
@@ -169,9 +180,11 @@ class LinProtocolHandler {
   uint8_t current_pid_with_parity_;
   uint8_t current_data_[LIN_MAX_DATA_SIZE + 2];
   uint8_t current_data_count_;
+  int current_frame_bytes_ = -1;
 
-  // Per-ID RX hints (indexed by 6-bit ID). Written once at setup, then read lock-free in the
-  // event task (never mutated after setup, so the unlocked read is safe).
+  // Explicit hints are immutable after task start. Only response-derived lengths
+  // change at runtime, published atomically and latched once per header.
+  std::atomic<uint8_t> response_lengths_[64]{};
   uint8_t rx_expected_len_[64] = {0};  // 0 = unknown; else payload length -> finalize at len+1
   int8_t rx_checksum_mode_[64];        // -1 unknown, 0 classic, 1 enhanced (init in ctor)
   // Expected total DATA-phase byte count (payload + checksum) for an ID, or -1 if unknown.
@@ -193,8 +206,8 @@ class LinProtocolHandler {
   // the front and counts a mismatch as a collision: a competing publisher overdrove us.
   // Single-context by design: since the A5 event-task fold, ALL TX (commander_send headers, on_id
   // responses) and ALL consumption (receive_decode / on_uart_break / on_inter_byte_timeout /
-  // on_frame_error) run in the UART event task, so the FIFO itself needs no locking — only the
-  // collision counter increments take the data mutex (like pid_errors). Static storage, no
+  // on_frame_error) run in the UART event task, so the FIFO itself needs no locking.
+  // Fault deltas are atomic and merged by statistics readers under the table mutex. Static storage, no
   // heap on the hot path (N7); sized for a header (3) + a max response (9) with slack.
   static constexpr size_t ECHO_FIFO_SIZE = 16;
   static constexpr uint16_t ECHO_BREAK = 0x100;  // out-of-band break marker (> any data byte)
@@ -202,7 +215,7 @@ class LinProtocolHandler {
   uint8_t echo_head_ = 0;
   uint8_t echo_count_ = 0;
 
-  void echo_count_collision_();  // collisions/collisions_total under lock_data_(0)
+  void echo_count_collision_();  // retained atomic delta; merged by statistics readers
   void echo_clear_() {
     echo_head_ = 0;
     echo_count_ = 0;
@@ -221,8 +234,19 @@ class LinProtocolHandler {
   LinDiscoveredId *discovered_ids_;
 
   // Statistics tracking
-  LinStatistics statistics_;
-  mutable LinStatistics statistics_snapshot_;
+  // Faults cannot wait for the table mutex or disappear when the control loop
+  // owns it. Atomic deltas retain them until a statistics reader merges them
+  // under that mutex. Fault paths allocate nothing and never wait for the
+  // table mutex; ESP-IDF supplies atomic helpers on targets without HW atomics.
+  mutable std::atomic<uint32_t> pending_collisions_{0};
+  mutable std::atomic<uint32_t> pending_pid_errors_{0};
+  mutable std::atomic<uint32_t> pending_frame_errors_{0};
+  mutable std::atomic<uint32_t> pending_uart_breaks_{0};
+  mutable std::atomic<uint32_t> pending_coalesced_{0};
+  mutable std::atomic<uint32_t> pending_header_bytes_{0};
+  void merge_pending_statistics_() const;  // caller holds data_mutex_
+  mutable LinStatistics statistics_{};
+  mutable LinStatistics statistics_snapshot_{};
   uint8_t unique_id_tracker_[256];  // Bitmap to track unique IDs seen in current window
 
   bool lock_data_(TickType_t timeout = portMAX_DELAY) const;

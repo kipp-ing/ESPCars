@@ -205,6 +205,40 @@ def _find_port_config(full_config, port_id):
     return None
 
 
+def _payload_size(data):
+    return len(data.encode()) if isinstance(data, str) else len(data)
+
+
+def _send_data(value):
+    value = cv.Any(cv.ensure_list(cv.hex_uint8_t), cv.string)(value)
+    if not 1 <= _payload_size(value) <= MAX_MESSAGE_SIZE_LIMIT:
+        raise cv.Invalid("data must contain 1-4095 bytes (strings are UTF-8)")
+    return value
+
+
+def _validate_send_actions(node, config, path=()):
+    """Actions have no final-validation hook; check static sizes against their parent here."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            action_path = (*path, key)
+            if (
+                key == "isotp.send"
+                and isinstance(value, dict)
+                and str(value.get(CONF_ID)) == str(config[CONF_ID])
+                and not isinstance(value[CONF_DATA], core.Lambda)
+                and _payload_size(value[CONF_DATA]) > config[CONF_MAX_MESSAGE_SIZE]
+            ):
+                raise cv.Invalid(
+                    f"isotp.send data exceeds max_message_size limit "
+                    f"{config[CONF_MAX_MESSAGE_SIZE]} bytes for {config[CONF_ID]}",
+                    path=[*action_path, CONF_DATA],
+                )
+            _validate_send_actions(value, config, action_path)
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            _validate_send_actions(item, config, (*path, index))
+
+
 def _final_validate(config):
     """V5: the port's observation ring must be able to hold a whole granted block.
 
@@ -212,6 +246,7 @@ def _final_validate(config):
     dropped consecutive frames, which surfaces as intermittent N_Cr timeouts a long way from
     the cause.
     """
+    _validate_send_actions(fv.full_config.get(), config)
     port = _find_port_config(fv.full_config.get(), config[CONF_PORT_ID])
     if port is None:
         # The port id resolved at schema time, so a miss here means an unexpected config shape
@@ -285,12 +320,7 @@ async def to_code(config):
 SEND_ACTION_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.use_id(IsoTpProtocol),
-        cv.Required(CONF_DATA): cv.templatable(
-            cv.Any(
-                cv.All(cv.ensure_list(cv.hex_uint8_t), cv.Length(min=1)),
-                cv.string,
-            )
-        ),
+        cv.Required(CONF_DATA): cv.templatable(_send_data),
     }
 )
 

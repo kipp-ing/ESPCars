@@ -189,6 +189,13 @@ can_gateway:
                          (unsigned) can_id, dlc, rtr ? " rtr" : "");
 ```
 
+Decode entities ignore RTR frames even when their DLC is nonzero; raw
+`on_frame` and `last_frame` observation still include those frames. Entities
+without ESPHome filters publish only when the decoded value changes. With
+`filters:` configured, every valid sample enters the filter chain, subject
+to an explicitly configured numeric/text `throttle:`. This lets timeout,
+window and sample-count filters observe a steady signal.
+
 ### 3.3 Bridge two buses — `routes:` and filters
 
 ```yaml
@@ -604,10 +611,19 @@ source.
 |---|---|---|
 | `can_gateway.send: {port, can_id, use_extended_id, remote_transmission_request, data}` | — | one-shot TX; `port` omittable with exactly one declared port; `data` accepts a hex list, an ASCII string, or a `!lambda` |
 | `can_gateway.inject` | — | pre-v0.6 name for `can_gateway.send`, identical options, deprecated |
-| `can_gateway.set_patch: {id, can_id, data}` | the target filter rule declared `id:` + `modify:` | runtime-update a rule's `modify` values; only the fields the rule's `modify:` already declared |
+| `can_gateway.set_patch: {id, can_id, data}` | the target filter rule declared `id:` + `modify:` | runtime-update a rule's `modify` values; only the fields the rule's `modify:` already declared; `data` has 1–8 entries with unique byte indices |
 | `can_gateway.set_signal: {id, bit_offset, bit_length, byte_order, value, factor, offset, signed, enabled}` | the rule declares that exact field in `modify.signals` | stamp a physical value into the field, or (`enabled: false` / NaN) restore pass-through |
 | `can_gateway.set_cyclic_data: {id, data}` | — | update a cyclic sender's staged payload |
 | `can_gateway.start_cyclic: <id>` / `can_gateway.stop_cyclic: <id>` | — | start/stop a cyclic sender |
+
+The C++ `GatewayPort::inject()` API is main-loop-task only. Port startup
+records ESPHome's owning task before allocating the TWAI interrupts on that
+pinned core. Calls from other FreeRTOS tasks return `false` with a throttled
+warning before acquiring slots or submitting TX; callers must hand work to
+the main loop. Calls from ISRs are unsupported. This keeps the forwarding
+and TX-completion ISRs free of additional locks. A direct RX ISR hook must
+be registered before port setup and keeps hardware filter offload disabled,
+so it receives route-rejected IDs too.
 
 ### `sensor: platform: can_gateway` — two shapes
 
@@ -637,7 +653,7 @@ Owner is a shared polling hub, `update_interval` default `60s`.
 
 | shape | keys |
 |---|---|
-| bus-off flag | `port_id` + `bus_off:` — `true` on entering bus-off, `false` on recovery |
+| bus-off flag | `port_id` + `bus_off:` — publishes the current state after successful startup, then `true` on entering bus-off and `false` on recovery |
 | decode bit | `port_id`, `can_id`, `use_extended_id`, `bit` (`0`–`63`, whole-frame index) |
 
 ### `text_sensor: platform: can_gateway` — two shapes

@@ -40,3 +40,24 @@ for name, signature in (
         r"(?=^  // These three gates)",
     )
 )
+
+for name, marker in (
+    ("port_start", "bool GatewayPort::start_("),
+    ("offload", "void GatewayPort::try_hw_filter_offload_("),
+    ("inject", "bool GatewayPort::inject("),
+    ("port_loop", "void GatewayPort::loop_("),
+    ("setup", "void CanGateway::setup()"),
+    ("decode_sensor", "void CanGatewayDecodeSensor::on_frame("),
+    ("decode_binary", "void CanGatewayDecodeBinarySensor::on_frame("),
+    ("decode_text", "void CanGatewayDecodeTextSensor::on_frame("),
+):
+    (BUILD / f"gateway_{name}.inc").write_text(extract(SOURCE, marker, r"^}"))
+
+for name in (
+    "CanGatewayDecodeSensor",
+    "CanGatewayDecodeBinarySensor",
+    "CanGatewayDecodeTextSensor",
+):
+    (BUILD / f"gateway_{name}.inc").write_text(
+        extract(HEADER, f"class {name} :", r"^};")
+    )

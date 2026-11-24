@@ -18,8 +18,8 @@ ESPHOME_LOG_TAG(TAG, "LIN_COMM");
 // The former IDF logger compiled non-error logs out (CONFIG_LOG_MAXIMUM_LEVEL=1).
 // Keep them at VERBOSE so DEBUG adds no logging work on LIN timing paths.
 
-LINCommunication::LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin, int cs_pin)
-    : uart_num_(uart_num), tx_pin_(tx_pin), rx_pin_(rx_pin), cs_pin_(cs_pin), mode_(LIN_MODE_LISTENER), baud_rate_(0) {
+LINCommunication::LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin)
+    : uart_num_(uart_num), tx_pin_(tx_pin), rx_pin_(rx_pin), mode_(LIN_MODE_LISTENER), baud_rate_(0) {
   // Initialize LinSerial (can be nullptr until init)
   lin_serial_ = nullptr;
 
@@ -47,7 +47,11 @@ LINCommunication::~LINCommunication() {
   }
 }
 
-esp_err_t LINCommunication::init(LinMode mode, int baud_rate) {
+esp_err_t LINCommunication::init(LinMode mode, int baud_rate, bool start_task) {
+  if (this->data_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot initialize LIN: mutex allocation failed");
+    return ESP_ERR_NO_MEM;
+  }
   if (is_initialized_) {
     ESP_LOGV(TAG, "LINCommunication is already initialized. Skipping reinitialization.");
     return ESP_ERR_INVALID_STATE;
@@ -81,32 +85,34 @@ esp_err_t LINCommunication::init(LinMode mode, int baud_rate) {
   lin_protocol_handler_ =
       new LinProtocolHandler(lin_serial_, baud_rate_, schedule_, discovered_ids_, responses_, mode_, data_mutex_);
 
-  if (cs_pin_ != -1) {
-    // Configure CS  pin
-    gpio_config_t io_conf = {};
-    io_conf.pin_bit_mask = (1ULL << (gpio_num_t) cs_pin_);
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&io_conf);
+  this->is_initialized_ = true;
+  return start_task ? this->start() : ESP_OK;
+}
 
-    gpio_set_level((gpio_num_t) cs_pin_, 1);
-  }
+esp_err_t LINCommunication::start() {
+  if (!this->is_initialized_ || this->task_started_)
+    return ESP_ERR_INVALID_STATE;
 
   // LIN at <=20 kbit/s needs low latency, not maximum priority. Running above esp_timer /
   // Wi-Fi / BT (configMAX_PRIORITIES - 1) can starve the system. Use a high-but-bounded
   // priority instead. See UPGRADES.md H9.
   UBaseType_t task_prio = (configMAX_PRIORITIES > 19) ? 18 : (UBaseType_t) (configMAX_PRIORITIES - 2);
   BaseType_t ok = xTaskCreatePinnedToCore(uart_event_task_trampoline, "lin_uart_evt", 4096, this, task_prio,
-                                          &uart_event_task_handle_, tskNO_AFFINITY);
+                                          &this->uart_event_task_handle_, tskNO_AFFINITY);
   if (ok != pdPASS) {
     ESP_LOGE(TAG, "Failed to create UART event task");
+    delete this->lin_protocol_handler_;
+    this->lin_protocol_handler_ = nullptr;
+    delete this->lin_serial_;
+    this->lin_serial_ = nullptr;
+    vSemaphoreDelete(this->data_mutex_);
+    this->data_mutex_ = nullptr;
+    this->is_initialized_ = false;
     return ESP_FAIL;
   }
+  this->task_started_ = true;
 
-  ESP_LOGV(TAG, "LINCommunication initialized in mode %d at %d baud", mode_, baud_rate_);
-  is_initialized_ = true;  // Mark as initialized
+  ESP_LOGV(TAG, "LINCommunication initialized in mode %d at %d baud", this->mode_, this->baud_rate_);
 
   return ESP_OK;
 }
@@ -234,7 +240,7 @@ bool LINCommunication::lin_process() {
 // commander scheduler functions
 
 bool LINCommunication::commander_add_id_schedule(uint8_t id, uint32_t interval_ms) {
-  if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
   // Update existing
   for (auto &schedule : schedule_) {
@@ -270,7 +276,7 @@ bool LINCommunication::commander_add_id_schedule(uint8_t id, uint32_t interval_m
 }
 
 bool LINCommunication::commander_remove_id_schedule(uint8_t id) {
-  if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
   for (auto &schedule : schedule_) {
     if (schedule.updateInterval == 0)
@@ -298,8 +304,16 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
     return false;
   if (data_length > LIN_MAX_DATA_SIZE)
     data_length = LIN_MAX_DATA_SIZE;
-  if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
+
+  // Explicit LDF/config lengths stay authoritative. A refusal leaves the old
+  // publication intact; clearing an entry is always allowed.
+  if (data_length != 0 && this->lin_protocol_handler_->rx_length_conflicts(id, data_length)) {
+    ESP_LOGW(TAG, "Response length for ID 0x%02X conflicts with explicit RX length", id);
+    xSemaphoreGive(this->data_mutex_);
+    return false;
+  }
 
   // If caller wants to clear: data_length == 0
   if (data_length == 0) {
@@ -307,6 +321,7 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
       if (response.dataLength == 0)
         continue;
       if (response.id == id) {
+        this->lin_protocol_handler_->set_response_length(id, 0);
         response.dataLength = 0;  // mark free
         // (optional) zero buffer
         memset(response.responseData, 0, sizeof(response.responseData));
@@ -332,6 +347,7 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
       response.responseData[data_length] = cs;
       response.enhancedChecksum = checksum_enhanced;
       response.dataLength = data_length + 1;
+      this->lin_protocol_handler_->set_response_length(id, data_length);
       if (data_mutex_ != nullptr)
         xSemaphoreGive(data_mutex_);
       return true;
@@ -347,6 +363,7 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
     response.responseData[data_length] = cs;
     response.enhancedChecksum = enhanced;
     response.dataLength = data_length + 1;
+    this->lin_protocol_handler_->set_response_length(id, data_length);
     response.lastResponseTime = 0;
     if (data_mutex_ != nullptr)
       xSemaphoreGive(data_mutex_);
@@ -358,6 +375,10 @@ bool LINCommunication::set_response_data(uint8_t id, uint8_t *data, uint8_t data
 }
 
 void LINCommunication::configure_rx_hint(uint8_t id, uint8_t length, int8_t checksum_mode) {
+  if (this->task_started_) {
+    ESP_LOGW(TAG, "RX hints must be configured before starting the UART task");
+    return;
+  }
   if (lin_protocol_handler_ == nullptr)
     return;
   if (length > 0)
@@ -375,7 +396,7 @@ bool LINCommunication::get_response_4id(uint8_t id, LinDiscoveredId *lindata) {
   if (!lindata) {
     return false;
   }
-  if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE)
     return false;
 
   // Search for the ID in discovered_ids_ array
@@ -395,7 +416,7 @@ bool LINCommunication::get_response_4id(uint8_t id, LinDiscoveredId *lindata) {
 }
 
 void LINCommunication::dump_received_pids_to_log() const {
-  if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE)
     return;
   ESP_LOGV(TAG, "| %-5s | %-4s | %-3s | %-7s | %-8s | %-24s |", "Idx", "ID", "Len", "Count", "Last(ms)", "Data(hex)");
   ESP_LOGV(TAG, "|-------|------|-----|---------|----------|--------------------------|");
@@ -431,6 +452,8 @@ bool LINCommunication::self_test_restore_() {
   // After restoration returns no test-only header or response can start sending.
   memcpy(this->schedule_, this->self_test_schedule_backup_, sizeof(this->schedule_));
   memcpy(this->responses_, this->self_test_responses_backup_, sizeof(this->responses_));
+  for (uint8_t id = 0; id < 64; ++id)
+    this->lin_protocol_handler_->set_response_length(id, this->self_test_response_lengths_backup_[id]);
   this->self_test_initialized_ = false;
   this->self_test_enabled_ = false;
   this->self_test_count_ = 0;
@@ -462,7 +485,7 @@ void LINCommunication::self_test_tick_() {
     self_test_init_if_needed_();
     return;
   }
-  if (data_mutex_ != nullptr && xSemaphoreTake(data_mutex_, portMAX_DELAY) != pdTRUE)
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE)
     return;
   for (size_t i = 0; i < self_test_count_; ++i) {
     auto &st = self_test_stats_[i];
@@ -523,6 +546,11 @@ void LINCommunication::self_test_init_if_needed_() {
   }
   memcpy(this->self_test_schedule_backup_, this->schedule_, sizeof(this->schedule_));
   memcpy(this->self_test_responses_backup_, this->responses_, sizeof(this->responses_));
+
+  // Preserve the existing self-test framing/cadence; only user response updates
+  // change derived lengths. Temporary action edits during a run are restored too.
+  for (uint8_t id = 0; id < 64; ++id)
+    this->self_test_response_lengths_backup_[id] = this->lin_protocol_handler_->get_response_length(id);
 
   // Install the whole run under the same lock used by every header/response send.
   // On capacity failure roll back BEFORE unlocking, so no partial run reaches the wire.

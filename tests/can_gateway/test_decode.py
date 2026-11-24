@@ -287,3 +287,34 @@ def test_v29_sna_boolean_rejected(set_core_config) -> None:
     _decode_gateway(set_core_config)
     with pytest.raises(cv.Invalid, match="not a flag"):
         _sensor(_decode(offset=0, length=1, sna=True))
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["first\nsecond", "tab\treturn\rcontrol\x01" + "7", '"quote"\\path', "Grüße"],
+)
+def test_enum_map_escapes_cpp_control_characters(set_core_config, label) -> None:
+    from esphome import codegen as cg
+    from esphome.components.can_gateway.text_sensor import _decode_to_code
+    from esphome.core import CORE
+    from esphome.helpers import cpp_string_escape
+
+    _decode_gateway(set_core_config)
+    config = _text_sensor(
+        {
+            "id": "enum_signal",
+            "port_id": "port_a",
+            "can_id": 0x100,
+            "offset": 0,
+            "length": 1,
+            "map": {1: label},
+            "name": "Enum signal",
+        }
+    )
+    CORE.register_variable(config["port_id"], cg.MockObj("port_a", "->"))
+    CORE.add_job(_decode_to_code, config)
+    CORE.flush_tasks()
+    generated = "\n".join(
+        str(s) for s in [*CORE.global_statements, *CORE.main_statements]
+    )
+    assert cpp_string_escape(label) in generated

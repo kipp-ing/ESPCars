@@ -36,13 +36,22 @@ sensor:
 - **framing_errors** (*Optional*, sensor): UART framing, parity or overflow errors.
 - **collisions** (*Optional*, sensor): Transmit echo mismatches.
 - **frames_coalesced** (*Optional*, sensor): Frame updates skipped between automation deliveries.
-- **send_failures** (*Optional*, sensor): Commander transmission failures.
-- **bus_load** (*Optional*, sensor): Bus utilization percentage over the statistics window.
-- **error_rate** (*Optional*, sensor): Error percentage over the statistics window.
+- **send_failures** (*Optional*, sensor): Header or response transmission failures.
+- **bus_load** (*Optional*, sensor): Estimated utilization from observed headers and response bytes, including
+  local echo once.
+- **error_rate** (*Optional*, sensor): Transport fault events as a percentage of accepted frames plus fault events.
 - All other options from [Sensor](/components/sensor/) apply to each nested sensor.
 
 Counters report lifetime totals with total-increasing state class, not reset-per-window counts.
-Bus load and error rate are windowed percentages. No update interval is configured by this platform.
+Bus load and error rate are windowed percentages. Bus load counts three byte equivalents per observed
+header and each finalized response byte (including checksum), using 10 bits per byte. It is an estimate:
+LIN break duration, gaps and discarded partial/noise bytes are not measured. Traffic without readback
+cannot be counted. The estimate uses the same receive path in every role.
+
+Error rate is `100 * faults / (frames_received + faults)`, or zero for an empty window. Faults are send
+failures, PID errors, checksum errors, framing errors and collisions; checksum fallback, coalescing and
+normal breaks are excluded. Multiple fault events can belong to one damaged transaction. Listener mode
+uses the same formula. No update interval is configured by this platform.
 
 ## See Also
 
