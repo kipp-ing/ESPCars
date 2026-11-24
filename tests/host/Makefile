@@ -66,8 +66,9 @@ GLUE_BINS := $(GLUE_SRCS:test_glue_%.cpp=$(BUILD)/glue_%)
 SRCS     := main.cpp $(filter-out $(GLUE_SRCS),$(sort $(wildcard test_*.cpp)))
 LINBUS_DIR := ../../components/linbus
 LINBUS_OBJS := $(BUILD)/lin_communication.o $(BUILD)/lin_protocol_handler.o
+LINBUS_RUNTIME_OBJS := $(BUILD)/linbus.o $(BUILD)/lin_serial.o
 CORE_OBJS := $(SRCS:%.cpp=$(BUILD)/%.o)
-OBJS     := $(CORE_OBJS) $(GLUE_OBJS) $(LINBUS_OBJS)
+OBJS     := $(CORE_OBJS) $(GLUE_OBJS) $(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS)
 DEPS     := $(OBJS:.o=.d)
 BINS     := $(BIN) $(GLUE_BINS)
 
@@ -160,11 +161,12 @@ $(GLUE_BINS): $(BUILD)/glue_%: $(BUILD)/main.o $(BUILD)/test_glue_%.o Makefile
 	@$(CXX) $(filter %.o,$^) $(LDFLAGS) -o $@
 
 $(BUILD)/glue_linbus_self_test: $(LINBUS_OBJS)
+$(BUILD)/glue_linbus_runtime: $(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS)
 
 # Compile the production LIN tables/sender against host RTOS/UART adapters.
-$(BUILD)/test_glue_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
+$(BUILD)/test_glue_linbus_runtime.o $(BUILD)/test_glue_linbus_self_test.o $(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
 
-$(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
+$(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
 

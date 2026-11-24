@@ -42,7 +42,7 @@ LinProtocolHandler::LinProtocolHandler(LinSerial *serial, int baud_rate, LinSche
 LinProtocolHandler::~LinProtocolHandler() { ; }
 
 bool LinProtocolHandler::lock_data_(TickType_t timeout) const {
-  return data_mutex_ == nullptr || xSemaphoreTake(data_mutex_, timeout) == pdTRUE;
+  return this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, timeout) == pdTRUE;
 }
 
 void LinProtocolHandler::unlock_data_() const {
@@ -52,23 +52,31 @@ void LinProtocolHandler::unlock_data_() const {
 }
 
 void LinProtocolHandler::on_id(uint8_t id) {
-  if (!serial_ || mode_ == LIN_MODE_LISTENER)
+  if (!this->serial_ || this->mode_ == LIN_MODE_LISTENER) {
+    this->current_frame_bytes_ = this->expected_frame_bytes_(id);
     return;
+  }
   if (!lock_data_())
     return;
+  // Snapshot framing and send under the same table lock: a concurrent action
+  // must not pair an old length with a newly sized response.
+  this->current_frame_bytes_ = this->expected_frame_bytes_(id);
   for (size_t i = 0; i < LIN_MAX_RESPONSES; ++i) {
     if (responses_[i].id == id && responses_[i].dataLength) {
-      serial_->write_bytes(responses_[i].responseData, responses_[i].dataLength);
+      if (!this->serial_->write_bytes(this->responses_[i].responseData, this->responses_[i].dataLength)) {
+        this->statistics_.commander_send_failures++;
+        this->statistics_.commander_send_failures_total++;
+        this->unlock_data_();
+        return;
+      }
 
       // Update statistics - ID request answered
       statistics_.id_requests_answered++;
       statistics_.id_requests_answered_total++;
-      statistics_.total_bus_bytes += responses_[i].dataLength;
 
-      // Copy the just-written bytes while still under the mutex (the main loop may mutate
-      // responses_ after we release), then register the echo expectation OUTSIDE the lock:
-      // echo_begin_tx_()/echo_push_() can count a collision, which takes lock_data_(0) itself —
-      // the mutex is non-recursive, so pushing while locked would silently drop the count.
+      // Copy the just-written bytes before releasing the table mutex: an action
+      // may replace the response afterwards. The echo FIFO remains worker-owned;
+      // collision deltas are retained independently of table-lock contention.
       uint8_t echo_len = responses_[i].dataLength;
       uint8_t echo_bytes[LIN_MAX_DATA_SIZE + 1];
       memcpy(echo_bytes, responses_[i].responseData, echo_len);
@@ -231,7 +239,6 @@ uint8_t LinProtocolHandler::commander_send() {
         // Update statistics - commander request sent
         statistics_.commander_requests_sent++;
         statistics_.commander_requests_total++;
-        statistics_.total_bus_bytes += 3;  // break + sync + pid
       } else {
         // Update statistics - real commander send failure (TX error/timeout), see UPGRADES.md M2
         statistics_.commander_send_failures++;
@@ -318,7 +325,9 @@ void LinProtocolHandler::set_rx_checksum_mode(uint8_t id, bool enhanced) {
 }
 
 int LinProtocolHandler::expected_frame_bytes_(uint8_t id) const {
-  uint8_t len = rx_expected_len_[id & 0x3F];
+  uint8_t len = this->rx_expected_len_[id & 0x3F];
+  if (len == 0)
+    len = this->get_response_length(id & 0x3F);
   if (len == 0)
     return -1;                       // unknown -> caller uses the inter-byte-timeout fallback
   return static_cast<int>(len) + 1;  // payload + checksum byte
@@ -327,23 +336,13 @@ int LinProtocolHandler::expected_frame_bytes_(uint8_t id) const {
 void LinProtocolHandler::note_coalesced(uint32_t n) {
   if (n == 0)
     return;
-  if (!lock_data_(0))
-    return;
-  statistics_.frames_coalesced += n;
-  statistics_.frames_coalesced_total += n;
-  unlock_data_();
+  this->pending_coalesced_.fetch_add(n, std::memory_order_relaxed);
 }
 
 // --- TX-readback collision detection (A6/N5/B9) — see the header for the context/locking
 // contract. The FIFO is only ever touched from the UART event task. ---
 
-void LinProtocolHandler::echo_count_collision_() {
-  if (lock_data_(0)) {
-    statistics_.collisions++;
-    statistics_.collisions_total++;
-    unlock_data_();
-  }
-}
+void LinProtocolHandler::echo_count_collision_() { this->pending_collisions_.fetch_add(1, std::memory_order_relaxed); }
 
 void LinProtocolHandler::echo_begin_tx_() {
   // Leftover expectations at the start of a new TX mean the previous echo never fully
@@ -418,13 +417,9 @@ void LinProtocolHandler::on_uart_break() {
   last_bus_activity_us_ = esp_timer_get_time();
   // Count that the driver actually delivered a UART_BREAK event. On the C6 self-loopback this
   // stays 0 (the break arrives as a 0x00 data byte, HW-0b); a climbing count on a two-node bus
-  // answers HW-0c — a genuine external break does raise the event. Locked separately, after the
-  // on_data() above has already released the mutex (no re-entrancy).
-  if (lock_data_(0)) {
-    statistics_.uart_breaks++;
-    statistics_.uart_breaks_total++;
-    unlock_data_();
-  }
+  // answers HW-0c — a genuine external break does raise the event. Retain the
+  // delta even if the control loop currently owns the table mutex.
+  this->pending_uart_breaks_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void LinProtocolHandler::on_frame_error() {
@@ -432,11 +427,7 @@ void LinProtocolHandler::on_frame_error() {
   // already counts this fault, and double-counting it as a collision would blur the N6
   // taxonomy.
   echo_clear_();
-  if (lock_data_(0)) {
-    statistics_.frame_errors++;
-    statistics_.frame_errors_total++;
-    unlock_data_();
-  }
+  this->pending_frame_errors_.fetch_add(1, std::memory_order_relaxed);
   // Event-order robustness (N3/B3): a UART_FRAME_ERR can *trail* the very break that
   // on_uart_break() just resynced on (a real 13-bit break violates framing). If we are already
   // waiting for the sync byte, keep waiting — do not bounce back to BREAK and swallow the
@@ -494,13 +485,12 @@ LinReadState LinProtocolHandler::receive_decode(uint8_t readbyte, uint8_t comman
         state_ = READ_STATE_DATA;
       } else {
         // Parity error -> reset
-        if (lock_data_(0)) {
-          statistics_.pid_errors++;
-          statistics_.pid_errors_total++;
-          unlock_data_();
-        }
+        this->pending_pid_errors_.fetch_add(1, std::memory_order_relaxed);
         state_ = READ_STATE_BREAK;
       }
+      // Account after response TX to keep diagnostics off its latency path.
+      // Local echoes and foreign headers use this same observation point.
+      this->pending_header_bytes_.fetch_add(3, std::memory_order_relaxed);
       break;
     }
 
@@ -513,7 +503,7 @@ LinReadState LinProtocolHandler::receive_decode(uint8_t readbyte, uint8_t comman
           // waiting for the inter-byte silence. This makes back-to-back frames and
           // within-budget mid-response pauses safe, and is the primary end-of-frame boundary
           // on silicon that never signals a hardware BREAK (HW-0b). Silence stays the fallback.
-          int expect = expected_frame_bytes_(current_id_);
+          int expect = this->current_frame_bytes_;
           if (expect > 0 && (int) current_data_count_ >= expect) {
             on_data(current_pid_with_parity_, current_data_, current_data_count_);
             reset_decode_state_();
@@ -574,9 +564,29 @@ uint8_t LinProtocolHandler::get_id_from_pid_(uint8_t pid) {
 }
 
 // Statistics implementation
+void LinProtocolHandler::merge_pending_statistics_() const {
+  const auto collisions = this->pending_collisions_.exchange(0, std::memory_order_relaxed);
+  const auto pid = this->pending_pid_errors_.exchange(0, std::memory_order_relaxed);
+  const auto framing = this->pending_frame_errors_.exchange(0, std::memory_order_relaxed);
+  const auto breaks = this->pending_uart_breaks_.exchange(0, std::memory_order_relaxed);
+  const auto coalesced = this->pending_coalesced_.exchange(0, std::memory_order_relaxed);
+  this->statistics_.frames_coalesced += coalesced;
+  this->statistics_.frames_coalesced_total += coalesced;
+  this->statistics_.collisions += collisions;
+  this->statistics_.collisions_total += collisions;
+  this->statistics_.pid_errors += pid;
+  this->statistics_.pid_errors_total += pid;
+  this->statistics_.frame_errors += framing;
+  this->statistics_.frame_errors_total += framing;
+  this->statistics_.uart_breaks += breaks;
+  this->statistics_.uart_breaks_total += breaks;
+  this->statistics_.total_bus_bytes += this->pending_header_bytes_.exchange(0, std::memory_order_relaxed);
+}
+
 void LinProtocolHandler::reset_statistics() {
   if (!lock_data_())
     return;
+  this->merge_pending_statistics_();
   memset(&statistics_, 0, sizeof(statistics_));
   memset(&statistics_snapshot_, 0, sizeof(statistics_snapshot_));
   memset(unique_id_tracker_, 0, sizeof(unique_id_tracker_));
@@ -587,6 +597,7 @@ void LinProtocolHandler::reset_statistics() {
 void LinProtocolHandler::update_statistics() {
   if (!lock_data_())
     return;
+  this->merge_pending_statistics_();
   int64_t now = esp_timer_get_time();
   int64_t window_duration_us = now - statistics_.stats_start_time;
 
@@ -614,8 +625,14 @@ void LinProtocolHandler::update_statistics() {
         (theoretical_max_bits > 0) ? (double) actual_bits / theoretical_max_bits * 100.0 : 0.0;
 
     // Calculate error rates
-    int64_t total_transactions = statistics_.commander_requests_sent + statistics_.id_requests_answered;
-    int64_t total_errors = statistics_.commander_send_failures + statistics_.pid_errors + statistics_.checksum_errors;
+    // Fault-event fraction: accepted frames versus transport faults observed
+    // in this window. Works for passive listeners as well as publishing nodes;
+    // fallback/coalescing are not wire faults. Multiple fault events may refer
+    // to one damaged transaction, so this is not a failed-transaction ratio.
+    int64_t total_errors = static_cast<int64_t>(this->statistics_.commander_send_failures) +
+                           this->statistics_.pid_errors + this->statistics_.checksum_errors +
+                           this->statistics_.frame_errors + this->statistics_.collisions;
+    int64_t total_transactions = this->statistics_.frames_received + total_errors;
     statistics_.error_rate_percent =
         (total_transactions > 0) ? (double) total_errors / total_transactions * 100.0 : 0.0;
 
@@ -640,6 +657,7 @@ void LinProtocolHandler::update_statistics() {
 
 const LinStatistics &LinProtocolHandler::get_statistics() const {
   if (lock_data_()) {
+    this->merge_pending_statistics_();
     statistics_snapshot_ = statistics_;
     unlock_data_();
   }

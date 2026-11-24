@@ -65,9 +65,10 @@ class LinSerial;
 
 class LINCommunication {
  public:
-  LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin, int cs_pin = -1);
-  esp_err_t init(LinMode mode, int baud_rate);  // Initialize LIN communication
+  LINCommunication(uart_port_t uart_num, int tx_pin, int rx_pin);
+  esp_err_t init(LinMode mode, int baud_rate, bool start_task = true);  // Initialize LIN communication
   ~LINCommunication();
+  esp_err_t start();  // Start only after all static RX hints and tables have been applied.
 
   bool lin_process();  // Loop-context housekeeping: self-test evaluation + statistics windows.
                        // The data path (RX decode, response TX, commander schedule) runs in the
@@ -84,7 +85,7 @@ class LINCommunication {
 
   // Per-received-ID static hints from config (length-aware finalize + declared checksum mode).
   // length 0 = no length hint; checksum_mode -1 = undeclared, 0 = classic, 1 = enhanced.
-  // Call after init() (the protocol handler must exist). See spec A3/C2.
+  // Call after init(..., false), before start(). Hints are immutable once the task runs.
   void configure_rx_hint(uint8_t id, uint8_t length, int8_t checksum_mode);
 
   // Fold main-loop-rate on_frame coalescing into the counters (H3/N6).
@@ -110,13 +111,14 @@ class LINCommunication {
   uart_port_t uart_num_;
   int tx_pin_;
   int rx_pin_;
-  int cs_pin_;
   LinMode mode_;
   int baud_rate_;
 
   LinSerial *lin_serial_{nullptr};
   LinProtocolHandler *lin_protocol_handler_{nullptr};
   bool is_initialized_ = false;
+  bool task_started_ = false;
+  uint8_t self_test_response_lengths_backup_[64]{};
   mutable SemaphoreHandle_t data_mutex_{nullptr};
 
   LinScheduleItem schedule_[LIN_MAX_ID_RQ_COUNT];
