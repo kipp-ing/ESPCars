@@ -469,9 +469,11 @@ def _check_transport(config, ecu: dcat.Ecu, groups: list[dcat.Group]) -> None:
     if isotp_conf is None:
         return
     hub = config[CONF_ID]
+    capacity = isotp_conf[CONF_MAX_MESSAGE_SIZE]
+    for group in groups:
+        _check_request_capacity(config, len(group.request), capacity, group.name)
     if groups:
         widest = max(groups, key=lambda g: g.resp_min_len)
-        capacity = isotp_conf[CONF_MAX_MESSAGE_SIZE]
         if capacity < widest.resp_min_len:
             raise cv.Invalid(
                 f"group {widest.name!r} (DID 0x{widest.did:04X}) answers with at least "
@@ -510,6 +512,27 @@ def _check_transport(config, ecu: dcat.Ecu, groups: list[dcat.Group]) -> None:
             ecu.p2_ext_ms,
             config[CONF_ISOTP_ID],
             n_cr,
+        )
+
+
+def _check_request_capacity(
+    config: dict[str, Any], size: int, capacity: int, name: str
+) -> None:
+    if size > capacity:
+        raise cv.Invalid(
+            f"{name!r} has a {size}-byte request, but isotp id {config[CONF_ISOTP_ID]} sets "
+            f"'{CONF_MAX_MESSAGE_SIZE}: {capacity}'. Raise '{CONF_MAX_MESSAGE_SIZE}' to at least {size}.",
+            path=[CONF_ISOTP_ID],
+        )
+
+
+def _check_polled_group(config: dict[str, Any], group: dcat.Group) -> None:
+    if binding_interval(config) != 0 and not group.safe_read:
+        raise cv.Invalid(
+            f"polling accepts SAFE_READ groups only; group {group.name!r} uses service "
+            f"0x{group.sid:02X}, which can change ECU state. Set 'update_interval: never' and use "
+            f"'uds.execute' with '{CONF_ALLOW_ACTIVE_SERVICES}: true' for an explicit request.",
+            path=[CONF_UPDATE_INTERVAL],
         )
 
 
@@ -552,6 +575,7 @@ def _final_validate(config):
         group, _field = resolve_field(
             ecu, entry[CONF_FIELD], entry.get(CONF_SERVICE), entry.get(CONF_ELEMENT, 0)
         )
+        _check_polled_group(entry, group)
         groups[group.name] = group
 
     for name, action in _walk_actions(
@@ -585,6 +609,17 @@ def _final_validate(config):
         elif name == ACTION_EXECUTE:
             group = resolve_group(ecu, action[CONF_SERVICE])
             groups[group.name] = group
+        elif (
+            name == ACTION_RAW
+            and not isinstance(action[CONF_DATA], core.Lambda)
+            and (transport := _find_isotp_config(config[CONF_ISOTP_ID])) is not None
+        ):
+            _check_request_capacity(
+                config,
+                len(action[CONF_DATA]),
+                transport[CONF_MAX_MESSAGE_SIZE],
+                ACTION_RAW,
+            )
 
     _check_transport(config, ecu, list(groups.values()))
     _check_siblings(config)
@@ -714,6 +749,7 @@ def binding_final_validate(config, *, want_text: bool):
     group, field = resolve_field(
         ecu, config[CONF_FIELD], config.get(CONF_SERVICE), config[CONF_ELEMENT]
     )
+    _check_polled_group(config, group)
 
     is_text = field.ascii or field.hexdump or field.is_enum
     if is_text != want_text:

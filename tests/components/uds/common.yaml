@@ -90,6 +90,8 @@ uds:
       - lambda: |-
           ESP_LOGD("uds", "%s = %.3f %s (%s) valid=%d", x.field, x.value, x.unit, x.text, (int) x.valid);
     on_error:
+      # Delayed automations retain a copy of UdsError, including its static reason pointer.
+      - delay: 1ms
       - logger.log:
           format: "uds error: %s (NRC 0x%02X)"
           args: [x.what, x.nrc]
