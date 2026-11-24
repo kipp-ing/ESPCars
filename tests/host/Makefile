@@ -6,6 +6,13 @@
 # Runtime regression cases extract only our own component code using Python's
 # standard library. The host build does not need the ESPHome package.
 #
+# Isolation rule: component glue compiled against host stubs MUST live in
+# test_glue_<name>.cpp. Each gets build/glue_<name>, sharing main.cpp/harness.h
+# but never another glue test's objects or run_tests. Otherwise incompatible
+# esphome:: types/inline functions violate the ODR and silently run wrong code.
+# Freestanding core tests alone belong in run_tests. gluecheck rejects stub
+# headers and extracted glue runtime includes in its compiler dependencies.
+#
 #   make -C tests/host            build and run everything
 #   make -C tests/host FILTER=x   run only cases whose name contains x
 #   make -C tests/host SAN=       build without sanitizers
@@ -24,6 +31,7 @@ OPT      ?= -O1 -g
 # would see exit 0 on a real finding.
 SAN      ?= -fsanitize=address,undefined -fno-sanitize-recover=undefined
 FILTER   ?=
+.DEFAULT_GOAL := all
 
 CORE_DIR := ../../components/can_gateway
 # sd_logger's tap translation (TapRecord -> LogRecord) is split into
@@ -52,28 +60,58 @@ BIN      := $(BUILD)/run_tests
 GEN      := $(BUILD)/rule_patch_extracted.h
 RUNTIME_GEN := $(BUILD)/gateway_runtime.stamp
 
-SRCS     := main.cpp $(sort $(wildcard test_*.cpp))
+GLUE_SRCS := $(sort $(wildcard test_glue_*.cpp))
+GLUE_OBJS := $(GLUE_SRCS:%.cpp=$(BUILD)/%.o)
+GLUE_BINS := $(GLUE_SRCS:test_glue_%.cpp=$(BUILD)/glue_%)
+SRCS     := main.cpp $(filter-out $(GLUE_SRCS),$(sort $(wildcard test_*.cpp)))
 LINBUS_DIR := ../../components/linbus
 LINBUS_OBJS := $(BUILD)/lin_communication.o $(BUILD)/lin_protocol_handler.o
-OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o) $(LINBUS_OBJS)
+CORE_OBJS := $(SRCS:%.cpp=$(BUILD)/%.o)
+OBJS     := $(CORE_OBJS) $(GLUE_OBJS) $(LINBUS_OBJS)
 DEPS     := $(OBJS:.o=.d)
+BINS     := $(BIN) $(GLUE_BINS)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
             -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
 
 # Execute the real UdsHub glue against a controlled ESPHome/transport boundary.
-$(BUILD)/test_uds_hub.o: CXXFLAGS += -Iuds_stubs -DUSE_SENSOR -DUSE_TEXT_SENSOR
+$(BUILD)/test_glue_uds_hub.o: CXXFLAGS += -Iuds_stubs -DUSE_SENSOR -DUSE_TEXT_SENSOR
 
-.PHONY: all test compile bench lockcheck clean
+.PHONY: all test compile bench lockcheck gluecheck clean
 all: test
 
-test: lockcheck $(BIN)
-	@echo "== can_gateway host tests =="
-	@./$(BIN) $(FILTER)
+# Harness exit 2 means no match; tolerate it only with an explicit filter,
+# and only when at least one binary matches. Preserve every other failure.
+test: lockcheck gluecheck $(BINS)
+	@matched=0; failed=0; \
+	for bin in $(BINS); do \
+	  if output=$$(./$$bin "$(FILTER)" 2>&1); then status=0; else status=$$?; fi; \
+	  if [ $$status -eq 2 ] && [ -n "$(FILTER)" ]; then \
+	    echo "== $$bin (no matching cases) =="; \
+	  else \
+	    echo "== $$bin =="; printf '%s\n' "$$output"; \
+	    matched=1; \
+	    if [ $$status -ne 0 ]; then failed=1; fi; \
+	  fi; \
+	done; \
+	if [ $$matched -eq 0 ]; then echo "ERROR: no case matched the filter in any binary" >&2; exit 2; fi; \
+	exit $$failed
 
 ## Build without running (useful when only the compile must be checked).
-compile: lockcheck $(BIN)
+compile: lockcheck gluecheck $(BINS)
+
+# Inspect transitive includes, not just direct #includes: a component header can
+# pull in a stub via -Iuds_stubs/-Ilinbus_stubs. Also catch our generated glue
+# headers, whose fakes can be inline rather than under a *_stubs directory.
+gluecheck: $(CORE_OBJS)
+	@awk '\
+	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|gateway_[^ /]*[.]inc)" { \
+	    printf "%s:%d: %s\n", FILENAME, FNR, $$0; bad = 1; \
+	  } \
+	  END { exit bad ? 1 : 0 }' $(CORE_OBJS:.o=.d) || { \
+	  echo "ERROR: stub/glue include in run_tests; name the test test_glue_<name>.cpp" >&2; \
+	  echo "       so it runs in its own executable. Do not link stubbed types together." >&2; exit 1; }
 
 # The one sd_logger contract that no host case can reach: `index_mux_` is an
 # `xSemaphoreCreateMutex()`, which is NOT recursive, and `IndexLock` waits
@@ -110,12 +148,18 @@ lockcheck: $(LOGGER_DIR)/sd_logger.cpp
 	  echo "       Take the index lock, copy what you need out of it, give it back, and only then" >&2; \
 	  echo "       reserve line room. Do not delete this check." >&2; exit 1; }
 
-$(BIN): $(OBJS)
+$(BIN): $(CORE_OBJS) Makefile
 	@echo "  LD    $@"
-	@$(CXX) $(OBJS) $(LDFLAGS) -o $@
+	@$(CXX) $(CORE_OBJS) $(LDFLAGS) -o $@
+
+$(GLUE_BINS): $(BUILD)/glue_%: $(BUILD)/main.o $(BUILD)/test_glue_%.o Makefile
+	@echo "  LD    $@"
+	@$(CXX) $(filter %.o,$^) $(LDFLAGS) -o $@
+
+$(BUILD)/glue_linbus_self_test: $(LINBUS_OBJS)
 
 # Compile the production LIN tables/sender against host RTOS/UART adapters.
-$(BUILD)/test_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
+$(BUILD)/test_glue_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
 
 $(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
 	@echo "  CXX   $<"
@@ -125,7 +169,7 @@ $(BUILD)/%.o: %.cpp | $(GEN) $(RUNTIME_GEN)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/test_transport_runtime.o: $(BUILD)/transport_runtime.h
+$(BUILD)/test_glue_transport_runtime.o: $(BUILD)/transport_runtime.h
 
 $(BUILD)/transport_runtime.h: generate_transport_runtime.py $(CCP_DIR)/ccp.h $(CCP_DIR)/ccp.cpp $(ISOTP_DIR)/isotp.h $(ISOTP_DIR)/isotp.cpp | $(BUILD)
 	@python3 generate_transport_runtime.py
@@ -152,7 +196,7 @@ $(GEN): $(CORE_DIR)/can_gateway.h | $(BUILD)
 	@grep -q 'void set_byte' $@ || { \
 	  echo "ERROR: extracted RulePatch is missing set_byte; see $<." >&2; rm -f $@; exit 1; }
 
-$(BUILD)/test_gateway_rx.o $(BUILD)/test_gateway_switch.o $(BUILD)/test_gateway_frame_data.o: $(RUNTIME_GEN)
+$(BUILD)/test_glue_gateway_rx.o $(BUILD)/test_glue_gateway_switch.o $(BUILD)/test_glue_gateway_frame_data.o: $(RUNTIME_GEN)
 
 $(RUNTIME_GEN): extract_gateway_runtime.py $(CORE_DIR)/can_gateway.h $(CORE_DIR)/can_gateway.cpp | $(BUILD)
 	@echo "  GEN   gateway runtime (repository code only)"

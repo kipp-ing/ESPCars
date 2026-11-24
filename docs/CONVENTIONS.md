@@ -28,6 +28,14 @@ changed in the move.
   on the host. Plain `make`, no CMake, no test framework (`harness.h` is it),
   ASan+UBSan. This is where rule engine, slot pool/tracker, rings and backoff
   are actually tested — the bench cannot reach them.
+  Freestanding core tests share `build/run_tests`. Component glue tests using
+  host stubs must be named `test_glue_<name>.cpp`; each builds and runs in its
+  own `build/glue_<name>` executable with the shared `main.cpp`/`harness.h`,
+  flags and sanitizers. Never link glue tests together: their stubbed
+  `esphome::` types and inline functions can violate the ODR, silently running
+  another test's implementation. Make's `gluecheck` rejects transitive stub
+  header paths (`stubs/`, `*_stubs/`, `*_stubs.h`) and generated glue runtime
+  includes in the core objects' compiler dependency files.
 - `tests/hil/` — the hardware bench; see [`HIL.md`](../tests/hil/HIL.md).
 - `deploy/` — fictional example configs and service units for the host-side
   tools (`deploy/sdlog-fleet/`). Real instance configs live with the deployment.
@@ -45,7 +53,10 @@ make -C tests/host                                   # host C++ tests (~10 s)
 ```
 
 `make -C tests/host FILTER=<substring>` runs a subset; `SAN=` drops the
-sanitizers. If `.venv` is missing:
+sanitizers. Default `make` and `compile` build every host binary; default `make`
+runs them all. The filter applies across binaries: an individual binary with
+no matches is ignored, but no matches anywhere fails, as does any test or
+sanitizer failure. If `.venv` is missing:
 `python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt -r requirements_lint.txt`.
 
 ## Definition of done — every change
