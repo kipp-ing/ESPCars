@@ -101,6 +101,8 @@ void IsoTpProtocol::loop() {
     }
     if (action == TxAction::COMPLETE) {
       this->messages_sent_++;
+      if (this->consumer_ != nullptr)
+        this->consumer_->on_sent();
     } else if (action == TxAction::FAILED) {
       this->report_error_(this->tx_.error());
     }

@@ -116,6 +116,12 @@ _PARTITION_LABEL_RE = re.compile(r"^[A-Za-z0-9_]+$")
 TEXT_SLOT_CAP = 64
 # Mirrors UDS_MAX_REQUEST in uds.h.
 MAX_REQUEST = 32
+# GroupScheduler capacity and UdsHub::reserve_poll_slots use uint8_t.
+MAX_POLLED_GROUPS = 255
+# GroupScheduler::add requires intervals below the modular clock's 2^31 ms horizon.
+MAX_POLL_INTERVAL_MS = 0x7FFFFFFF
+# UdsHub binding/text counts and reserve_* setters use uint16_t.
+MAX_BINDINGS = 0xFFFF
 
 _SIZE_UNITS = {
     "": 1,
@@ -570,13 +576,29 @@ def _check_siblings(config) -> None:
 def _final_validate(config):
     _cat, ecu = catalog_of(config)
     groups: dict[str, dcat.Group] = {}
+    polled: set[str] = set()
+    bindings = 0
 
     for _domain, entry in bound_entity_configs(fv.full_config.get(), config[CONF_ID]):
         group, _field = resolve_field(
             ecu, entry[CONF_FIELD], entry.get(CONF_SERVICE), entry.get(CONF_ELEMENT, 0)
         )
         _check_polled_group(entry, group)
+        bindings += 1
+        if binding_interval(entry) != 0:
+            polled.add(group.name)
         groups[group.name] = group
+
+    if len(polled) > MAX_POLLED_GROUPS:
+        raise cv.Invalid(
+            f"hub {config[CONF_ID]} polls {len(polled)} groups; the UDS GroupScheduler "
+            f"uint8_t capacity limit is {MAX_POLLED_GROUPS} polled groups per hub"
+        )
+    if bindings > MAX_BINDINGS:
+        raise cv.Invalid(
+            f"hub {config[CONF_ID]} has {bindings} bindings; the UDS uint16_t binding "
+            f"capacity limit is {MAX_BINDINGS} per hub"
+        )
 
     for name, action in _walk_actions(
         fv.full_config.get(), (ACTION_READ, ACTION_EXECUTE, ACTION_RAW)
@@ -807,6 +829,18 @@ def binding_final_validate(config, *, want_text: bool):
     config[CONF_RESOLVED_GROUP] = group.name
     config[CONF_RESOLVED_UNIT] = field.unit
     return config
+
+
+def polling_interval(value):
+    """Validate UDS's modular scheduler horizon while preserving explicit `never`."""
+    interval = cv.update_interval(value)
+    ms = interval.total_milliseconds
+    if value != "never" and ms > MAX_POLL_INTERVAL_MS:
+        raise cv.Invalid(
+            f"UDS GroupScheduler update_interval limit is {MAX_POLL_INTERVAL_MS} ms "
+            "(below 2^31 ms for clock wrap safety); use 'never' for on-demand reads"
+        )
+    return interval
 
 
 def binding_interval(config) -> int:
