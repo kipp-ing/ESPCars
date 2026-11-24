@@ -93,6 +93,7 @@ class IsoTpProtocol : public Component, public can_gateway::CanGatewayFrameConsu
   /// Queue a message for transmission. Returns false when a send is already in flight (ISO-TP
   /// has no multiplexing, so the caller serialises requests) or the message exceeds capacity.
   bool send(const uint8_t *data, uint16_t size);
+  uint16_t get_max_message_size() const { return this->cfg_.max_message_size; }
 
   bool is_busy() const { return this->tx_.is_busy(); }
 

@@ -157,6 +157,9 @@ numbers:
 
 - `max_message_size` smaller than the largest `resp_min_len` among the groups the
   config actually reads → error.
+- A catalog request or static `uds.raw` payload larger than `max_message_size`
+  → error. Templated raw payloads are checked at runtime; permanent capacity
+  refusals are reported once and dropped rather than retried as backpressure.
 - `block_size` or `st_min` differing from the catalog's `CP_BLOCKSIZE_SUG` /
   `CP_STMIN_SUG` → info, not an error. Those are suggestions in the database and
   a slower client is still conforming.
@@ -350,7 +353,8 @@ implemented together; the freestanding core below them is already fixed
 - `loop()`: `sched_.poll(now)` for an expired deadline → the failure path;
   `sched_.next(now, p2_ms)` for the next due group → build the request with
   `build_request()` and hand it to `isotp_->send()`, calling
-  `sched_.cancel_in_flight()` when send is refused (backpressure, not failure);
+  `sched_.cancel_in_flight()` on transport backpressure; a permanent permission
+  or request-capacity refusal reports an error and suspends that poll instead;
   then publish at most `PUBLISH_PER_LOOP` dirty bindings (§4.1).
 - `on_message()` (the `IsoTpConsumer` hook, called inside can_gateway's drain):
   `classify_response()`, then per verdict — `ACCEPT` decodes every binding of the
