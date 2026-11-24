@@ -403,6 +403,15 @@ def test_trust_from_not_among_own_values_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize("rule", ["unknown_when", "trust_from"])
+@pytest.mark.parametrize("binding", ["sensor", "binary_sensor"])
+def test_text_rules_reject_non_text_targets(rule: str, binding: str) -> None:
+    target = value_entry(key="wake_state", **{"sensor": None, binding: "target_entity"})
+    setting = _UW if rule == "unknown_when" else "wake_state"
+    with pytest.raises(cv.Invalid, match=rf"{rule}.*wake_state.*text_sensor"):
+        validate(portal(tree=[tree_node(values=[target], **{rule: setting})]))
+
+
 # --- evidence-gated why codes (4.1) -------------------------------------------------
 
 GATED = ["never_announced", "no_transfer", "crc_fail", "negative_response"]

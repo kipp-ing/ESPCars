@@ -3,6 +3,8 @@
 # gateway_core.h is deliberately ESPHome-free and IDF-free so the exact code
 # that runs in the RX interrupt also compiles and runs under a plain host
 # toolchain (see the header's own comment). This target is that toolchain.
+# Runtime regression cases extract only our own component code using Python's
+# standard library. The host build does not need the ESPHome package.
 #
 #   make -C tests/host            build and run everything
 #   make -C tests/host FILTER=x   run only cases whose name contains x
@@ -48,9 +50,12 @@ BIN      := $(BUILD)/run_tests
 # pulls in ESPHome and ESP-IDF). Its class text is extracted verbatim so the
 # tests exercise the real code rather than a copy that could drift.
 GEN      := $(BUILD)/rule_patch_extracted.h
+RUNTIME_GEN := $(BUILD)/gateway_runtime.stamp
 
 SRCS     := main.cpp $(sort $(wildcard test_*.cpp))
-OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o)
+LINBUS_DIR := ../../components/linbus
+LINBUS_OBJS := $(BUILD)/lin_communication.o $(BUILD)/lin_protocol_handler.o
+OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o) $(LINBUS_OBJS)
 DEPS     := $(OBJS:.o=.d)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
@@ -109,7 +114,14 @@ $(BIN): $(OBJS)
 	@echo "  LD    $@"
 	@$(CXX) $(OBJS) $(LDFLAGS) -o $@
 
-$(BUILD)/%.o: %.cpp | $(GEN)
+# Compile the production LIN tables/sender against host RTOS/UART adapters.
+$(BUILD)/test_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
+
+$(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
+	@echo "  CXX   $<"
+	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.cpp | $(GEN) $(RUNTIME_GEN)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -139,6 +151,13 @@ $(GEN): $(CORE_DIR)/can_gateway.h | $(BUILD)
 	  rm -f $@; exit 1; }
 	@grep -q 'void set_byte' $@ || { \
 	  echo "ERROR: extracted RulePatch is missing set_byte; see $<." >&2; rm -f $@; exit 1; }
+
+$(BUILD)/test_gateway_rx.o $(BUILD)/test_gateway_switch.o $(BUILD)/test_gateway_frame_data.o: $(RUNTIME_GEN)
+
+$(RUNTIME_GEN): extract_gateway_runtime.py $(CORE_DIR)/can_gateway.h $(CORE_DIR)/can_gateway.cpp | $(BUILD)
+	@echo "  GEN   gateway runtime (repository code only)"
+	@python3 extract_gateway_runtime.py
+	@touch $@
 
 # Microbenchmarks. A separate binary with separate flags, on purpose:
 #   -O2, because -O1 does not inline the CAN_GATEWAY_CORE_INLINE hot path the

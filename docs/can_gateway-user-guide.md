@@ -168,9 +168,12 @@ See `tests/hil/decode-example.yaml` for a worked example, including the
 actually live rather than silently NaN-ing everything.
 
 For raw access to every frame regardless of ID, `on_frame:` on a port is a
-sniffer, not a decode entity — it fires with `can_id`, `data` (a borrowed
-`const uint8_t *`, valid only inside the callback), `dlc`, `extended`, and
-`rtr` bound as lambda variables:
+sniffer, not a decode entity — it fires with `can_id`, `data` (an owning
+eight-byte value), `dlc`, `extended`, and `rtr` bound as lambda variables.
+Each automation retains its own bytes across `delay:` actions, without a
+payload heap allocation. Read only `dlc` bytes. Existing `data[i]` expressions
+and calls taking `const uint8_t *` still work; a separately retained pointer
+borrows the value's lifetime:
 
 ```yaml
 can_gateway:

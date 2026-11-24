@@ -152,6 +152,7 @@ can_gateway_ns = cg.esphome_ns.namespace("can_gateway")
 CanGateway = can_gateway_ns.class_("CanGateway", cg.Component)
 GatewayPort = can_gateway_ns.class_("GatewayPort")
 GatewayRoute = can_gateway_ns.class_("GatewayRoute")
+CanGatewayFrameData = can_gateway_ns.class_("CanGatewayFrameData")
 CanGatewayFrameTrigger = can_gateway_ns.class_(
     "CanGatewayFrameTrigger", automation.Trigger.template()
 )
@@ -1458,7 +1459,7 @@ async def to_code(config):
                 trigger,
                 [
                     (cg.uint32, "can_id"),
-                    (cg.uint8.operator("const").operator("ptr"), "data"),
+                    (CanGatewayFrameData, "data"),
                     (cg.uint8, "dlc"),
                     (cg.bool_, "extended"),
                     (cg.bool_, "rtr"),

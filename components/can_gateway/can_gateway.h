@@ -422,7 +422,7 @@ class GatewayPort {
   }
   /// Does any tap on this port have a consumer at all? Constant true once
   /// statistics are built in — bus load is measured for every frame on the
-  /// wire — otherwise one or two null checks. Only the shed path asks: a port
+  /// wire — otherwise null checks. Both route-less and shed paths ask: a port
   /// that consumes nothing must not pay a receive for a frame nobody wants.
   CAN_GATEWAY_CORE_INLINE bool rx_taps_active_() const {
 #ifdef USE_CAN_GATEWAY_STATS
@@ -448,8 +448,8 @@ class GatewayPort {
   }
   /// RX-ISR receive for every frame that is not forwarded into a TX slot:
   /// retrieve into the static staging frame, then tap it. Used by a route-less
-  /// port with an RX consumer — a direct ISR hook, observation ring (A12), or
-  /// datalogger tap ring — and by the shed path.
+  /// port with any RX consumer (statistics, snapshot, observation, datalogger
+  /// or direct ISR hook) and by the shed path.
   void receive_into_staging_(bool shed = false);
   /// RX-ISR shed path: forwarding was declined (disabled / destination bus-off
   /// / no slot), but the frame was on this port's wire all the same, so its
@@ -743,11 +743,9 @@ class CanGateway : public Component {
 class CanGatewaySwitch : public switch_::Switch, public Component, public Parented<CanGateway> {
  public:
   void setup() override {
-    optional<bool> restored = this->get_initial_state_with_restore_mode();
     // restore_mode: DISABLED yields no value — take no action and publish
     // nothing, leaving the gateway at its boot default (enabled).
-    if (restored.has_value())
-      this->write_state(*restored);
+    this->restore();
   }
   /// Runs before CanGateway::setup() (HARDWARE priority), so a persisted OFF
   /// state is applied before the controllers come up — otherwise frames would
@@ -828,6 +826,15 @@ class CanGatewaySensorHub : public PollingComponent {
 // (B23). Nothing here runs in the ISR or allocates per frame.
 
 #ifdef USE_CAN_GATEWAY_OBSERVE
+/// Owning automation argument: copied across delays like canbus's payload,
+/// with fixed storage instead of a per-frame allocation. Pointer conversion
+/// preserves existing data[i] and pointer-taking lambda calls; a pointer
+/// retained separately still borrows this value's lifetime.
+struct CanGatewayFrameData {
+  uint8_t bytes[MAX_FRAME_DATA_LEN]{};
+  operator const uint8_t *() const { return this->bytes; }
+};
+
 /// `on_frame:` — every received frame on this port, to a YAML automation.
 ///
 /// The one subscriber that does not name an ID: it exists so a config can
@@ -839,16 +846,19 @@ class CanGatewaySensorHub : public PollingComponent {
 /// filter offload off for the port (B25) and routes every frame through the
 /// observation ring, so a port with this trigger pays the full per-frame
 /// observe cost. Fine for diagnostics, deliberately not the default. The
-/// payload is passed as a borrowed pointer + length, never a container, so the
-/// hot path still allocates nothing; a lambda must copy anything it keeps.
-class CanGatewayFrameTrigger : public Trigger<uint32_t, const uint8_t *, uint8_t, bool, bool>,
+/// payload owns its bytes so deferred automation actions keep a valid copy,
+/// without allocating per frame.
+class CanGatewayFrameTrigger : public Trigger<uint32_t, CanGatewayFrameData, uint8_t, bool, bool>,
                                public CanGatewayFrameConsumer {
  public:
   explicit CanGatewayFrameTrigger(GatewayPort *port) {
     port->subscribe_all(&can_gateway_consumer_trampoline, static_cast<CanGatewayFrameConsumer *>(this));
   }
   void on_frame(const FrameView &view) override {
-    this->trigger(view.can_id, view.data, view.dlc, view.extended, view.rtr);
+    CanGatewayFrameData data;
+    for (uint8_t i = 0; i < view.dlc; i++)
+      data.bytes[i] = view.data[i];
+    this->trigger(view.can_id, data, view.dlc, view.extended, view.rtr);
   }
 };
 

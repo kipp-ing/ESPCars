@@ -41,6 +41,9 @@ switch:
   when unambiguous.
 - **restore_mode** (*Optional*, enum): Standard switch restoration policy. The schema default is
   `RESTORE_DEFAULT_ON`; use `ALWAYS_OFF` while commissioning forwarding.
+  Restoration applies `inverted` exactly like subsequent switch commands, before the controllers start.
+  With `inverted: true`, logical ON disables physical forwarding and logical OFF enables it, including at boot.
+  `DISABLED` publishes nothing and leaves the gateway's boot default unchanged.
   - `RESTORE_DEFAULT_ON` *(default)*
   - `RESTORE_DEFAULT_OFF`
   - `ALWAYS_OFF`

@@ -41,6 +41,7 @@ can_gateway:
                 ESP_LOGD("sniff", "%s%03X [%u]%s", extended ? "x" : "",
                          (unsigned) can_id, dlc, rtr ? " rtr" : "");
         - then:
+            - delay: 1ms
             - lambda: |-
                 if (dlc >= 2 && !rtr) {
                   ESP_LOGD("sniff", "%02X %02X", data[0], data[1]);

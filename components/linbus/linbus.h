@@ -50,7 +50,7 @@ class LinBusComponent : public Component {
   void set_tx_pin(GPIOPin *pin) { tx_pin_ = pin; }
   void set_rx_pin(GPIOPin *pin) { rx_pin_ = pin; }
   void set_cs_pin(GPIOPin *pin) { cs_pin_ = pin; }
-  void set_uart_port_str(const std::string &port);
+  void set_uart_port(uart_port_t port) { this->uart_port_ = port; }
   void set_baud_rate(uint32_t baud) { baud_rate_ = baud; }
   void set_mode(uint8_t mode) { mode_ = static_cast<LinMode>(mode); }
 

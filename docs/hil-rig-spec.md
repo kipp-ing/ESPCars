@@ -224,15 +224,21 @@ tests, build-yaml coverage, compile at least one affected target).
    Rig use: recorded as per-phase deltas; asserted == 0 only on *receiving-only*
    ports — a transmitter under flood legitimately accumulates arbitration-loss
    events.
-2. **`linbus`: self-test teardown.** Verified in code: `enable_self_test(false)`
-   (`components/linbus/LINCommunication.cpp:415-420`) only clears two flags; the 9
-   synthetic schedule IDs and their responses installed by `selfTestInitIfNeeded()`
-   (`:468`, `CASES[]` at `:474`) stay installed forever — permanently inflated LIN
-   load, and a re-run double-adds entries. `master_remove_id_schedule()` (`:264`)
-   exists and is unused by the teardown path. Change: on disable, remove each
-   `CASES[]` id from the schedule and clear its response slot. Without this, P4 is
-   not repeatable on a permanent rig. Acceptance: P4 run twice back-to-back without
-   reflashing, identical lap rate before/after.
+2. **`linbus`: self-test teardown — fixed (bench-pending).**
+   `enable_self_test(false)` (`components/linbus/lin_communication.cpp`) now
+   restores the exact pre-test schedule and response tables from fixed snapshots
+   under the same mutex held by header and response sends. This removes the nine
+   synthetic entries while preserving any user intervals, payloads, checksums and
+   table metadata they temporarily replaced. Installation is all-or-nothing: if
+   either table cannot fit all nine cases, it rolls back before releasing the
+   mutex, reports `INCOMPLETE` with a component warning, and cannot report PASS.
+   BASIC PASS still latches and synthetic traffic continues until explicitly
+   stopped, preserving P4's dual-LIN listener count ≥ 100 over the 40 s window
+   and `tests/hil/selftest-master.yaml`'s pass latch. Host regression tests cover
+   continued TX after PASS, stop during an in-flight send, exact restoration,
+   capacity refusal and re-arm. Bench acceptance remains pending: run P4 twice
+   back-to-back without reflashing, confirm synthetic TX ends only on explicit
+   teardown, and compare lap rate before/after.
 3. **`tests/components/isotp/test.esp32-idf.yaml` (new).** isotp today has only a C6
    compile target, but the rig runs it on Purple (classic ESP32, `esp32dev`).
    Compile-gate the variant before any hardware flash.
