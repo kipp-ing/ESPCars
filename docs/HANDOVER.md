@@ -160,6 +160,48 @@ when its switch is turned off over the portal; heap with the new page open (larg
 mostly for Codex, one phase per PR. A PR titled `[bench-pending]` waits for
 `verify.py` exit 0. P0 (esphome 2026.11.0, `AGENTS.md`) is in.
 
+  An ESPHome-style review (2026-11-23, upstream's own review prompts) is the
+  queue for the rest: [`REVIEW-esphome-2026-11.md`](REVIEW-esphome-2026-11.md),
+  one row per finding with an ID and a status. #49–#53 fixed the TX-safety
+  findings and the worst glue bugs (uds#1–4, lin#1/9/11, cg#4/6/8, po#1/2/9,
+  ci#1/2/3/5/8/9); all five are bench-pending in the P9 ledger, and #53 makes
+  `source_address` mandatory for isotp extended addressing. Open functional
+  bugs, roughly in the order to pick them up (the next Codex batch, after a go):
+  - `can_gateway`: RTR frames decoded from a stale buffer (cg#7); publish-on-change
+    runs before ESPHome filters, breaking timeout/window filters (cg#14); bus-off
+    never initially published (cg#16); `% N` on free-running counters breaks at
+    the 2^32 wrap for non-power-of-two depths (cg#5); an ISR hook does not stop
+    hardware filter offload (cg#9); `#error` on IDF ≥ 5.6 while upstream dev
+    defaults to 6.1.1 (cg#1).
+  - `linbus`: stock `uart`/`logger` on the same port re-pins or deletes the driver
+    (lin#2); a second `on_frame` for one ID never fires (lin#3); `update_response`
+    changes length without the RX hint (lin#4); pin inversion and expanders
+    accepted but ignored (lin#10); a failed response write still counts as
+    answered (lin#8); listener `error_rate` always 0 and bus load counting its own
+    echo (lin#19/20).
+  - `uds`: one group name on two ECUs is unresolvable (uds#6); unsigned 64-bit
+    above `INT64_MAX` decodes negative on the MCU (uds#8); P2 starts at queueing,
+    not at transmit end (uds#5); flashed-catalog rebinding checks names only
+    (uds#7).
+  - `ccp`/`isotp`: a second `connect_and` overwrites the pending callback (ci#4);
+    payload lengths narrow before validation (ci#7); a refused flow control
+    survives timeout and replacement (ci#10); a PCI-only consecutive frame
+    advances the sequence (ci#11); `collect_timeout` up to `0xFFFFFFFF` (ci#12); a
+    negative response is not surfaced (ci#13).
+  - `portal`: `switch_off` reads `Switch::state` from the httpd task (po#3);
+    `segment: car` duplicates the root ID and duplicate value keys collapse
+    (po#5/6); non-finite limits emit invalid C++ (po#7); `?path=` caps IDs at 26
+    characters (po#10); `\u0000` truncates matched strings (po#13).
+  - `sd_logger`: see the two `sd_logger` tables. Shutdown is 1.0c; the rest
+    includes a pending confirm that survives a card swap and marks the other
+    card's file uploadable, an unmount under an in-flight `f_read`, the MBR
+    buffer overwritten while iterating, and `spitrace` clear looping 2^32 times.
+
+  The convention rows (enum prefixes, `millis()` in `loop()`, bare
+  `mark_failed()`, annotations, schema extractors, `CONF_` redefinitions, `final`,
+  includes) are P1–P8 work; the review's lesson 6 — port upstream's remaining
+  `ci-custom` lints — would make CI catch them.
+
 ## 2. Where the detail lives
 
 | document | what it carries |
@@ -172,6 +214,7 @@ mostly for Codex, one phase per PR. A PR titled `[bench-pending]` waits for
 | [`can_gateway-user-guide.md`](can_gateway-user-guide.md), [`linbus-user-guide.md`](linbus-user-guide.md) | the how-to for `can_gateway` (bridging, filters, cyclic sends, bus-off recovery) and `linbus` (master/slave/listener, checksum handling, self-test) — no separate design docs for either, the component sources carry the "why" |
 | [`sd_logger-spec.md`](sd_logger-spec.md), [`sdlog-collection-design.md`](sdlog-collection-design.md), [`sdlog-phase-b-wire-contract.md`](sdlog-phase-b-wire-contract.md), [`sd_logger-user-guide.md`](sd_logger-user-guide.md) | the recorder: component spec, collection design, the normative wire contract, and the how-to |
 | [`PLAN-esphome-quality.md`](PLAN-esphome-quality.md), [`../AGENTS.md`](../AGENTS.md) | the road to upstream quality (phases P0–P8, what counts as behavior-neutral) and the agent guide for Codex |
+| [`REVIEW-esphome-2026-11.md`](REVIEW-esphome-2026-11.md) | the ESPHome-style review: every finding with its ID, file, upstream rule and status — the queue behind §1.9 |
 | [`commissioning-mr-purple.md`](commissioning-mr-purple.md), [`hil-rig-spec.md`](hil-rig-spec.md), [`bench-hmi-wiring.md`](bench-hmi-wiring.md), [`TODO-bench-hmi.md`](TODO-bench-hmi.md) | the second platform, the rig, and the board-level SW/HW items |
 
 ## 3. The `can_gateway` findings ledger
