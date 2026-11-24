@@ -57,6 +57,9 @@ CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$
             -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
 
+# Execute the real UdsHub glue against a controlled ESPHome/transport boundary.
+$(BUILD)/test_uds_hub.o: CXXFLAGS += -Iuds_stubs -DUSE_SENSOR -DUSE_TEXT_SENSOR
+
 .PHONY: all test compile bench lockcheck clean
 all: test
 
