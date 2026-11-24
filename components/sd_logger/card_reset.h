@@ -97,7 +97,7 @@ struct CardResetIo {
   virtual void delay_ms(uint32_t ms) = 0;
   virtual uint32_t now_ms() = 0;
   /// The writer's `dying_` flag. A ten-second busy wait must not outlive an orderly shutdown:
-  /// `on_shutdown()` gives the writer 200 ms, and the `#close` line is worth more than the retry.
+  /// ESPHome caps teardown's shared deadline, and the `#close` line is worth more than the retry.
   virtual bool aborted() = 0;
 };
 

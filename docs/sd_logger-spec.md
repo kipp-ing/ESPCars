@@ -377,12 +377,12 @@ not change.
   Instead call `f_sync()` on a **bounded cadence** (`sync_interval`, and/or
   every N KB). This makes the **maximum data loss on a hard cut = one batch**,
   which is the knob §7 tunes.
-- **D8 — Timestamps: 32-bit on the producer, 64-bit in the file, stateless in
-  between.** Records carry a uint32 `t_us` — the CAN tap stamps it in the RX ISR
+- **D8 — Timestamps: 32-bit on the producer, 64-bit in the file, bounded in
+  queues.** Records carry a uint32 `t_us` — the CAN tap stamps it in the RX ISR
   (`can_gateway.h`, `run_rx_taps_()`), where 4 bytes matter and a 64-bit read
   does not belong. It wraps every ~71 min, so lines would march backwards in any
-  log that runs longer than that. The writer samples `esp_timer_get_time()` once
-  per drain pass and reconstructs the full value from a **signed** difference:
+  log that runs longer than that. The writer samples `esp_timer_get_time()`
+  at each FIFO pop and reconstructs the full value from a **signed** difference:
 
   ```c
   int32_t age = (int32_t) ((uint32_t) now64 - t32);   // + = older than the sample
@@ -403,8 +403,20 @@ not change.
   full of confident nonsense.
 
   Exact for any record within **±~36 min** of the sample, in either direction
-  (2^31 µs, the range a signed 32-bit delta spans), and records are milliseconds
-  old. **Deliberately not a wrap counter**: a counter desyncs across a quiet
+  (2^31 µs, the range a signed 32-bit delta spans). The writer uses a fresh sample
+  at each FIFO pop so a stalled card call cannot age the pass sample out of range.
+  Recovery and debug freeze can retain queued records for much longer than that.
+  A nonempty queue expires only after its consumer makes **no successful pop for
+  ten minutes**. Every successful pop refreshes its progress timestamp, as does
+  push-into-empty or an observed-empty queue. The tap consumer maintains separate
+  RX/TX timestamps and checks for inactivity while unmounted or backpressured;
+  no ISR push or record layout changes are needed. A continuously nonempty queue
+  with steady consumer progress never expires. A stalled queue's discarded entries
+  remain counted in `card_dropped` and the existing `#drop,…,card` marker, with a
+  warning log. This detects consumer inactivity, not individual record residence
+  time; the signed reconstruction still requires capture time within ±~36 minutes
+  of its pop-time sample.
+  **Deliberately not a wrap counter**: a counter desyncs across a quiet
   period and is fooled by the few-ms out-of-order arrivals between two rings
   (F1f), while this is a pure function of two numbers and host-testable across
   the boundary in three lines.

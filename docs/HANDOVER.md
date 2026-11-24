@@ -62,21 +62,24 @@ newest, like that one, is not reached (R4). Clear it by hand: fetch
 `GET /sdlog/f/<name>`, archive the copy, then `POST /sdlog/done/<name>`. Do not
 loosen the collector's "no `#close` = short transfer" rule.
 
-**1.0c `on_shutdown()` can lose `#close` on an OTA reboot. Open, not fixed.** The
-torn file above was most likely the one open across an OTA (timer wake, OTA about
-3 min later). `on_shutdown()` waits at most 20 × 10 ms for the writer, and
-sd_logger has no `teardown()`. So `App.safe_reboot()` →
-`teardown_components(1000 ms)` does not wait for it before `arch_restart()`. The
-writer checks `dying_` only at the end of a full pass, which includes the ring
-drain, retention and `sync_file_()`. Only then does `emergency_close_()` drain
-again and write `#clock`/`#close`, then flush, fsync and unmount. A backlog, an
-fsync or a card stall (1672 ms measured, spec F1h) longer than 200 ms means the restart
-cuts the close. Deep sleep has the same 200 ms, but it survives more often: other
-components' teardown under its 5 s budget lends the writer time, and the bus is
-quiet before sleep. Proposed fix: `bool teardown() override { return
-this->writer_task_ == nullptr; }`, plus `xTaskNotifyGive(writer_task_)` in
-`on_shutdown()`. Bench test: OTA under ring load, then the file shows `close
-clean`. F2c seals what this leaves, but each such file still loses its unsynced tail.
+**1.0c `on_shutdown()` could lose `#close` on an OTA reboot — fixed, bench pending.**
+The sdlog-core-b2 review fix requests close and immediately notifies the writer
+from `on_shutdown()`; it no longer blocks the main loop for 20 × 10 ms. A new
+`teardown()` returns false until a release/acquire completion acknowledgement
+states that the writer finished file/card/server cleanup. Notification and task
+retirement share a lock so a notification cannot target a deleted task. Frozen
+writers also wake on emergency close and leave their wait for format stop.
+
+Verified against the **installed ESPHome 2026.11.0** package, not just the proposed
+fix: `core/application.cpp` calls `run_safe_shutdown_hooks()` (including
+`on_shutdown()`) before `teardown_components()`, which repeatedly polls components
+returning false; `core/component.h` defines true as complete. The application
+still caps safe reboot teardown at **1000 ms** (`core/application.h`), so a card
+operation exceeding that shared deadline can still be cut by restart. Forced
+reboot skips teardown. Host cases reproduce the former premature completion and
+missing wakeup; hardware is still owed: OTA under ring load, freeze plus shutdown,
+and a delayed card operation, then inspect `#close`/tail and timeout diagnostics.
+F2c remains the fallback for a restart that outlasts the framework budget.
 
 **1.1 The ring gate has not run since the beacon move.** `verify.py --seconds 45
 --min-laps 75`, baseline 875 laps / 45 s = 19.4 laps/s, zero errors. A real

@@ -148,6 +148,7 @@ class SdLogger : public Component {
   // power-cut signature (spec F1d) and that only means anything if every
   // orderly exit path does write it.
   void on_shutdown() override;
+  bool teardown() override;
   // Mount after pins/SPI are ready; before app data producers run.
   float get_setup_priority() const override { return setup_priority::DATA; }
 
@@ -177,8 +178,8 @@ class SdLogger : public Component {
   void set_format_if_mount_failed(bool v) { format_if_mount_failed_ = v; }
 #ifdef USE_SWITCH
   /// Debug-only: request that the writer seal its current chunk and park before
-  /// issuing another card command. The switch publishes only the acknowledged
-  /// state from the writer task, not this request.
+  /// issuing another card command. The switch publishes the writer's acknowledged
+  /// state from loop(), not this request.
   void set_debug_writer_freeze_requested(bool requested);
   bool is_debug_writer_frozen() const { return this->debug_writer_frozen_.load(std::memory_order_acquire); }
   void set_debug_writer_freeze_switch(DebugWriterFreezeSwitch *sw) { this->debug_writer_freeze_switch_ = sw; }
@@ -280,8 +281,9 @@ class SdLogger : public Component {
   // Idempotent. `reason` is what lands in the file's `#close` line, and the
   // only reason a reader can tell an orderly end from a power cut.
   void request_emergency_close(const char *reason = "emergency") {
-    close_reason_ = reason;
-    dying_.store(true, std::memory_order_release);
+    this->close_reason_.store(reason, std::memory_order_relaxed);
+    this->dying_.store(true, std::memory_order_release);
+    this->notify_writer_();
   }
 
   // Getters (stats / template sensors)
@@ -311,33 +313,69 @@ class SdLogger : public Component {
   uint32_t get_tap_accepted_records() const;
   uint32_t get_tap_drained_records() const;
   uint32_t get_tap_record_ring_accepted_records() const;
-  uint32_t get_recovery_attempts() const { return recovery_.attempts(); }
+  uint32_t get_recovery_attempts() const { return this->recovery_attempts_pub_.load(std::memory_order_relaxed); }
   const char *get_recovery_state() const;
-  uint32_t get_write_failures() const { return this->write_failures_; }
-  const char *get_last_write_action() const {
-    return this->write_failures_ == 0 ? "none" : write_failure_action_str(this->last_write_failure_.action);
+  struct LastWriteFailure {
+    int32_t result{0};
+    int32_t err_no{0};
+    uint32_t offset{0};
+    uint32_t derived_offset{0};
+    int32_t lseek_errno{0};
+    uint32_t committed_end{0};
+    uint32_t len{0};
+    uint32_t elapsed_us{0};
+    uint32_t spi_begin{0};
+    uint32_t spi_end{0};
+    SdSpiTraceSummary spi{};
+    uint32_t card_sectors{0};
+    uint32_t volume_first_lba{0};
+    uint32_t volume_sectors{0};
+    uint32_t heap_default_free{0};
+    uint32_t heap_default_largest{0};
+    uint32_t heap_dma_free{0};
+    uint32_t heap_dma_largest{0};
+    WriteFailureAction action{WriteFailureAction::RETRY_RECOVERY};
+  };
+  struct WriteFailureSnapshot {
+    uint32_t count{0};
+    LastWriteFailure facts{};
+  };
+  WriteFailureSnapshot get_write_failure_snapshot() const {
+    portENTER_CRITICAL(&this->status_mux_);
+    const auto snapshot = this->write_failure_pub_;
+    portEXIT_CRITICAL(&this->status_mux_);
+    return snapshot;
   }
-  int32_t get_last_write_errno() const { return this->last_write_failure_.err_no; }
-  int32_t get_last_write_result() const { return this->last_write_failure_.result; }
-  uint32_t get_last_write_offset() const { return this->last_write_failure_.offset; }
-  uint32_t get_last_write_derived_offset() const { return this->last_write_failure_.derived_offset; }
-  int32_t get_last_write_lseek_errno() const { return this->last_write_failure_.lseek_errno; }
-  uint32_t get_last_write_committed_end() const { return this->last_write_failure_.committed_end; }
-  uint32_t get_last_write_len() const { return this->last_write_failure_.len; }
-  uint32_t get_last_write_elapsed_us() const { return this->last_write_failure_.elapsed_us; }
-  uint32_t get_last_write_spi_begin() const { return this->last_write_failure_.spi_begin; }
-  uint32_t get_last_write_spi_end() const { return this->last_write_failure_.spi_end; }
-  uint32_t get_last_write_spi_commands() const { return this->last_write_failure_.spi.commands; }
-  uint32_t get_last_write_spi_available() const { return this->last_write_failure_.spi.available; }
-  uint32_t get_last_write_spi_missing() const { return this->last_write_failure_.spi.missing; }
-  int32_t get_last_write_spi_worst_err() const { return this->last_write_failure_.spi.worst_err; }
-  uint32_t get_last_write_card_sectors() const { return this->last_write_failure_.card_sectors; }
-  uint32_t get_last_write_volume_first_lba() const { return this->last_write_failure_.volume_first_lba; }
-  uint32_t get_last_write_volume_sectors() const { return this->last_write_failure_.volume_sectors; }
-  uint32_t get_last_write_heap_default_free() const { return this->last_write_failure_.heap_default_free; }
-  uint32_t get_last_write_heap_default_largest() const { return this->last_write_failure_.heap_default_largest; }
-  uint32_t get_last_write_heap_dma_free() const { return this->last_write_failure_.heap_dma_free; }
-  uint32_t get_last_write_heap_dma_largest() const { return this->last_write_failure_.heap_dma_largest; }
+  uint32_t get_write_failures() const { return this->get_write_failure_snapshot().count; }
+  const char *get_last_write_action() const {
+    const auto snapshot = this->get_write_failure_snapshot();
+    return snapshot.count == 0 ? "none" : write_failure_action_str(snapshot.facts.action);
+  }
+  int32_t get_last_write_errno() const { return this->get_write_failure_snapshot().facts.err_no; }
+  int32_t get_last_write_result() const { return this->get_write_failure_snapshot().facts.result; }
+  uint32_t get_last_write_offset() const { return this->get_write_failure_snapshot().facts.offset; }
+  uint32_t get_last_write_derived_offset() const { return this->get_write_failure_snapshot().facts.derived_offset; }
+  int32_t get_last_write_lseek_errno() const { return this->get_write_failure_snapshot().facts.lseek_errno; }
+  uint32_t get_last_write_committed_end() const { return this->get_write_failure_snapshot().facts.committed_end; }
+  uint32_t get_last_write_len() const { return this->get_write_failure_snapshot().facts.len; }
+  uint32_t get_last_write_elapsed_us() const { return this->get_write_failure_snapshot().facts.elapsed_us; }
+  uint32_t get_last_write_spi_begin() const { return this->get_write_failure_snapshot().facts.spi_begin; }
+  uint32_t get_last_write_spi_end() const { return this->get_write_failure_snapshot().facts.spi_end; }
+  uint32_t get_last_write_spi_commands() const { return this->get_write_failure_snapshot().facts.spi.commands; }
+  uint32_t get_last_write_spi_available() const { return this->get_write_failure_snapshot().facts.spi.available; }
+  uint32_t get_last_write_spi_missing() const { return this->get_write_failure_snapshot().facts.spi.missing; }
+  int32_t get_last_write_spi_worst_err() const { return this->get_write_failure_snapshot().facts.spi.worst_err; }
+  uint32_t get_last_write_card_sectors() const { return this->get_write_failure_snapshot().facts.card_sectors; }
+  uint32_t get_last_write_volume_first_lba() const { return this->get_write_failure_snapshot().facts.volume_first_lba; }
+  uint32_t get_last_write_volume_sectors() const { return this->get_write_failure_snapshot().facts.volume_sectors; }
+  uint32_t get_last_write_heap_default_free() const {
+    return this->get_write_failure_snapshot().facts.heap_default_free;
+  }
+  uint32_t get_last_write_heap_default_largest() const {
+    return this->get_write_failure_snapshot().facts.heap_default_largest;
+  }
+  uint32_t get_last_write_heap_dma_free() const { return this->get_write_failure_snapshot().facts.heap_dma_free; }
+  uint32_t get_last_write_heap_dma_largest() const { return this->get_write_failure_snapshot().facts.heap_dma_largest; }
   // Retention's lifetime losses (design §7): chunks that were never collected and are now gone, and
   // what they held. Mirrored out of CollectionPolicy by the writer task rather than read from it,
   // because the index belongs to that task (§8) and these are read from the main loop.
@@ -378,16 +416,14 @@ class SdLogger : public Component {
   // Ring occupancy, for §6's backpressure: above ~50 % a transfer in flight sleeps before its next
   // card read, because a collection run must never be able to turn into `dropped_records`.
   //
-  // Two `volatile` reads without `ring_mux_`, which is the one unsynchronised cross-task read in
-  // this component and is said out loud here for that reason. It is a *heuristic*: a torn read
-  // misestimates the fill by one producer pass and the next block corrects it, whereas taking the
-  // producers' critical section from the httpd task would put the record path behind a socket-facing
-  // task. Never use this number for anything that has to be exact.
+  // Independent relaxed loads are sufficient for backpressure, which tolerates a producer pass
+  // of skew. Atomics make this approximate read defined without taking the producers' lock on
+  // the socket-facing task. Never use this number for an exact queue snapshot.
   uint8_t ring_fill_percent() const {
     if (this->buffer_depth_ == 0)
       return 0;
-    const uint32_t head = this->head_;
-    const uint32_t tail = this->tail_;
+    const uint32_t head = this->head_.load(std::memory_order_relaxed);
+    const uint32_t tail = this->tail_.load(std::memory_order_relaxed);
     const uint32_t used = (head - tail) & this->ring_mask_;
     return static_cast<uint8_t>((used * 100u) / this->buffer_depth_);
   }
@@ -438,6 +474,7 @@ class SdLogger : public Component {
   RawReadResult collection_begin_raw_read(uint32_t lba, uint32_t count, char *error, size_t error_size);
   bool collection_raw_read_sector(uint32_t lba, uint8_t *out, char *error, size_t error_size);
   void collection_end_raw_read();
+  bool collection_transfer_cancelled() const { return this->transfers_cancelled_.load(std::memory_order_acquire); }
   /// A page of the raw FAT chain for an indexed chunk. This is read-only and keeps its chunk
   /// reservation while walking, so retention cannot rename or discard the directory entry under it.
   FsDebugResult collection_chain_debug(const char *name, uint32_t from, uint32_t count, char *out, size_t out_size);
@@ -460,6 +497,8 @@ class SdLogger : public Component {
   static void writer_trampoline(void *arg) { static_cast<SdLogger *>(arg)->writer_loop_(); }
   static void monitor_trampoline(void *arg) { static_cast<SdLogger *>(arg)->monitor_loop_(); }
   void writer_loop_();
+  void notify_writer_();
+  void finish_writer_();
 #ifdef USE_SWITCH
   // Cooperatively park at the end of a writer pass. It seals rather than
   // suspending a task mid-FatFs call, so a frozen card has neither a held
@@ -537,7 +576,7 @@ class SdLogger : public Component {
   void capture_write_failure_(int32_t result, int err_no, uint32_t len, uint32_t offset, uint32_t derived_offset,
                               int lseek_errno, uint32_t committed_end, int64_t elapsed_us, uint32_t spi_begin,
                               uint32_t spi_end);
-  // One bounded remount attempt: unmount, optionally power-cycle the card, mount, open a file.
+  // One remount attempt after reader release: unmount, optionally power-cycle, mount, open a file.
   bool try_recover_();
   // Samples uxTaskGetStackHighWaterMark() for the writer task and keeps the running minimum. Called
   // from writer_loop_() only — after try_recover_() returns and on the retention cadence, never
@@ -615,9 +654,14 @@ class SdLogger : public Component {
   LogRecord *ring_{nullptr};
   uint32_t buffer_depth_{2048};
   uint32_t ring_mask_{0};
-  volatile uint32_t head_{0};  // producer index
-  volatile uint32_t tail_{0};  // consumer index
+  std::atomic<uint32_t> head_{0};  // producer index
+  std::atomic<uint32_t> tail_{0};  // consumer index
   portMUX_TYPE ring_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  // Consumer inactivity timeout, refreshed by successful pops and observations of an empty FIFO.
+  // This is not a per-record residence-time limit; continuously streaming queues never expire.
+  static constexpr uint64_t QUEUE_MAX_AGE_US = 600000000ULL;
+  uint64_t ring_observed_us_{0};
+  uint64_t record_sample_us_{0};
 
   // Text ring (source S4, spec D9). Its own ring because a log line is
   // variable-length and cannot share the fixed-size record ring; drained by the
@@ -628,6 +672,8 @@ class SdLogger : public Component {
   volatile uint16_t text_head_{0};
   volatile uint16_t text_tail_{0};
   portMUX_TYPE text_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  uint64_t text_observed_us_{0};
+  uint64_t text_sample_us_{0};
   uint8_t log_level_{0};
 
   // File / write policy
@@ -635,7 +681,7 @@ class SdLogger : public Component {
   BlockBuffer block_;
   UnflushedRecordTracker unflushed_records_;
   char *block_storage_{nullptr};
-  uint32_t seq_{0};
+  std::atomic<uint32_t> seq_{0};
   uint32_t max_file_size_{16u * 1024 * 1024};
   uint32_t max_file_seconds_{0};  // 0 = unbounded, i.e. rotation on size alone
   uint32_t file_bytes_{0};        // bytes appended to the *current* file; drives rotation
@@ -679,9 +725,9 @@ class SdLogger : public Component {
   // write_file_header_() so every sealed chunk decodes without the chunks before it.
   DeltaClock stamps_;
 
-  // Counters (writer-task only, except the dropped ones which producers bump)
-  uint32_t records_written_{0};
-  uint32_t bytes_written_{0};
+  // Writer counters are independently published; producers bump the drop counters.
+  std::atomic<uint32_t> records_written_{0};
+  std::atomic<uint32_t> bytes_written_{0};
   std::atomic<uint32_t> dropped_records_{0};
   std::atomic<uint32_t> text_dropped_{0};
   std::atomic<uint32_t> card_dropped_{0};
@@ -709,7 +755,7 @@ class SdLogger : public Component {
   std::atomic<bool> dying_{false};
   // Written before the release-store on dying_, read after the acquire-load, so
   // the writer task always sees the reason that set the flag.
-  const char *close_reason_{"emergency"};
+  std::atomic<const char *> close_reason_{"emergency"};
   adc_oneshot_unit_handle_t adc_handle_{nullptr};
   // The eFuse calibration curve. Without it the raw-count estimate below reads ~26 % low on the
   // C6 — measured 8.94 V for a rail an esphome `adc:` on the same pin put at 12.07 V — which
@@ -722,28 +768,15 @@ class SdLogger : public Component {
   RecoveryPolicy recovery_;
   bool recovery_power_cycle_{false};
   bool write_recovery_stopped_{false};
-  uint32_t write_failures_{0};
-  struct LastWriteFailure {
-    int32_t result{0};
-    int32_t err_no{0};
-    uint32_t offset{0};
-    uint32_t derived_offset{0};
-    int32_t lseek_errno{0};
-    uint32_t committed_end{0};
-    uint32_t len{0};
-    uint32_t elapsed_us{0};
-    uint32_t spi_begin{0};
-    uint32_t spi_end{0};
-    SdSpiTraceSummary spi{};
-    uint32_t card_sectors{0};
-    uint32_t volume_first_lba{0};
-    uint32_t volume_sectors{0};
-    uint32_t heap_default_free{0};
-    uint32_t heap_default_largest{0};
-    uint32_t heap_dma_free{0};
-    uint32_t heap_dma_largest{0};
-    WriteFailureAction action{WriteFailureAction::RETRY_RECOVERY};
-  };
+  mutable portMUX_TYPE status_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  WriteFailureSnapshot write_failure_pub_{};
+  void publish_runtime_status_();
+  std::atomic<uint32_t> recovery_attempts_pub_{0};
+  std::atomic<uint32_t> recovery_delay_pub_{0};
+  std::atomic<uint32_t> recovery_busy_timeout_pub_{0};
+  std::atomic<bool> recovery_enabled_pub_{false};
+  std::atomic<const char *> recovery_state_pub_{"off"};
+
   LastWriteFailure last_write_failure_{};
 
   // Chunk lifecycle, rotation bounds and retention (design §3/§4/§7). The *card* has one mutator,
@@ -781,9 +814,15 @@ class SdLogger : public Component {
   // so the first pass is the earliest point at which the stack is guaranteed up — and it is still
   // long before any association, which keeps the original intent intact.
   bool collection_server_pending_{false};
-  // `confirm <seq>` intents, httpd task -> writer task (§8). Shallow on purpose: the collector is
+  // `confirm <seq, mount_generation>` intents, httpd task -> writer task (§8). Shallow on purpose: the collector is
   // strictly sequential, so more than one confirm can only be in flight if the writer has not run,
   // and a full queue is a 503 the client retries rather than a backlog nobody is draining.
+  struct ConfirmIntent {
+    uint32_t seq;
+    uint32_t mount_generation;
+  };
+  // Protected by index_mux_; changes before each successful mount opens its serving gate.
+  uint32_t mount_generation_{0};
   QueueHandle_t confirm_q_{nullptr};
   // Card fill, published by the writer for `GET /sdlog/status`. > 100 is "not known yet". Published
   // rather than read on demand because reading it is an SD access and the httpd task may not make
@@ -792,6 +831,7 @@ class SdLogger : public Component {
   // Chunk transfers the httpd task currently holds a read fd for. Not a diagnostic: it is what
   // `unmount_card_()` waits on, because unmounting frees the VFS context those fds live in.
   std::atomic<uint32_t> transfers_in_flight_{0};
+  std::atomic<bool> transfers_cancelled_{false};
   // **The serving gate.** "New transfers may be granted", and the reason `unmount_card_()`'s drain
   // is a barrier rather than a hope. Guarded by `index_mux_` and read in the *same* critical section
   // as the `find()`/`mark_serving()` pair in `collection_begin_serve()`, because the whole point is
@@ -833,13 +873,19 @@ class SdLogger : public Component {
   uint32_t unmounts_ok_{0};
   int32_t last_unmount_err_{0};
   bool last_unmount_skipped_{false};
-  TaskHandle_t writer_task_{nullptr};
+  std::atomic<TaskHandle_t> writer_task_{nullptr};
+  // Notification and task retirement share this lock: no notifier may retain a deleted handle.
+  portMUX_TYPE writer_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  // Completion is published after file, card and server cleanup, not inferred from a raw handle.
+  std::atomic<bool> writer_stopped_{true};
+  bool vcc_monitor_unavailable_{false};
   TaskHandle_t monitor_task_{nullptr};
 #ifdef USE_SWITCH
   // Both are runtime-only diagnostics. The switch always starts OFF and its
   // state is deliberately not restored across a reboot.
   std::atomic<bool> debug_writer_freeze_requested_{false};
   std::atomic<bool> debug_writer_frozen_{false};
+  std::atomic<bool> debug_writer_frozen_pending_{false};
   bool debug_reopen_after_freeze_{false};
   DebugWriterFreezeSwitch *debug_writer_freeze_switch_{nullptr};
 #endif
@@ -850,7 +896,7 @@ class SdLogger : public Component {
   // Minimum free bytes ever seen on the writer task stack; 0 until first sampled.
   // Written only by the writer task, read by the status server.
   std::atomic<uint32_t> writer_stack_min_free_{0};
-  volatile bool mounted_{false};
+  std::atomic<bool> mounted_{false};
   bool spi_bus_ok_{false};
   uint32_t mounted_card_sectors_{0};
   uint32_t mounted_volume_first_lba_{0};
@@ -858,13 +904,13 @@ class SdLogger : public Component {
   // True while the current mount only exists because the card's latched "in idle state" bit is
   // being masked. Worth surfacing rather than hiding: the card is working but has not completed a
   // real initialisation since it last had power, so the next power cycle is still owed to it.
-  bool degraded_identification_{false};
+  std::atomic<bool> degraded_identification_{false};
   enum class CapacityState : uint8_t {
     HEALTHY,
     VOLUME_TOO_BIG,
     SELF_TEST_FAILED,
   };
-  CapacityState capacity_state_{CapacityState::HEALTHY};
+  std::atomic<CapacityState> capacity_state_{CapacityState::HEALTHY};
   std::atomic<bool> confine_format_stop_requested_{false};
   std::atomic<bool> confine_format_in_progress_{false};
 
@@ -880,6 +926,9 @@ class SdLogger : public Component {
     // Last value written into this tap's `#drop` marker. Per tap, not summed:
     // one segment falling behind is a different diagnosis from both doing so.
     uint32_t marked_dropped{0};
+    // Consumer-only progress timestamps for the two unchanged ISR queues.
+    uint64_t rx_observed_us{0};
+    uint64_t tx_observed_us{0};
     uint32_t marked_shutdown_lost{0};
     // The gateway owns per-ring accepted atomics. These are per-port aggregates maintained by the
     // sole drain task: accepted -> drained -> record-ring accepted localises the first divergence.

@@ -110,7 +110,7 @@ compile: lockcheck gluecheck $(BINS)
 # headers, whose fakes can be inline rather than under a *_stubs directory.
 gluecheck: $(CORE_OBJS)
 	@awk '\
-	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|portal_runtime[.]h|gateway_[^ /]*[.]inc)" { \
+	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|portal_runtime[.]h|gateway_[^ /]*[.]inc|sd_logger_[^ /]*[.]inc)" { \
 	    printf "%s:%d: %s\n", FILENAME, FNR, $$0; bad = 1; \
 	  } \
 	  END { exit bad ? 1 : 0 }' $(CORE_OBJS:.o=.d) || { \
@@ -240,3 +240,9 @@ clean:
 	@rm -rf $(BUILD)
 
 -include $(DEPS)
+
+$(BUILD)/sd_logger_runtime.stamp: extract_sd_logger_runtime.py $(LOGGER_DIR)/sd_logger.cpp $(LOGGER_DIR)/sd_logger.h | $(BUILD)
+	python3 extract_sd_logger_runtime.py
+	@touch $@
+
+$(BUILD)/test_glue_sd_logger.o: $(BUILD)/sd_logger_runtime.stamp
