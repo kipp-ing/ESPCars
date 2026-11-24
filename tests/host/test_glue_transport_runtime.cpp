@@ -355,3 +355,375 @@ TEST(isotp_runtime_overflow_notifies_consumer_callback_counter_once) {
   CHECK_EQ(protocol.messages_received(), 1u);
   CHECK_EQ(errors, 1u);
 }
+
+TEST(ccp_b2_connect_busy_preserves_first_callback) {
+  for (bool success : {false, true}) {
+    can_gateway::GatewayPort port;
+    ccp::CcpHub hub(&port);
+    unsigned first = 0, second = 0;
+    CHECK(hub.connect_and([&](bool ok) {
+      CHECK_EQ(ok, success);
+      first++;
+    }));
+    CHECK(!hub.connect_and([&](bool) { second++; }));
+    CHECK_EQ(port.sent.size(), 1u);
+    reply(hub, port, success ? 0 : 1);
+    CHECK_EQ(first, 1u);
+    CHECK_EQ(second, 0u);
+  }
+}
+
+TEST(ccp_b2_connect_refusal_recovers_and_callback_can_reenter) {
+  can_gateway::GatewayPort port;
+  ccp::CcpHub hub(&port);
+  unsigned refused = 0, completed = 0;
+  port.accept = false;
+  CHECK(!hub.connect_and([&](bool) { refused++; }));
+  port.accept = true;
+  CHECK(hub.connect_and([&](bool ok) {
+    CHECK(ok);
+    completed++;
+    CHECK(hub.get_ccp_version());
+  }));
+  reply(hub, port);
+  CHECK_EQ(completed, 1u);
+  CHECK_EQ(refused, 0u);
+  CHECK_EQ(port.sent.back().data[0], ccp::GET_CCP_VERSION);
+}
+
+TEST(ccp_b2_payload_actions_reject_before_narrowing) {
+  for (bool templated : {false, true}) {
+    for (size_t size : {0u, 6u, 9u, 257u}) {
+      can_gateway::GatewayPort port;
+      ccp::CcpHub hub(&port);
+      hub.set_allow_write(true);
+      ccp::CcpDownloadAction<> download;
+      download.set_parent(&hub);
+      const std::vector<uint8_t> data(size, ccp::DNLOAD);
+      if (templated)
+        download.set_data_template([data]() { return data; });
+      else
+        download.set_data_static(data);
+      download.play();
+      CHECK(port.sent.empty());
+    }
+    for (size_t size : {0u, 9u, 257u}) {
+      can_gateway::GatewayPort port;
+      ccp::CcpHub hub(&port);
+      hub.set_allow_write(true);
+      ccp::CcpRawAction<> raw;
+      raw.set_parent(&hub);
+      const std::vector<uint8_t> data(size, ccp::CONNECT);
+      if (templated)
+        raw.set_data_template([data]() { return data; });
+      else
+        raw.set_data_static(data);
+      raw.play();
+      CHECK(port.sent.empty());
+    }
+  }
+}
+
+TEST(isotp_b2_payload_action_rejects_before_narrowing) {
+  for (bool templated : {false, true}) {
+    for (size_t size : {0u, 9u, 4096u, 65537u}) {
+      can_gateway::GatewayPort port;
+      isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+      protocol.set_max_message_size(8);
+      protocol.setup();
+      isotp::SendAction<> action;
+      action.set_parent(&protocol);
+      const std::vector<uint8_t> data(size, 42);
+      if (templated)
+        action.set_data_template([data]() { return data; });
+      else
+        action.set_data_static(data);
+      action.play();
+      protocol.loop();
+      CHECK(port.sent.empty());
+      CHECK(!protocol.is_busy());
+    }
+  }
+}
+
+TEST(isotp_b2_pending_fc_dropped_on_transfer_end) {
+  for (unsigned end : {0u, 1u, 2u, 3u, 4u}) {
+    transport_now = 0;
+    can_gateway::GatewayPort port;
+    isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+    protocol.setup();
+    port.accept = false;
+    const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+    protocol.on_frame({0x708, ff, 8, false, false});
+    CHECK(port.sent.empty());
+    if (end == 0) {
+      transport_now = 1000;  // Retry must not precede timeout detection.
+    } else if (end == 1) {
+      const uint8_t cf[]{0x21, 7, 8};
+      protocol.on_frame({0x708, cf, 3, false, false});
+    } else if (end == 2) {
+      const uint8_t sf[]{1, 42};
+      protocol.on_frame({0x708, sf, 2, false, false});
+    } else if (end == 3) {
+      const uint8_t bad_sn[]{0x22, 7, 8};
+      protocol.on_frame({0x708, bad_sn, 3, false, false});
+    } else {
+      port.accept = true;  // Replacement FF's successful FC supersedes refused FC.
+      protocol.on_frame({0x708, ff, 8, false, false});
+      CHECK_EQ(port.sent.size(), 1u);
+    }
+    port.accept = true;
+    const size_t sent = port.sent.size();
+    protocol.loop();
+    CHECK_EQ(port.sent.size(), sent);
+  }
+  transport_now = 0;
+}
+
+TEST(isotp_b2_refused_overflow_fc_retry_expires) {
+  transport_now = 0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.set_max_message_size(8);
+  protocol.setup();
+  port.accept = false;
+  const uint8_t ff[]{0x10, 9, 1, 2, 3, 4, 5, 6};
+  protocol.on_frame({0x708, ff, 8, false, false});
+  transport_now = 1000;
+  port.accept = true;
+  protocol.loop();
+  CHECK(port.sent.empty());
+  CHECK_EQ(protocol.transfers_failed(), 1u);
+  transport_now = 0;
+}
+
+TEST(isotp_b2_empty_cf_cannot_extend_n_cr) {
+  for (bool extended : {false, true}) {
+    transport_now = 0;
+    can_gateway::GatewayPort port;
+    isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+    if (extended) {
+      protocol.set_address_extension(0x13);
+      protocol.set_receive_address(0xF1);
+    }
+    protocol.setup();
+    const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+    const uint8_t ext_ff[]{0xF1, 0x10, 8, 1, 2, 3, 4, 5};
+    protocol.on_frame({0x708, extended ? ext_ff : ff, 8, false, false});
+    for (unsigned sn = 1; sn <= 9; sn++) {
+      transport_now = sn * 100;
+      const uint8_t cf[]{static_cast<uint8_t>(0x20 | sn)};
+      const uint8_t ext_cf[]{0xF1, cf[0]};
+      protocol.on_frame({0x708, extended ? ext_cf : cf, static_cast<uint8_t>(extended ? 2 : 1), false, false});
+      CHECK(protocol.receiving());
+    }
+    CHECK_EQ(protocol.frames_ignored(), 9u);
+    CHECK_EQ(port.sent.size(), 1u);  // Empty frames must not exhaust a granted block.
+    transport_now = 1000;
+    protocol.loop();
+    CHECK(!protocol.receiving());
+    CHECK_EQ(protocol.transfers_failed(), 1u);
+  }
+  transport_now = 0;
+}
+
+TEST(isotp_b2_empty_cf_does_not_consume_sequence) {
+  transport_now = 0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.setup();
+  const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+  const uint8_t empty[]{0x21};
+  const uint8_t valid[]{0x21, 7, 8};
+  protocol.on_frame({0x708, ff, 8, false, false});
+  protocol.on_frame({0x708, empty, 1, false, false});
+  protocol.on_frame({0x708, valid, 3, false, false});
+  CHECK_EQ(protocol.messages_received(), 1u);
+  CHECK_EQ(protocol.transfers_failed(), 0u);
+}
+
+TEST(ccp_b2_negative_response_warns_without_callback_and_recovers) {
+  can_gateway::GatewayPort port;
+  ccp::CcpHub hub(&port);
+  CHECK(hub.get_ccp_version());
+  transport_logs.clear();
+  reply(hub, port, 0x32);
+  CHECK(hub.warning);
+  CHECK(std::any_of(transport_logs.begin(), transport_logs.end(), [](const std::string &line) {
+    return line.find("0x1B") != std::string::npos && line.find("0x32") != std::string::npos;
+  }));
+  CHECK(hub.get_ccp_version());
+  reply(hub, port);
+  CHECK(!hub.warning);
+}
+
+TEST(ccp_b2_collect_timeout_rejected_before_tx) {
+  for (uint32_t timeout : {0u, 0x80000000u, 0xFFFFFFFFu}) {
+    can_gateway::GatewayPort port;
+    ccp::CcpHub hub(&port);
+    hub.set_allow_write(true);
+    hub.register_receive_id(0x702);
+    auto req = daq_request();
+    req.collect_timeout = timeout;
+    CHECK(!hub.daq_read(req, {}));
+    CHECK(port.sent.empty());
+  }
+}
+
+TEST(ccp_b2_collect_timeout_maximum_across_clock_wrap) {
+  transport_now = 0xFFFFFFF0;
+  can_gateway::GatewayPort port;
+  ccp::CcpHub hub(&port);
+  hub.set_allow_write(true);
+  hub.register_receive_id(0x702);
+  auto req = daq_request();
+  req.collect_timeout = 0x7FFFFFFF;
+  CHECK(hub.daq_read(req, {}));
+  for (unsigned i = 0; i < 5; i++)
+    reply(hub, port);
+  const size_t sent = port.sent.size();
+  hub.loop();
+  CHECK_EQ(port.sent.size(), sent);
+  transport_now += 0x7FFFFFFE;
+  hub.loop();
+  CHECK_EQ(port.sent.size(), sent);
+  transport_now++;
+  hub.loop();
+  CHECK_EQ(port.sent.size(), sent + 1);  // Bounded cleanup starts exactly at expiry.
+  transport_now = 0;
+}
+
+TEST(ccp_b2_payload_boundaries_preserve_write_gate_and_wire_bytes) {
+  for (bool templated : {false, true}) {
+    for (size_t size : {1u, 5u}) {
+      can_gateway::GatewayPort port;
+      ccp::CcpHub hub(&port);
+      ccp::CcpDownloadAction<> action;
+      action.set_parent(&hub);
+      const std::vector<uint8_t> data(size, 42);
+      if (templated)
+        action.set_data_template([data]() { return data; });
+      else
+        action.set_data_static(data);
+      action.play();
+      CHECK(port.sent.empty());
+      hub.set_allow_write(true);
+      action.play();
+      CHECK_EQ(port.sent.size(), 1u);
+      CHECK_EQ(port.sent.back().data[0], ccp::DNLOAD);
+      CHECK_EQ(port.sent.back().data[2], size);
+      CHECK_BYTES(port.sent.back().data + 3, data.data(), size);
+    }
+    for (size_t size : {1u, 8u}) {
+      can_gateway::GatewayPort port;
+      ccp::CcpHub hub(&port);
+      ccp::CcpRawAction<> action;
+      action.set_parent(&hub);
+      std::vector<uint8_t> data(size, 0);
+      data[0] = ccp::GET_CCP_VERSION;
+      if (templated)
+        action.set_data_template([data]() { return data; });
+      else
+        action.set_data_static(data);
+      action.play();
+      CHECK_EQ(port.sent.size(), 1u);
+      CHECK_BYTES(port.sent.back().data, data.data(), size);
+    }
+  }
+}
+
+TEST(isotp_b2_payload_capacity_accepted_and_oversize_preserves_inflight) {
+  for (bool templated : {false, true}) {
+    can_gateway::GatewayPort port;
+    isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+    protocol.set_max_message_size(8);
+    protocol.setup();
+    isotp::SendAction<> action;
+    action.set_parent(&protocol);
+    const std::vector<uint8_t> data(8, 42);
+    if (templated)
+      action.set_data_template([data]() { return data; });
+    else
+      action.set_data_static(data);
+    action.play();
+    CHECK(protocol.is_busy());
+    const std::vector<uint8_t> oversize(65537, 99);
+    CHECK(!protocol.send(oversize.data(), oversize.size()));
+    protocol.loop();
+    CHECK_EQ(port.sent.size(), 1u);
+    CHECK_EQ(port.sent.back().data[0], 0x10);
+    CHECK_EQ(port.sent.back().data[1], 8);
+    CHECK_BYTES(port.sent.back().data + 2, data.data(), 6);
+  }
+}
+
+TEST(isotp_b2_pending_fc_live_retry_and_clock_wrap) {
+  transport_now = 0xFFFFFFF0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.setup();
+  port.accept = false;
+  const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+  protocol.on_frame({0x708, ff, 8, false, false});
+  transport_now += 999;
+  port.accept = true;
+  protocol.loop();
+  CHECK_EQ(port.sent.size(), 1u);
+  CHECK_EQ(port.sent.back().data[0], 0x30);
+  protocol.loop();
+  CHECK_EQ(port.sent.size(), 1u);
+  transport_now++;
+  protocol.loop();
+  CHECK(!protocol.receiving());
+  CHECK_EQ(protocol.transfers_failed(), 1u);
+  transport_now = 0;
+}
+
+TEST(ccp_b2_negative_response_callback_observes_warning_once) {
+  can_gateway::GatewayPort port;
+  ccp::CcpHub hub(&port);
+  unsigned errors = 0;
+  hub.add_on_error_callback([&](uint8_t command, uint8_t code) {
+    CHECK_EQ(command, ccp::GET_CCP_VERSION);
+    CHECK_EQ(code, 0x32);
+    CHECK(hub.warning);
+    errors++;
+  });
+  CHECK(hub.get_ccp_version());
+  reply(hub, port, 0x32);
+  CHECK_EQ(errors, 1u);
+  CHECK(hub.get_ccp_version());
+  const uint8_t foreign[]{0xFF, 0, static_cast<uint8_t>(port.sent.back().data[1] + 1), 0, 0, 0, 0, 0};
+  hub.on_frame({0x701, foreign, 8, false, false});
+  CHECK(hub.warning);
+  reply(hub, port);
+  CHECK(!hub.warning);
+  CHECK_EQ(errors, 1u);
+}
+
+TEST(isotp_b2_timeout_callback_can_replace_transfer_before_next_retry) {
+  transport_now = 0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.setup();
+  const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+  unsigned errors = 0;
+  protocol.add_on_error_callback([&](isotp::IsoTpError error) {
+    CHECK_EQ(error, isotp::IsoTpError::TIMEOUT_CF);
+    errors++;
+    transport_now++;  // The callback crosses a millisecond after loop's time snapshot.
+    protocol.on_frame({0x708, ff, 8, false, false});
+  });
+  port.accept = false;
+  protocol.on_frame({0x708, ff, 8, false, false});
+  transport_now = 1000;
+  protocol.loop();
+  CHECK_EQ(errors, 1u);
+  CHECK(protocol.receiving());
+  port.accept = true;
+  protocol.loop();
+  CHECK_EQ(port.sent.size(), 1u);
+  if (!port.sent.empty())
+    CHECK_EQ(port.sent.back().data[0], 0x30);
+  transport_now = 0;
+}
