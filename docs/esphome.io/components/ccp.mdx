@@ -27,6 +27,10 @@ ccp:
   name.
 - **command_id** (*Optional*, int): 11-bit command identifier. Defaults to `0x700`.
 - **response_id** (*Optional*, int): 11-bit response identifier. Defaults to `0x701`.
+  Registered before gateway setup; only frames on this ID can complete commands.
+- **daq_ids** (*Optional*, list): Predeclared 11-bit DAQ receive IDs for templated `ccp.daq_read` DTO IDs.
+  Defaults to empty; at most 2048 entries. Static action DTO IDs register automatically.
+  A runtime DTO ID outside the registered set is refused before any command is sent.
 - **station_address** (*Optional*, int): 16-bit station address. Defaults to `0x0001`.
 - **byte_order** (*Optional*, enum): Multi-byte command parameter order.
   - `little` *(default)*

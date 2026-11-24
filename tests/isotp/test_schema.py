@@ -127,7 +127,9 @@ def test_unknown_key_rejected(set_core_config) -> None:
 @pytest.mark.parametrize("mode", ["normal", "extended"])
 def test_addressing_mode_accepted(set_core_config, mode: str) -> None:
     setup_c6(set_core_config)
-    extra = {"target_address": 0x13} if mode == "extended" else {}
+    extra = (
+        {"target_address": 0x13, "source_address": 0xF1} if mode == "extended" else {}
+    )
     assert validate(isotp(addressing=mode, **extra))["addressing"] == mode
 
 

@@ -34,7 +34,6 @@ struct DaqReadResult {
 class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
  public:
   explicit CcpHub(can_gateway::GatewayPort *port) : port_(port) {}
-  void setup() override;
   void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA - 1.0f; }
@@ -45,6 +44,8 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   void set_response_timeout(uint32_t timeout) { response_timeout_ = timeout; }
   void set_allow_write(bool allow) { allow_write_ = allow; }
   void set_enabled(bool enabled) { enabled_ = enabled; }
+  // Codegen only: response and DAQ IDs must be registered before gateway setup.
+  void register_receive_id(uint32_t id);
   void set_daq_anchor(uint8_t ext, uint32_t address, const std::vector<uint8_t> &expect) {
     daq_anchor_ = DaqField{static_cast<uint8_t>(expect.size()), ext, address};
     daq_anchor_expect_ = expect;
@@ -103,6 +104,7 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
  protected:
   using CommandCallback = std::function<void(bool, uint8_t, const uint8_t *, uint8_t)>;
   bool send_(Cro cro, CommandCallback callback = {});
+  bool send_sequence_(Cro cro, CommandCallback callback);
   bool write_allowed_(uint8_t command) const;
   bool has_daq_anchor_() const { return !this->daq_anchor_expect_.empty(); }
   void finish_(bool success, uint8_t code, const uint8_t *data, uint8_t len);
@@ -115,10 +117,12 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   void handle_daq_frame_(const uint8_t *frame, uint8_t len);
   void complete_daq_read_(const char *failed_step);
   void teardown_daq_read_();
+  void fail_daq_teardown_(const char *step);
   void fire_daq_read_();
   can_gateway::GatewayPort *port_;
   uint32_t command_id_{0x700};
   uint32_t response_id_{0x701};
+  std::vector<uint32_t> receive_ids_{};
   uint16_t station_address_{0x0001};
   ByteOrder byte_order_{ByteOrder::LITTLE};
   uint32_t response_timeout_{100};

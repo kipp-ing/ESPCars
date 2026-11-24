@@ -38,6 +38,7 @@ UDS_DIR  := ../../components/uds
 # tier until 2026-07-30, when the bench found that no transfer needing a second
 # flow-control block had ever actually run — see test_isotp_core.cpp's header.
 ISOTP_DIR := ../../components/isotp
+CCP_DIR := ../../components/ccp
 # portal's core (resolver, envelope emitter, action parser) is ESPHome-free by construction.
 PORTAL_DIR := ../../components/portal
 BUILD    := build
@@ -53,7 +54,7 @@ OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o)
 DEPS     := $(OBJS:.o=.d)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
-            -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
+            -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
 
 .PHONY: all test compile bench lockcheck clean
@@ -108,6 +109,11 @@ $(BIN): $(OBJS)
 $(BUILD)/%.o: %.cpp | $(GEN)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/test_transport_runtime.o: $(BUILD)/transport_runtime.h
+
+$(BUILD)/transport_runtime.h: generate_transport_runtime.py $(CCP_DIR)/ccp.h $(CCP_DIR)/ccp.cpp $(ISOTP_DIR)/isotp.h $(ISOTP_DIR)/isotp.cpp | $(BUILD)
+	@python3 generate_transport_runtime.py
 
 $(GEN): $(CORE_DIR)/can_gateway.h | $(BUILD)
 	@echo "  GEN   $@"

@@ -122,6 +122,20 @@ def test_daq_anchor_accepted(set_core_config) -> None:
     assert config["daq_anchor"]["expect"] == [0x01, 0xAD, 0x04, 0x02]
 
 
+def test_daq_receive_ids_accepted(set_core_config) -> None:
+    setup_c6(set_core_config)
+    assert validate(hub(daq_ids=[0, 0x702, 0x7FF]))["daq_ids"] == [0, 0x702, 0x7FF]
+
+
+@pytest.mark.parametrize("ids", [[-1], [0x800], list(range(2048)) + [0]])
+def test_daq_receive_ids_reject_invalid_or_unbounded_lists(
+    set_core_config, ids
+) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid):
+        validate(hub(daq_ids=ids))
+
+
 @pytest.mark.parametrize(
     ("anchor", "message"),
     [

@@ -53,6 +53,7 @@ void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
   Frame out{};
   const RxAction action = this->rx_.on_frame(this->cfg_, view.data, view.dlc, millis(), &out);
   switch (action) {
+    case RxAction::SEND_FLOW_CONTROL_FAILED:
     case RxAction::SEND_FLOW_CONTROL:
       // Sent inline rather than deferred to the next loop tick: a deferred flow control frame
       // adds a whole loop period to every block, which on a long response is the difference
@@ -62,6 +63,8 @@ void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
         this->pending_fc_ = out;
         this->has_pending_fc_ = true;
       }
+      if (action == RxAction::SEND_FLOW_CONTROL_FAILED)
+        this->report_error_(this->rx_.error());
       break;
     case RxAction::MESSAGE_COMPLETE:
       this->deliver_message_();

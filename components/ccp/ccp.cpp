@@ -3,11 +3,19 @@
 
 #include <algorithm>
 
+#include "esphome/core/hal.h"
+#include "esphome/core/log.h"
+
 namespace esphome::ccp {
 
 ESPHOME_LOG_TAG(TAG, "ccp");
 
-void CcpHub::setup() { this->port_->subscribe_consumer(this->response_id_, false, this); }
+void CcpHub::register_receive_id(uint32_t id) {
+  if (std::find(this->receive_ids_.begin(), this->receive_ids_.end(), id) != this->receive_ids_.end())
+    return;
+  this->receive_ids_.push_back(id);
+  this->port_->subscribe_consumer(id, false, this);
+}
 
 void CcpHub::loop() {
   if (this->in_flight_ && static_cast<int32_t>(millis() - this->deadline_) >= 0) {
@@ -91,13 +99,19 @@ void CcpHub::finish_(bool success, uint8_t code, const uint8_t *data, uint8_t le
 void CcpHub::on_frame(const can_gateway::FrameView &frame) {
   if (frame.extended || frame.rtr)
     return;
+  const bool response_id = frame.can_id == this->response_id_;
+  if (!response_id &&
+      std::find(this->receive_ids_.begin(), this->receive_ids_.end(), frame.can_id) == this->receive_ids_.end())
+    return;
   const Dto dto = decode_dto(frame.data, frame.dlc);
   if (dto.kind == DtoKind::DAQ) {
     this->daq_callback_.call(dto.pid, std::vector<uint8_t>(dto.data, dto.data + dto.data_len));
-    this->handle_daq_frame_(frame.data, frame.dlc);
+    if (frame.can_id == this->daq_read_req_.dto_id)
+      this->handle_daq_frame_(frame.data, frame.dlc);
     return;
   }
-  if (dto.kind != DtoKind::RESPONSE || !this->in_flight_ || !matches_response(dto, this->in_flight_ctr_))
+  if (!response_id || dto.kind != DtoKind::RESPONSE || !this->in_flight_ ||
+      !matches_response(dto, this->in_flight_ctr_))
     return;
   this->finish_(dto.return_code == 0, dto.return_code, dto.data, dto.data_len);
 }
@@ -221,17 +235,17 @@ bool CcpHub::read_memory(uint8_t ext, uint32_t address, uint16_t len,
   this->read_data_.clear();
   this->read_data_.reserve(len);
   this->read_remaining_ = len;
-  return this->send_(ccp::set_mta(0, 0, ext, address, this->byte_order_),
-                     [this](bool ok, uint8_t, const uint8_t *, uint8_t) {
-                       if (!ok) {
-                         this->fail_sequence_();
-                         return;
-                       }
-                       const uint8_t n = read_chunk(this->read_remaining_);
-                       this->send_(ccp::upload(0, n), [this](bool success, uint8_t, const uint8_t *data, uint8_t len) {
-                         this->continue_read_(success, data, len);
-                       });
-                     });
+  return this->send_sequence_(
+      ccp::set_mta(0, 0, ext, address, this->byte_order_), [this](bool ok, uint8_t, const uint8_t *, uint8_t) {
+        if (!ok) {
+          this->fail_sequence_();
+          return;
+        }
+        const uint8_t n = read_chunk(this->read_remaining_);
+        this->send_sequence_(ccp::upload(0, n), [this](bool success, uint8_t, const uint8_t *data, uint8_t len) {
+          this->continue_read_(success, data, len);
+        });
+      });
 }
 void CcpHub::continue_read_(bool success, const uint8_t *data, uint8_t len) {
   if (!success || len < read_chunk(this->read_remaining_)) {
@@ -250,7 +264,7 @@ void CcpHub::continue_read_(bool success, const uint8_t *data, uint8_t len) {
     return;
   }
   const uint8_t next = read_chunk(this->read_remaining_);
-  this->send_(ccp::upload(0, next), [this](bool ok, uint8_t, const uint8_t *response, uint8_t response_len) {
+  this->send_sequence_(ccp::upload(0, next), [this](bool ok, uint8_t, const uint8_t *response, uint8_t response_len) {
     this->continue_read_(ok, response, response_len);
   });
 }
@@ -261,8 +275,8 @@ bool CcpHub::write_memory(uint8_t ext, uint32_t address, const std::vector<uint8
   this->write_data_ = data;
   this->write_offset_ = 0;
   this->write_callback_ = std::move(callback);
-  return this->send_(ccp::set_mta(0, 0, ext, address, this->byte_order_),
-                     [this](bool ok, uint8_t, const uint8_t *, uint8_t) { this->continue_write_(ok); });
+  return this->send_sequence_(ccp::set_mta(0, 0, ext, address, this->byte_order_),
+                              [this](bool ok, uint8_t, const uint8_t *, uint8_t) { this->continue_write_(ok); });
 }
 void CcpHub::continue_write_(bool success) {
   if (!success) {
@@ -282,10 +296,28 @@ void CcpHub::continue_write_(bool success) {
   Cro c = n == 6 ? ccp::dnload6(0, this->write_data_.data() + this->write_offset_)
                  : ccp::dnload(0, this->write_data_.data() + this->write_offset_, n);
   this->write_offset_ += n;
-  this->send_(c, [this](bool ok, uint8_t, const uint8_t *, uint8_t) { this->continue_write_(ok); });
+  this->send_sequence_(c, [this](bool ok, uint8_t, const uint8_t *, uint8_t) { this->continue_write_(ok); });
+}
+
+bool CcpHub::send_sequence_(Cro cro, CommandCallback callback) {
+  if (this->send_(cro, std::move(callback)))
+    return true;
+  // Rejected submissions have no timeout. Release ownership before notifying callers,
+  // which may immediately start another operation from their callback.
+  this->status_set_warning();
+  this->fail_sequence_();
+  this->error_callback_.call(cro.data[0], CCP_SEND_REFUSED);
+  return false;
 }
 
 bool CcpHub::daq_read(const DaqReadRequest &req, std::function<void(const DaqReadResult &)> callback) {
+  if (req.dto_id != this->response_id_ &&
+      std::find(this->receive_ids_.begin(), this->receive_ids_.end(), req.dto_id) == this->receive_ids_.end()) {
+    ESP_LOGW(TAG, "CCP DAQ read refused: DTO ID 0x%03X was not registered before setup",
+             static_cast<unsigned>(req.dto_id));
+    this->status_set_warning();
+    return false;
+  }
   if (req.fields.empty()) {
     ESP_LOGW(TAG, "CCP DAQ read refused: no fields configured");
     return false;
@@ -450,12 +482,31 @@ void CcpHub::complete_daq_read_(const char *failed_step) {
 
 void CcpHub::teardown_daq_read_() {
   const auto status = [this]() {
-    if (!this->send_(ccp::set_s_status(0, 0),
-                     [this](bool, uint8_t, const uint8_t *, uint8_t) { this->fire_daq_read_(); }))
+    if (!this->send_(ccp::set_s_status(0, 0), [this](bool ok, uint8_t, const uint8_t *, uint8_t) {
+          if (!ok)
+            this->fail_daq_teardown_("teardown SET_S_STATUS");
+          this->fire_daq_read_();
+        })) {
+      this->fail_daq_teardown_("teardown SET_S_STATUS");
       this->fire_daq_read_();
+    }
   };
-  if (!this->send_(ccp::start_stop_all(0, 0), [status](bool, uint8_t, const uint8_t *, uint8_t) { status(); }))
+  if (!this->send_(ccp::start_stop_all(0, 0), [this, status](bool ok, uint8_t, const uint8_t *, uint8_t) {
+        if (!ok)
+          this->fail_daq_teardown_("teardown START_STOP_ALL");
+        status();
+      })) {
+    this->fail_daq_teardown_("teardown START_STOP_ALL");
     status();
+  }
+}
+
+void CcpHub::fail_daq_teardown_(const char *step) {
+  ESP_LOGW(TAG, "CCP DAQ cleanup failed at %s; ECU streaming may still be active", step);
+  this->status_set_warning();
+  this->daq_read_result_.ok = false;
+  if (this->daq_read_result_.failed_step == nullptr)
+    this->daq_read_result_.failed_step = step;
 }
 
 void CcpHub::fire_daq_read_() {

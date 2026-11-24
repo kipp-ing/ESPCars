@@ -67,6 +67,7 @@ isotp:
     tx_id: 0x7E2
     rx_id: 0x7EA
     target_address: 0x13
+    source_address: 0xF1
     max_message_size: 64
 
 sensor:

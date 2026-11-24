@@ -10,6 +10,7 @@ namespace esphome::ccp {
 constexpr uint8_t CCP_FRAME_LEN = 8;
 constexpr uint8_t CCP_RESPONSE_MARKER = 0xFF;
 constexpr uint8_t CCP_TIMEOUT = 0xFE;
+constexpr uint8_t CCP_SEND_REFUSED = 0xFD;
 constexpr uint8_t CCP_MAX_TRANSFER = 5;
 constexpr uint8_t CCP_ODT_PAYLOAD = 7;
 

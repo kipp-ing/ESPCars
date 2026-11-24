@@ -106,9 +106,41 @@ def test_v3_extended_requires_target_address(set_core_config) -> None:
         validate(isotp(addressing="extended"))
 
 
+def test_v3_extended_requires_source_address(set_core_config) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="'source_address' is required"):
+        validate(isotp(addressing="extended", target_address=0x13))
+
+
+@pytest.mark.parametrize("address", [0, 0xF1, 0xFF])
+def test_v3_extended_accepts_separate_local_address(set_core_config, address) -> None:
+    setup_c6(set_core_config)
+    config = validate(
+        isotp(addressing="extended", target_address=0x13, source_address=address)
+    )
+    assert config["source_address"] == address
+    assert config["target_address"] == 0x13
+
+
+@pytest.mark.parametrize("mode", ["normal", "normal_fixed"])
+def test_v3_source_address_only_for_extended(set_core_config, mode) -> None:
+    setup_c6(set_core_config)
+    config = (
+        normal_fixed(source_address=0xF1)
+        if mode == "normal_fixed"
+        else isotp(source_address=0xF1)
+    )
+    with pytest.raises(
+        cv.Invalid, match="'source_address' is only used with addressing 'extended'"
+    ):
+        validate(config)
+
+
 def test_v3_extended_accepts_target_address(set_core_config) -> None:
     setup_c6(set_core_config)
-    validated = validate(isotp(addressing="extended", target_address=0x13))
+    validated = validate(
+        isotp(addressing="extended", target_address=0x13, source_address=0xF1)
+    )
     assert validated["target_address"] == 0x13
     # Extended addressing still carries raw identifiers.
     assert validated["tx_id"] == 0x7E0
@@ -162,7 +194,14 @@ def test_v9_same_values_accepted_with_extended_id(set_core_config) -> None:
 def test_v9_extended_addressing_also_width_checked(set_core_config) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="does not fit a 11-bit identifier"):
-        validate(isotp(addressing="extended", target_address=0x13, tx_id=0x800))
+        validate(
+            isotp(
+                addressing="extended",
+                target_address=0x13,
+                source_address=0xF1,
+                tx_id=0x800,
+            )
+        )
 
 
 # ------------------------------------------------------------------------- V1
@@ -177,7 +216,14 @@ def test_v1_normal_rejects_equal_identifiers(set_core_config) -> None:
 def test_v1_extended_rejects_equal_identifiers(set_core_config) -> None:
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match="must differ"):
-        validate(isotp(addressing="extended", target_address=0x13, rx_id=0x7E0))
+        validate(
+            isotp(
+                addressing="extended",
+                target_address=0x13,
+                source_address=0xF1,
+                rx_id=0x7E0,
+            )
+        )
 
 
 def test_v1_normal_fixed_rejects_equal_source_and_target(set_core_config) -> None:
