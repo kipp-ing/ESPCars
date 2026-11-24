@@ -278,7 +278,10 @@ refusing to transmit at all):
 
 - The scheduler polls **`SAFE_READ` groups only** — the catalog flags which
   service identifiers cannot change ECU state, and `uds.read` is held to the
-  same gate no matter what `allow_active_services` says.
+  same gate no matter what `allow_active_services` says. A polled binding to
+  another group fails configuration validation. The send gate checks the
+  flashed catalog again; an unsafe poll is logged, reported through `on_error`,
+  and suspended without transmission.
 - Sessions, routines, IO control, writes, security access and reset are
   reachable only through `uds.execute`/`uds.raw`, **and** only when the hub
   sets `allow_active_services: true`. Both the flag and the action are
@@ -286,6 +289,17 @@ refusing to transmit at all):
   without the flag.
 - Declaring a sensor with an `update_interval` *is* the opt-in for polling —
   nothing is read without one being declared somewhere.
+
+If the catalog or selected ECU cannot be resolved at setup, the hub fails closed:
+entities become unavailable and every on-demand action is refused through `on_error`.
+Requests must fit both the component's 32-byte request buffer and ISO-TP's
+`max_message_size`. Known catalog and static raw requests are checked during
+configuration; runtime capacity refusals report one error and drop the request
+(suspending a polled group), so other polling can continue. A busy transport
+still retries normally.
+
+`on_error` receives a static reason in `x.what`, safe to retain across `delay:`
+or later errors without allocating per error. Group names remain in the log.
 
 Default every hub to `allow_active_services: false` unless you specifically
 need it, and keep it observe-first the way the rest of this repo does.
@@ -301,7 +315,7 @@ need it, and keep it observe-first the way the rest of this repo does.
 | `timeouts` climbing | the ECU is silent for that group — the one counter that means something is actually wrong, along with `negative_responses` |
 | "unknown field" at config time | read the manifest; the closest matches are listed in the error |
 | "field occurs in more than one group" | add `service:` — the error names the candidate groups |
-| "N-byte request this build cannot assemble" | the catalog and the C++ reader disagree, or a request exceeds the component's limit — see `DESIGN-uds.md` §7a for the one historical case of this |
+| "request cannot be assembled" | the catalog and the C++ reader disagree, or a request exceeds the component's limit — see `DESIGN-uds.md` §7a for the one historical case of this |
 | a config error about `max_message_size` | §3.1's transport check: the `isotp` instance's buffer can't hold the largest group this config reads — raise `max_message_size`, don't lower what you read |
 
 ## 8. Going deeper

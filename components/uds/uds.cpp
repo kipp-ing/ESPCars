@@ -1,7 +1,6 @@
 #include "uds.h"
 
-#include <cstdio>
-
+#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
@@ -87,6 +86,11 @@ void UdsHub::setup() {
     ESP_LOGE(TAG, "%s: catalog unavailable: %s — this hub will not transmit and its entities stay unavailable",
              this->log_name_, this->catalog_error_ != nullptr ? this->catalog_error_ : LOG_STR_LITERAL("unknown"));
     this->mark_all_unavailable_();
+    // A failed component will not be looped by ESPHome. Flush every unavailable binding now,
+    // including hubs with more than one publication slice.
+    for (uint32_t i = 0; i < this->binding_count_; i += UDS_PUBLISH_PER_LOOP)
+      this->publish_dirty_();
+    this->mark_failed(LOG_STR("catalog or ECU unavailable; transmission disabled"));
     return;
   }
 
@@ -182,11 +186,11 @@ bool UdsHub::resolve_ecu_() {
 
 bool UdsHub::find_group_(const char *name, uint16_t *out) const {
   uint32_t gi = 0;
-  if (name == nullptr || !this->catalog_.find(name, NameKind::GROUP, &gi))
+  if (!this->ecu_valid_ || name == nullptr || !this->catalog_.find(name, NameKind::GROUP, &gi))
     return false;
   // A group belongs to exactly one ECU, and a catalog may hold several. Binding to a group outside
   // our ECU would put another ECU's request bytes on our address pair.
-  if (this->ecu_valid_ && (gi < this->ecu_.group_first || gi >= this->ecu_.group_first + this->ecu_.group_count))
+  if (gi < this->ecu_.group_first || gi >= this->ecu_.group_first + this->ecu_.group_count)
     return false;
   *out = static_cast<uint16_t>(gi);
   return true;
@@ -271,8 +275,8 @@ void UdsHub::log_report_() {
 // -------------------------------------------------------------------------------------------
 
 void UdsHub::loop() {
-  if (this->catalog_.is_open()) {
-    const uint32_t now = millis();
+  if (this->catalog_ready()) {
+    const uint32_t now = App.get_loop_component_start_time();
     // P2 bounds the START of the response, not its completion (ISO 14229). Once the transport
     // is mid-reassembly, the answer has started: a multi-block response paced at the granted
     // STmin of 20 ms can easily run past half a second of consecutive frames, every one of them
@@ -317,11 +321,15 @@ void UdsHub::loop() {
 }
 
 void UdsHub::issue_next_(uint32_t now) {
-  // An operator's explicit action outranks the poller; a refused send is backpressure, so the same
-  // bytes are simply re-offered on the next iteration.
+  // An operator's explicit action outranks the poller. Retry only transient backpressure.
   if (this->raw_pending_len_ != 0) {
-    if (!this->isotp_->send(this->raw_pending_, this->raw_pending_len_))
+    const SendResult result = this->send_request_(this->raw_pending_, this->raw_pending_len_, 0xFFFF, true);
+    if (result == SendResult::BUSY)
       return;
+    if (result == SendResult::UNSENDABLE) {
+      this->raw_pending_len_ = 0;
+      return;
+    }
     std::memcpy(this->req_, this->raw_pending_, this->raw_pending_len_);
     this->req_len_ = this->raw_pending_len_;
     this->raw_pending_len_ = 0;
@@ -335,7 +343,7 @@ void UdsHub::issue_next_(uint32_t now) {
 
   if (this->ondemand_count_ != 0) {
     const uint16_t gi = this->ondemand_[this->ondemand_head_];
-    const SendResult result = this->send_group_(gi);
+    const SendResult result = this->send_group_(gi, this->ondemand_active_[this->ondemand_head_]);
     if (result == SendResult::BUSY)
       return;  // the identical request is re-offered next iteration
     this->ondemand_head_ = static_cast<uint8_t>((this->ondemand_head_ + 1) % UDS_ONDEMAND_QUEUE);
@@ -371,23 +379,60 @@ void UdsHub::issue_next_(uint32_t now) {
   this->in_flight_slot_ = static_cast<uint8_t>(slot);
 }
 
-UdsHub::SendResult UdsHub::send_group_(uint16_t group_index) {
+bool UdsHub::check_ready_() {
+  if (this->catalog_ready())
+    return true;
+  this->status_set_warning();
+  this->report_error_("catalog or ECU unavailable; request refused, no transmission", 0);
+  return false;
+}
+
+UdsHub::SendResult UdsHub::send_request_(const uint8_t *data, uint8_t len, uint16_t group_index, bool allow_active) {
+  // The only call to ISO-TP send: enforce permissions against the flashed catalog and check
+  // transport capacity for polling, queued actions and raw requests alike.
+  if (!this->check_ready_())
+    return SendResult::UNSENDABLE;
+  const char *reason = nullptr;
+  if (group_index != 0xFFFF) {
+    GroupView g;
+    if (group_index < this->ecu_.group_first || group_index >= this->ecu_.group_first + this->ecu_.group_count ||
+        !this->catalog_.group(group_index, &g)) {
+      reason = "group outside resolved ECU; request refused, no transmission";
+    } else if (!allow_active && (g.flags & GROUP_FLAG_SAFE_READ) == 0) {
+      reason = "group is not SAFE_READ; request refused, no transmission";
+    }
+  }
+  if (allow_active && !this->allow_active_services_)
+    reason = "active services disabled; request refused, no transmission";
+  if (len > this->isotp_->get_max_message_size())
+    reason = "request exceeds isotp max_message_size; request refused, no transmission";
+  if (reason != nullptr) {
+    this->status_set_warning();
+    this->report_group_error_(group_index, reason, 0);
+    return SendResult::UNSENDABLE;
+  }
+  return this->isotp_->send(data, len) ? SendResult::SENT : SendResult::BUSY;
+}
+
+UdsHub::SendResult UdsHub::send_group_(uint16_t group_index, bool allow_active) {
   GroupView g;
   if (!this->catalog_.group(group_index, &g)) {
-    ESP_LOGE(TAG, "%s: group index %u is outside the catalog", this->log_name_, group_index);
+    this->status_set_warning();
+    this->report_error_("group index outside catalog; request refused, no transmission", 0);
     return SendResult::UNSENDABLE;
   }
   const uint8_t n = build_request(this->catalog_, g, this->req_, sizeof(this->req_));
   if (n == 0) {
     // build_request() also refuses a group whose `sid` disagrees with its first request byte — a
     // compiler bug that response validation would otherwise judge with the wrong SID.
-    ESP_LOGE(TAG, "%s: group '%s' has a %u-byte request this build cannot assemble (limit %u); not asking again",
-             this->log_name_, g.name, g.req_len, static_cast<unsigned>(UDS_MAX_REQUEST));
+    this->status_set_warning();
+    this->report_group_error_(group_index, "request cannot be assembled; request refused, no transmission", 0);
     return SendResult::UNSENDABLE;
   }
-  if (!this->isotp_->send(this->req_, n)) {
+  const SendResult result = this->send_request_(this->req_, n, group_index, allow_active);
+  if (result != SendResult::SENT) {
     this->req_len_ = 0;  // nothing on the wire, so nothing may be matched against these bytes
-    return SendResult::BUSY;
+    return result;
   }
   this->req_len_ = n;
   this->in_flight_group_ = group_index;
@@ -646,10 +691,13 @@ void UdsHub::report_group_error_(uint16_t group_index, const char *what, uint8_t
     this->report_error_(what, nrc);
     return;
   }
-  // Group first: the hub prefix in report_error_ says who was asking, this says for what.
-  char msg[96];
-  snprintf(msg, sizeof(msg), "group '%s': %s", g.name, what);
-  this->report_error_(msg, nrc);
+  // Delayed automations copy UdsError by value: keep its reason static, even across later errors.
+  if (nrc != 0) {
+    ESP_LOGW(TAG, "%s: group '%s': %s (NRC 0x%02X)", this->log_name_, g.name, what, nrc);
+  } else {
+    ESP_LOGW(TAG, "%s: group '%s': %s", this->log_name_, g.name, what);
+  }
+  this->error_callback_.call(UdsError{what, nrc});
 }
 
 void UdsHub::copy_bounded(char *dst, size_t cap, const char *src) {
@@ -663,20 +711,20 @@ void UdsHub::copy_bounded(char *dst, size_t cap, const char *src) {
 // Actions
 // -------------------------------------------------------------------------------------------
 
-bool UdsHub::enqueue_(uint16_t group_index) {
+bool UdsHub::enqueue_(uint16_t group_index, bool allow_active) {
   if (this->ondemand_count_ >= UDS_ONDEMAND_QUEUE) {
     ESP_LOGW(TAG, "%s: on-demand queue full (%u); request dropped", this->log_name_, UDS_ONDEMAND_QUEUE);
     return false;
   }
   const uint8_t tail = static_cast<uint8_t>((this->ondemand_head_ + this->ondemand_count_) % UDS_ONDEMAND_QUEUE);
   this->ondemand_[tail] = group_index;
+  this->ondemand_active_[tail] = allow_active;
   this->ondemand_count_++;
   return true;
 }
 
 bool UdsHub::request_read(const char *group_name) {
-  if (!this->catalog_.is_open()) {
-    ESP_LOGW(TAG, "%s: uds.read ignored: catalog unavailable", this->log_name_);
+  if (!this->check_ready_()) {
     return false;
   }
   uint16_t gi = 0;
@@ -695,12 +743,10 @@ bool UdsHub::request_read(const char *group_name) {
 }
 
 bool UdsHub::request_execute(const char *group_name) {
+  if (!this->check_ready_())
+    return false;
   if (!this->allow_active_services_) {
     ESP_LOGW(TAG, "%s: uds.execute refused: this hub sets allow_active_services: false", this->log_name_);
-    return false;
-  }
-  if (!this->catalog_.is_open()) {
-    ESP_LOGW(TAG, "%s: uds.execute ignored: catalog unavailable", this->log_name_);
     return false;
   }
   uint16_t gi = 0;
@@ -708,10 +754,12 @@ bool UdsHub::request_execute(const char *group_name) {
     ESP_LOGW(TAG, "%s: uds.execute: group '%s' is not in this catalog", this->log_name_, group_name);
     return false;
   }
-  return this->enqueue_(gi);
+  return this->enqueue_(gi, true);
 }
 
 bool UdsHub::send_raw(const uint8_t *data, size_t len) {
+  if (!this->check_ready_())
+    return false;
   if (!this->allow_active_services_) {
     ESP_LOGW(TAG, "%s: uds.raw refused: this hub sets allow_active_services: false", this->log_name_);
     return false;
@@ -719,6 +767,11 @@ bool UdsHub::send_raw(const uint8_t *data, size_t len) {
   if (data == nullptr || len == 0 || len > UDS_MAX_REQUEST) {
     ESP_LOGW(TAG, "%s: uds.raw refused: %u bytes is outside 1..%u", this->log_name_, static_cast<unsigned>(len),
              static_cast<unsigned>(UDS_MAX_REQUEST));
+    return false;
+  }
+  if (len > this->isotp_->get_max_message_size()) {
+    this->status_set_warning();
+    this->report_error_("raw request exceeds isotp max_message_size; request refused, no transmission", 0);
     return false;
   }
   if (this->raw_pending_len_ != 0) {
@@ -743,7 +796,7 @@ void UdsHub::set_enabled(bool enabled) {
 
 void UdsHub::dump_config() {
   ESP_LOGCONFIG(TAG, "UDS client '%s':", this->log_name_);
-  if (!this->catalog_.is_open()) {
+  if (!this->catalog_ready()) {
     ESP_LOGE(TAG, "  Catalog UNAVAILABLE: %s",
              this->catalog_error_ != nullptr ? this->catalog_error_ : LOG_STR_LITERAL("unknown"));
     ESP_LOGE(TAG, "  This hub sends nothing and every entity stays unavailable.");
