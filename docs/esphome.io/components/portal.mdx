@@ -62,20 +62,23 @@ rejected origins receive 403 before any action is dispatched, even without a log
     - **glance** (*Optional*, string list): Up to four value references, `node.path/key`. Defaults to `[]`.
     - **nodes** (*Optional*, string list): Dotted node identifiers shown in the tab. Defaults to `[]`.
 - **tree** (**Required**, list): One or more nodes, with unique sibling segments. Nodes accept:
-  - **segment** (**Required**, string): Stable path segment matching `[a-z][a-z0-9_]*`.
+  - **segment** (**Required**, string): Stable path segment matching `[a-z][a-z0-9_]*`; top-level `car` is reserved.
   - **kind** (**Required**, string): Nonempty node classification.
   - **label** (**Required**, string): Nonempty display name.
-  - **budget_ms** (*Optional*, positive int or null): Freshness budget in milliseconds. Explicit null means unknown.
+  - **budget_ms** (*Optional*, positive int or null): Freshness budget, 1–4294967295 milliseconds. Explicit null means
+    unknown.
     If omitted, derives three times the slowest own value cadence, or null if any cadence is unknown/no values exist.
+    Derived budgets must also fit in 4294967295 milliseconds.
     A node containing a binary sensor cannot use a positive explicit budget.
   - **children** (*Optional*, list): One or more recursively configured nodes using this same schema.
   - **values** (*Optional*, list): One or more bindings to existing entities. Exactly one entity
     selector is required in each entry.
-    - **key** (**Required**, string): Stable local key matching `[a-z][a-z0-9_]*`.
+    - **key** (**Required**, string): Unique local value key matching `[a-z][a-z0-9_]*`.
     - **label** (**Required**, string): Nonempty display name.
     - **unit** (*Optional*, string): Unit display override.
     - **decimals** (*Optional*, int): Display precision, 0–6. Defaults to `0`.
-    - **cadence_ms** (*Optional*, positive int): Expected publishing cadence, in milliseconds. Forbidden for binary
+    - **cadence_ms** (*Optional*, positive int): Expected publishing cadence, 1–4294967295 milliseconds. Forbidden for
+      binary
       sensors because unchanged boolean publications produce no observable callback.
     - **expert** (*Optional*, boolean): Mark as an expert display value. Defaults to `false`.
     - **sensor** (*Optional*, [ID](/guides/configuration-types/#id)): Numeric sensor binding; mutually exclusive with
@@ -84,16 +87,20 @@ rejected origins receive 403 before any action is dispatched, even without a log
       entity selectors.
     - **binary_sensor** (*Optional*, [ID](/guides/configuration-types/#id)): Boolean binding; mutually exclusive with
       other entity selectors.
-    - **warn** (*Optional*, mapping): Numeric warning limits, for numeric sensors only; at least one bound required.
+    - **warn** (*Optional*, mapping): Numeric warning limits, for numeric sensors only; at least one finite float32
+      bound required.
+      Nonzero bounds must not underflow to zero; maximum magnitude is 3.4028234663852886e38.
       - **below** (*Optional*, float): Warn below this threshold.
       - **above** (*Optional*, float): Warn above this threshold.
-    - **bad** (*Optional*, mapping): Numeric fault limits, for numeric sensors only; at least one bound required.
+    - **bad** (*Optional*, mapping): Numeric fault limits, for numeric sensors only; the same float32 bounds apply.
       - **below** (*Optional*, float): Fault below this threshold.
       - **above** (*Optional*, float): Fault above this threshold.
     - **warn_when** (*Optional*, boolean): Warning state of a binary sensor.
     - **bad_when** (*Optional*, boolean): Fault state of a binary sensor. Text bindings accept no limits.
-  - **role** (*Optional*, string): Current role, matching `[a-z][a-z0-9_]*`; requires a nonempty available-role list.
-  - **roles_available** (*Optional*, string list): Available role names, including the selected role.
+  - **role** (*Optional*, string): Current role, at most 39 bytes, matching `[a-z][a-z0-9_]*`; requires a nonempty
+    available-role list.
+  - **roles_available** (*Optional*, string list): Available role names, each at most 39 bytes, including the selected
+    role.
   - **absent** (*Optional*, string): Reason code. Without a predicate, marks a statically absent node and excludes
     values, children, role, unknown rule, series and controls. With a predicate, excludes only role and unknown rule.
   - **absent_when** (*Optional*, mapping): Registered absence predicate. The bundled `switch_off` provider defaults
@@ -111,7 +118,8 @@ rejected origins receive 403 before any action is dispatched, even without a log
     - **key** (**Required**, string): Stable local series key.
     - **label** (**Required**, string): Nonempty display name.
     - **unit** (*Optional*, string): Display unit.
-    - **index_base** (**Required**, int): Nonnegative first displayed index.
+    - **index_base** (**Required**, int): First displayed index, 0–2147483647. Derived pack offsets must also fit this
+      range.
     - **index_frame** (**Required**, string or null): Named index coordinate frame, or explicitly unknown.
     - **count** (**Required**, int): Number of elements, 1–64.
     - **decimals** (*Optional*, int): Precision, 0–6. Defaults to `0`.
@@ -129,7 +137,9 @@ rejected origins receive 403 before any action is dispatched, even without a log
     - **switch** (*Optional*, [ID](/guides/configuration-types/#id)): Switch control; exactly one of the four control
       selectors is required.
     - **button** (*Optional*, [ID](/guides/configuration-types/#id)): Button control.
-    - **select** (*Optional*, [ID](/guides/configuration-types/#id)): Select control.
+    - **select** (*Optional*, [ID](/guides/configuration-types/#id)): Select control; options must fit in 63 UTF-8 bytes
+      and contain no NUL.
+      Invalid runtime-only options disable the action with a warning.
     - **number** (*Optional*, [ID](/guides/configuration-types/#id)): Number control.
     - **decimals** (*Optional*, int): Number control precision, 0–6; defaults to `2`, forbidden on other controls.
     - **confirm** (*Optional*, enum): Additional hold gesture; omitted by default.

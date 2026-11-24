@@ -66,14 +66,18 @@ GLUE_BINS := $(GLUE_SRCS:test_glue_%.cpp=$(BUILD)/glue_%)
 SRCS     := main.cpp $(filter-out $(GLUE_SRCS),$(sort $(wildcard test_*.cpp)))
 LINBUS_DIR := ../../components/linbus
 LINBUS_OBJS := $(BUILD)/lin_communication.o $(BUILD)/lin_protocol_handler.o
+LINBUS_RUNTIME_OBJS := $(BUILD)/linbus.o $(BUILD)/lin_serial.o
 CORE_OBJS := $(SRCS:%.cpp=$(BUILD)/%.o)
-OBJS     := $(CORE_OBJS) $(GLUE_OBJS) $(LINBUS_OBJS)
+OBJS     := $(CORE_OBJS) $(GLUE_OBJS) $(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS)
 DEPS     := $(OBJS:.o=.d)
 BINS     := $(BIN) $(GLUE_BINS)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
             -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
+
+# Exercise the filter-enabled decoder branch with protected entity filter storage.
+$(BUILD)/test_glue_gateway_decode.o: CXXFLAGS += -DUSE_SENSOR_FILTER -DUSE_BINARY_SENSOR_FILTER -DUSE_TEXT_SENSOR_FILTER
 
 # Execute the real UdsHub glue against a controlled ESPHome/transport boundary.
 $(BUILD)/test_glue_uds_hub.o: CXXFLAGS += -Iuds_stubs -DUSE_SENSOR -DUSE_TEXT_SENSOR
@@ -106,7 +110,7 @@ compile: lockcheck gluecheck $(BINS)
 # headers, whose fakes can be inline rather than under a *_stubs directory.
 gluecheck: $(CORE_OBJS)
 	@awk '\
-	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|gateway_[^ /]*[.]inc|sd_logger_[^ /]*[.]inc)" { \
+	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|portal_runtime[.]h|gateway_[^ /]*[.]inc|sd_logger_[^ /]*[.]inc)" { \
 	    printf "%s:%d: %s\n", FILENAME, FNR, $$0; bad = 1; \
 	  } \
 	  END { exit bad ? 1 : 0 }' $(CORE_OBJS:.o=.d) || { \
@@ -157,17 +161,23 @@ $(GLUE_BINS): $(BUILD)/glue_%: $(BUILD)/main.o $(BUILD)/test_glue_%.o Makefile
 	@$(CXX) $(filter %.o,$^) $(LDFLAGS) -o $@
 
 $(BUILD)/glue_linbus_self_test: $(LINBUS_OBJS)
+$(BUILD)/glue_linbus_runtime: $(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS)
 
 # Compile the production LIN tables/sender against host RTOS/UART adapters.
-$(BUILD)/test_glue_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
+$(BUILD)/test_glue_linbus_runtime.o $(BUILD)/test_glue_linbus_self_test.o $(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
 
-$(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
+$(LINBUS_OBJS) $(LINBUS_RUNTIME_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/%.o: %.cpp | $(GEN) $(RUNTIME_GEN)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/test_glue_portal.o: $(BUILD)/portal_runtime.h
+
+$(BUILD)/portal_runtime.h: generate_portal_runtime.py $(PORTAL_DIR)/portal.h $(PORTAL_DIR)/portal.cpp | $(BUILD)
+	@python3 generate_portal_runtime.py
 
 $(BUILD)/test_glue_transport_runtime.o: $(BUILD)/transport_runtime.h
 
@@ -196,7 +206,7 @@ $(GEN): $(CORE_DIR)/can_gateway.h | $(BUILD)
 	@grep -q 'void set_byte' $@ || { \
 	  echo "ERROR: extracted RulePatch is missing set_byte; see $<." >&2; rm -f $@; exit 1; }
 
-$(BUILD)/test_glue_gateway_rx.o $(BUILD)/test_glue_gateway_switch.o $(BUILD)/test_glue_gateway_frame_data.o: $(RUNTIME_GEN)
+$(BUILD)/test_glue_gateway_decode.o $(BUILD)/test_glue_gateway_port.o $(BUILD)/test_glue_gateway_rx.o $(BUILD)/test_glue_gateway_switch.o $(BUILD)/test_glue_gateway_frame_data.o: $(RUNTIME_GEN)
 
 $(RUNTIME_GEN): extract_gateway_runtime.py $(CORE_DIR)/can_gateway.h $(CORE_DIR)/can_gateway.cpp | $(BUILD)
 	@echo "  GEN   gateway runtime (repository code only)"

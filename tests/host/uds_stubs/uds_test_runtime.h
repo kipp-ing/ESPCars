@@ -33,7 +33,18 @@ class Component {
   virtual void dump_config() {}
   virtual float get_setup_priority() const { return setup_priority::DATA; }
   void mark_failed(const char *) { failed = true; }
-  void status_set_warning() { warning = true; }
+  void status_set_warning() {
+    if (!warning)
+      warning_sets++;
+    warning = true;
+  }
+  void status_clear_warning() {
+    if (warning)
+      warning_clears++;
+    warning = false;
+  }
+  unsigned warning_sets{0};
+  unsigned warning_clears{0};
   bool is_failed() const { return failed; }
   bool failed{false};
   bool warning{false};
@@ -86,12 +97,18 @@ class IsoTpConsumer {
  public:
   virtual void on_message(const MessageView &) = 0;
   virtual void on_error(IsoTpError) = 0;
+  virtual void on_sent() {}
 };
 class IsoTpProtocol {
  public:
   void set_consumer(IsoTpConsumer *c) { consumer = c; }
   uint16_t get_max_message_size() const { return capacity; }
-  bool receiving() const { return false; }
+  bool receiving() const { return rx_busy; }
+  void complete_send() {
+    busy = false;
+    if (consumer != nullptr)
+      consumer->on_sent();
+  }
   bool send(const uint8_t *data, uint16_t size) {
     attempts++;
     if (busy || size > capacity)
@@ -101,6 +118,7 @@ class IsoTpProtocol {
   }
   uint16_t capacity{512};
   bool busy{false};
+  bool rx_busy{false};
   unsigned attempts{0};
   IsoTpConsumer *consumer{nullptr};
   std::vector<std::vector<uint8_t>> sent;

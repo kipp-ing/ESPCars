@@ -15,12 +15,16 @@ from esphome.components.esp32.const import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BAUD_RATE,
+    CONF_HARDWARE_UART,
     CONF_ID,
     CONF_INVERTED,
+    CONF_LOGGER,
     CONF_MODE,
     CONF_NUMBER,
     CONF_TRIGGER_ID,
 )
+
+CONF_UART = "uart"
 
 DOMAIN = "linbus"
 DEPENDENCIES = ["esp32"]
@@ -211,6 +215,41 @@ def _validate_mode_config(config):
     return config
 
 
+def _validate_uart_pin(schema):
+    def validator(value):
+        if isinstance(value, dict) and any(
+            key in value for key in pins.PIN_SCHEMA_REGISTRY if key != "esp32"
+        ):
+            raise cv.Invalid(
+                "LIN TX/RX require internal ESP32 GPIO pins; expanders are not supported"
+            )
+        value = schema(value)
+        if value[CONF_INVERTED]:
+            raise cv.Invalid("LIN TX/RX pins do not support inverted: true")
+        return value
+
+    return validator
+
+
+def _validate_lengths(config):
+    lengths = {}
+    for key in (CONF_SCHEDULE, CONF_RX_IDS, CONF_ON_FRAME):
+        for item in config.get(key, []):
+            if CONF_LENGTH not in item:
+                continue
+            lin_id, length = item[CONF_LIN_ID], item[CONF_LENGTH]
+            if lin_id in lengths and lengths[lin_id] != length:
+                raise cv.Invalid(f"conflicting length hints for LIN ID {lin_id}")
+            lengths[lin_id] = length
+    for response in config.get(CONF_RESPONSES, []):
+        lin_id, data = response[CONF_LIN_ID], response[CONF_DATA]
+        if data and lin_id in lengths and len(data) != lengths[lin_id]:
+            raise cv.Invalid(
+                f"response length for LIN ID {lin_id} conflicts with explicit length hint"
+            )
+    return config
+
+
 # Main configuration schema
 CONFIG_SCHEMA = cv.All(
     cv.only_on_esp32,
@@ -218,8 +257,12 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(LinBusComponent),
-            cv.Required(CONF_TX_PIN): pins.gpio_output_pin_schema,
-            cv.Required(CONF_RX_PIN): pins.gpio_input_pin_schema,
+            cv.Required(CONF_TX_PIN): _validate_uart_pin(
+                pins.internal_gpio_output_pin_schema
+            ),
+            cv.Required(CONF_RX_PIN): _validate_uart_pin(
+                pins.internal_gpio_input_pin_schema
+            ),
             cv.Optional(CONF_CS_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_BAUD_RATE, default=19200): cv.int_range(
                 min=1000, max=20000
@@ -258,6 +301,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_mode_config,
+    _validate_lengths,
 )
 
 
@@ -316,7 +360,38 @@ def _final_validate(config):
     conflicting pair is reported from whichever side the user reads first; the
     message always names the other instance.
     """
-    instances = fv.full_config.get().get(DOMAIN) or []
+    full_config = fv.full_config.get()
+    logger = full_config.get(CONF_LOGGER) or {}
+    hardware_uart = logger.get(CONF_HARDWARE_UART, "UART0")
+    logger_port = None
+    if (
+        logger
+        and logger.get(CONF_BAUD_RATE, 115200) > 0
+        and hardware_uart in ("UART0", "UART1", "UART2")
+    ):
+        logger_port = int(hardware_uart[-1])
+    port = int(config[CONF_UART_PORT][-1])
+    if port == logger_port:
+        raise cv.Invalid(
+            f"uart_port {config[CONF_UART_PORT]} is already used by logger hardware_uart: {hardware_uart}",
+            path=[CONF_UART_PORT],
+        )
+
+    # Stock IDFUARTComponent::setup() allocates sequential ports, skipping an
+    # active hardware logger. Pins do not select the port on ESP-IDF. Mirror
+    # that allocator (ESPHome 2026.11) rather than guessing from GPIO numbers.
+    next_port = 0
+    for uart in full_config.get(CONF_UART, []):
+        if next_port == logger_port:
+            next_port += 1
+        if next_port == port:
+            raise cv.Invalid(
+                f"uart_port {config[CONF_UART_PORT]} is allocated to uart '{uart[CONF_ID]}'; each bus needs its own UART",
+                path=[CONF_UART_PORT],
+            )
+        next_port += 1
+
+    instances = full_config.get(DOMAIN) or []
     if not isinstance(instances, list):
         instances = [instances]
 

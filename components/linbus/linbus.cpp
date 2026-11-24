@@ -1,6 +1,7 @@
 #include "linbus.h"
 #include "esphome/core/log.h"
 #include "esphome/core/gpio.h"
+#include "esphome/core/application.h"
 
 #include <cinttypes>
 
@@ -33,15 +34,16 @@ void LinBusComponent::setup() {
   // Create LINCommunication instance
   int tx_pin = get_pin_no(this->tx_pin_);
   int rx_pin = get_pin_no(this->rx_pin_);
-  int cs_pin = get_pin_no(this->cs_pin_);
 
-  this->lin_comm_ = new LINCommunication(this->uart_port_, tx_pin, rx_pin, cs_pin);
+  this->lin_comm_ = new LINCommunication(this->uart_port_, tx_pin, rx_pin);
 
   // Initialize LIN communication
-  esp_err_t err = this->lin_comm_->init(this->mode_, this->baud_rate_);
+  esp_err_t err = this->lin_comm_->init(this->mode_, this->baud_rate_, false);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize LIN communication: %d", err);
-    this->mark_failed();
+    delete this->lin_comm_;
+    this->lin_comm_ = nullptr;
+    this->mark_failed(LOG_STR("LIN communication initialization failed"));
     return;
   }
 
@@ -55,9 +57,9 @@ void LinBusComponent::setup() {
   for (const auto &resp : this->pending_responses_) {
     this->lin_comm_->set_response_data(resp.id, const_cast<uint8_t *>(resp.data.data()), resp.data.size(),
                                        resp.enhanced);
-    // A published response defines this ID's frame length and checksum mode, so register it as
-    // an RX hint too — the echo of our own frame then finalizes deterministically (A3/N5).
-    this->lin_comm_->configure_rx_hint(resp.id, static_cast<uint8_t>(resp.data.size()), resp.enhanced ? 1 : 0);
+    // Keep the initial checksum preference (including self-test fallback
+    // accounting) as before. Only the length is derived from mutable payloads.
+    this->lin_comm_->configure_rx_hint(resp.id, 0, resp.enhanced ? 1 : 0);
   }
   this->pending_responses_.clear();
 
@@ -72,6 +74,12 @@ void LinBusComponent::setup() {
     this->lin_comm_->enable_self_test(true);
   }
 
+  if (this->lin_comm_->start() != ESP_OK) {
+    delete this->lin_comm_;
+    this->lin_comm_ = nullptr;
+    this->mark_failed(LOG_STR("LIN UART task creation failed"));
+    return;
+  }
   ESP_LOGCONFIG(TAG, "LIN Bus setup complete");
 }
 
@@ -83,6 +91,13 @@ void LinBusComponent::loop() {
   this->lin_comm_->lin_process();
   if (this->lin_comm_->self_test_incomplete())
     this->status_set_warning(LOG_STR("LIN self-test incomplete; test traffic refused"));
+
+  const auto send_failures = this->lin_comm_->get_statistics().commander_send_failures_total;
+  if (send_failures != this->last_warned_send_failures_) {
+    this->last_warned_send_failures_ = send_failures;
+    ESP_LOGW(TAG, "LIN UART transmission failed");
+    this->status_set_warning(LOG_STR("LIN UART transmission failed"));
+  }
 
   // Fire on_error for each newly-counted fault (loop runs ~16 ms, so a deliberately induced
   // error lights up within a frame or two). Skipped entirely when no on_error is configured.
@@ -109,7 +124,7 @@ void LinBusComponent::loop() {
   }
 
   // Update sensors and log statistics every 10 seconds
-  uint32_t now = esphome::millis();
+  uint32_t now = App.get_loop_component_start_time();
   if (now - this->last_stats_log_ > 10000) {
     this->last_stats_log_ = now;
     const LinStatistics &stats = this->lin_comm_->get_statistics();
@@ -174,8 +189,13 @@ void LinBusComponent::loop() {
   }
 
   // Check for new frames and trigger automations
+  uint64_t dispatched_ids = 0;
   for (auto *trigger : this->frame_triggers_) {
     uint8_t lin_id = trigger->get_lin_id();
+    const uint64_t mask = uint64_t{1} << lin_id;
+    if ((dispatched_ids & mask) != 0)
+      continue;
+    dispatched_ids |= mask;
     LinDiscoveredId frame_data;
 
     // Get current frame data for this LIN ID
@@ -197,7 +217,10 @@ void LinBusComponent::loop() {
 
         // New frame received! Fire the trigger
         std::vector<uint8_t> data_vec(frame_data.data, frame_data.data + frame_data.dataLength);
-        trigger->trigger_frame(data_vec, frame_data.dataLength);
+        for (auto *matching : this->frame_triggers_) {
+          if (matching->get_lin_id() == lin_id)
+            matching->trigger_frame(data_vec, frame_data.dataLength);
+        }
 
         // Update last seen count
         this->last_update_counts_[lin_id] = frame_data.updateCount;
@@ -267,6 +290,7 @@ void LinBusComponent::update_response(uint8_t lin_id, const std::vector<uint8_t>
     ESP_LOGD(TAG, "Updated response for LIN ID 0x%02X with %zu bytes", lin_id, data.size());
   } else {
     ESP_LOGW(TAG, "Failed to update response for LIN ID 0x%02X", lin_id);
+    this->status_set_warning(LOG_STR("LIN response update refused"));
   }
 }
 

@@ -52,6 +52,7 @@ sd_logger:
   - **label** (*Optional*, string): Unique 1–8 character label from letters, digits, `_` or `-`.
     Defaults to `C1`, `C2`, and so on by position.
 - **sources** (*Optional*, list): Name generic action sources; tags and labels must be unique across both source lists.
+  At most 255 entries are supported across `sources` and `can_ports` together.
   - **tag** (**Required**, int): Source tag, 0–255; zero is the action's default tag.
   - **kind** (**Required**, enum): Record type.
     - `can`

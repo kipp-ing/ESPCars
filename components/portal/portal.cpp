@@ -1,5 +1,6 @@
 #include "portal.h"
 
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #include <cmath>
@@ -63,6 +64,8 @@ uint16_t Portal::add_node(const char *id, const char *kind, const char *label, u
   node.absent_ctx = absent_ctx;
   node.absent_evidence = absent_evidence;
   node.on_demand = on_demand;
+  // Until the first main-loop sample, a conditional absence fails closed.
+  this->absent_samples_[this->node_count_] = absent_why != nullptr;
   this->node_count_++;
   this->current_node_ = index;
   return index;
@@ -168,7 +171,7 @@ void Portal::setup() {
   this->mutex_ = xSemaphoreCreateMutex();
   if (this->mutex_ == nullptr) {
     ESP_LOGE(TAG, "mutex allocation failed");
-    this->mark_failed();
+    this->mark_failed(LOG_STR("Mutex allocation failed"));
     return;
   }
   this->seq_ = 1;
@@ -192,7 +195,20 @@ void Portal::setup() {
     auto &bind = this->action_bind_[i];
     if (bind.control != core::Control::SELECT || bind.select == nullptr)
       continue;
-    for (const char *option : bind.select->traits.get_options())
+    const auto &options = bind.select->traits.get_options();
+    bind.options_valid = true;
+    for (const char *option : options) {
+      if (option == nullptr || std::strlen(option) >= core::ACTION_TEXT_MAX) {
+        bind.options_valid = false;
+        break;
+      }
+    }
+    if (!bind.options_valid) {
+      ESP_LOGW(TAG, "Select action %s disabled: options must fit in 63 bytes", this->action_defs_[i].key);
+      this->status_set_warning();
+      continue;
+    }
+    for (const char *option : options)
       bind.options.push_back(option);
     this->action_defs_[i].options = bind.options.data();
     this->action_defs_[i].option_count = static_cast<uint16_t>(bind.options.size());
@@ -241,14 +257,17 @@ void Portal::sample_action_(size_t index, core::ActionSample *out) {
       break;
     case core::Control::SELECT:
 #ifdef USE_SELECT
-      if (bind.select != nullptr) {
+      if (bind.select != nullptr && bind.options_valid) {
         auto active = bind.select->active_index();
         if (active.has_value()) {
           const char *option = bind.select->option_at(*active);
-          if (option != nullptr) {
-            std::strncpy(out->text, option, core::ACTION_TEXT_MAX - 1);
-            out->text[core::ACTION_TEXT_MAX - 1] = '\0';
+          const size_t option_len = option != nullptr ? std::strlen(option) : 0;
+          if (option != nullptr && option_len < core::ACTION_TEXT_MAX) {
+            std::memcpy(out->text, option, option_len + 1);
             out->has_value = true;
+          } else if (option != nullptr) {
+            ESP_LOGW(TAG, "Select action %s disabled: state exceeds 63 bytes", this->action_defs_[index].key);
+            this->status_set_warning();
           }
         }
       }
@@ -279,7 +298,9 @@ void Portal::sample_action_(size_t index, core::ActionSample *out) {
 void Portal::sample_() {
   if (this->mutex_ == nullptr || xSemaphoreTake(this->mutex_, 0) != pdTRUE)
     return;
-  const uint32_t now = millis();
+  const uint32_t now = App.get_loop_component_start_time();
+  for (size_t i = 0; i < this->node_count_; i++)
+    this->absent_samples_[i] = core::node_is_absent(this->nodes_[i]);
   for (size_t i = 0; i < this->value_count_; i++) {
     const auto &def = this->value_defs_[i];
     core::ValueSample &sample = this->samples_[i];
@@ -346,6 +367,7 @@ void Portal::sample_() {
 void Portal::update_seq_locked_() {
   core::Snapshot view{};
   view.nodes = this->nodes_;
+  view.absent_samples = this->absent_samples_;
   view.node_count = this->node_count_;
   view.values = this->samples_;
   view.value_count = this->value_count_;
@@ -453,6 +475,8 @@ bool Portal::copy_snapshot_(core::Snapshot *out) {
     this->request_actions_[i].result.age_ms = now - this->action_rt_[i].result_ms;
   }
   const uint32_t seq = this->seq_;
+  const size_t link_count = this->link_count_;
+  std::memcpy(this->request_absent_, this->absent_samples_, sizeof(bool) * this->node_count_);
   xSemaphoreGive(this->mutex_);
 
   if (this->node_count_ == 0)
@@ -469,6 +493,7 @@ bool Portal::copy_snapshot_(core::Snapshot *out) {
   out->identity.components = this->components_;
   out->identity.components_count = this->components_count_;
   out->nodes = this->nodes_;
+  out->absent_samples = this->request_absent_;
   out->node_count = this->node_count_;
   out->values = this->request_values_;
   out->value_count = this->value_count_;
@@ -476,7 +501,7 @@ bool Portal::copy_snapshot_(core::Snapshot *out) {
   out->action_samples = this->request_actions_;
   out->action_count = this->action_count_;
   out->links = this->links_;
-  out->link_count = this->link_count_;
+  out->link_count = link_count;
   out->limits = this->limits_;
   out->limit_count = this->limit_count_;
   return true;
@@ -614,31 +639,31 @@ void Portal::serve_state_(httpd_req_t *req) {
   }
 
   const size_t query_length = httpd_req_get_url_query_len(req);
-  if (query_length >= 32) {
+  if (query_length >= sizeof(this->query_buf_)) {
     this->send_status_(req, "400 Bad Request");
     return;
   }
 
-  char path_buf[40]{};
+  this->path_buf_[0] = '\0';
   bool has_path_param = false;
   char after_buf[16]{};
   bool has_after_param = false;
   uint32_t after_value = 0;
 
   if (query_length != 0) {
-    char query[32]{};
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    if (httpd_req_get_url_query_str(req, this->query_buf_, sizeof(this->query_buf_)) != ESP_OK) {
       this->send_status_(req, "400 Bad Request");
       return;
     }
-    const esp_err_t path_status = httpd_query_key_value(query, "path", path_buf, sizeof(path_buf));
+    const esp_err_t path_status =
+        httpd_query_key_value(this->query_buf_, "path", this->path_buf_, sizeof(this->path_buf_));
     if (path_status != ESP_OK && path_status != ESP_ERR_NOT_FOUND) {
       this->send_status_(req, "400 Bad Request");
       return;
     }
     has_path_param = path_status == ESP_OK;
 
-    const esp_err_t after_status = httpd_query_key_value(query, "after", after_buf, sizeof(after_buf));
+    const esp_err_t after_status = httpd_query_key_value(this->query_buf_, "after", after_buf, sizeof(after_buf));
     if (after_status != ESP_OK && after_status != ESP_ERR_NOT_FOUND) {
       this->send_status_(req, "400 Bad Request");
       return;
@@ -653,7 +678,7 @@ void Portal::serve_state_(httpd_req_t *req) {
 
   // path present and unknown -> 404 BEFORE the after check: a 204 for a path this device does
   // not have would be a lie, and the page's poll falls back to the full tree on 404.
-  const char *path = has_path_param ? path_buf : nullptr;
+  const char *path = has_path_param ? this->path_buf_ : nullptr;
   if (path != nullptr && !core::has_node(snapshot, path)) {
     this->send_status_(req, "404 Not Found");
     return;
@@ -740,10 +765,10 @@ void Portal::serve_action_(AsyncWebServerRequest *request, const core::RouteMatc
   const core::ActionSample &sample = this->action_samples_[found];
   const bool busy = rt.pending;
   core::ActionOutcome outcome =
-      is_form
-          ? core::evaluate_action_text(def, sample, busy, form_has_value, form_text.c_str(), request->contentLength())
-          : core::evaluate_action_json(def, sample, busy, this->body_req_ == request ? this->body_buf_ : "",
-                                       this->body_req_ == request ? this->body_total_ : request->contentLength());
+      is_form ? core::evaluate_action_text(def, sample, busy, form_has_value, form_text.c_str(),
+                                           request->contentLength(), form_text.size())
+              : core::evaluate_action_json(def, sample, busy, this->body_req_ == request ? this->body_buf_ : "",
+                                           this->body_req_ == request ? this->body_total_ : request->contentLength());
 
   if (outcome.verdict == core::Verdict::BUSY) {
     xSemaphoreGive(this->mutex_);
@@ -751,6 +776,10 @@ void Portal::serve_action_(AsyncWebServerRequest *request, const core::RouteMatc
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, R"({"error":"busy"})", HTTPD_RESP_USE_STRLEN);
     return;
+  }
+
+  if (outcome.verdict == core::Verdict::REFUSE && outcome.code == core::ActionCode::INVALID_BODY) {
+    ESP_LOGW(TAG, "Action %s refused: invalid body; no action dispatched", def.key);
   }
 
   rt.result.state = outcome.verdict == core::Verdict::ACCEPT ? core::ActionState::RUNNING : core::ActionState::REFUSED;

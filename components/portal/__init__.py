@@ -19,8 +19,10 @@ flash only.
 import gzip
 import json
 import logging
+import math
 from pathlib import Path
 import re
+import struct
 
 import esphome.codegen as cg
 from esphome.components import (
@@ -39,6 +41,7 @@ import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
     CONF_KEY,
+    CONF_OPTIONS,
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
@@ -161,7 +164,44 @@ def _identifier(what):
 _segment = _identifier("segment")
 _value_key = _identifier("key")
 _why_code = _identifier("why code")
-_role_name = _identifier("role")
+
+
+def _role_name(value):
+    value = _identifier("role")(value)
+    if len(value.encode("utf-8")) > 39:
+        raise cv.Invalid("role must fit in 39 bytes")
+    return value
+
+
+UINT32_MAX = 2**32 - 1
+INT32_MAX = 2**31 - 1
+
+
+def _finite_float32(value):
+    value = cv.float_(value)
+    try:
+        narrowed = struct.unpack("f", struct.pack("f", value))[0]
+    except (OverflowError, struct.error):
+        narrowed = math.inf
+    if (
+        not math.isfinite(narrowed)
+        or abs(value) > 3.4028234663852886e38
+        or (value != 0 and narrowed == 0)
+    ):
+        raise cv.Invalid(
+            "limit must be finite and fit float32 (maximum magnitude 3.4028234663852886e38; "
+            "nonzero values must not round to zero)"
+        )
+    return value
+
+
+def _select_option(value):
+    if "\0" in value:
+        raise cv.Invalid("select option must not contain NUL")
+    if len(value.encode("utf-8")) >= 64:
+        raise cv.Invalid("select option must fit in 63 bytes (UTF-8)")
+    return value
+
 
 # These why-codes derive their meaning from evidence (counters, response codes) that a
 # config-declared why cannot carry, so they are unrepresentable in `unknown_when.why`, and in
@@ -340,7 +380,7 @@ def _budget_ms(value):
     """
     if value is None or value in ("none", "None"):
         return None
-    return cv.int_range(min=1)(value)
+    return cv.int_range(min=1, max=UINT32_MAX)(value)
 
 
 def _component_level_budget_removed(value):
@@ -365,7 +405,10 @@ def _unique_segments(nodes):
 def _limit_bound(value):
     """`{below: x, above: y}`, at least one (spec 4.3)."""
     value = cv.Schema(
-        {cv.Optional(CONF_BELOW): cv.float_, cv.Optional(CONF_ABOVE): cv.float_}
+        {
+            cv.Optional(CONF_BELOW): _finite_float32,
+            cv.Optional(CONF_ABOVE): _finite_float32,
+        }
     )(value)
     if not value:
         raise cv.Invalid("a limit needs at least one of 'below' or 'above'")
@@ -378,7 +421,7 @@ VALUE_SCHEMA = cv.Schema(
         cv.Required(CONF_LABEL): _nonempty_string,
         cv.Optional(CONF_UNIT): cv.string_strict,
         cv.Optional(CONF_DECIMALS, default=0): cv.int_range(min=0, max=6),
-        cv.Optional(CONF_CADENCE_MS): cv.int_range(min=1),
+        cv.Optional(CONF_CADENCE_MS): cv.int_range(min=1, max=UINT32_MAX),
         cv.Optional(CONF_EXPERT, default=False): cv.boolean,
         cv.Optional(CONF_WARN): _limit_bound,
         cv.Optional(CONF_BAD): _limit_bound,
@@ -500,7 +543,7 @@ SERIES_SCHEMA = cv.All(
             cv.Required(CONF_KEY): _value_key,
             cv.Required(CONF_LABEL): _nonempty_string,
             cv.Optional(CONF_UNIT): cv.string_strict,
-            cv.Required(CONF_INDEX_BASE): cv.int_range(min=0),
+            cv.Required(CONF_INDEX_BASE): cv.int_range(min=0, max=INT32_MAX),
             cv.Required(CONF_INDEX_FRAME): _index_frame,
             cv.Required(CONF_COUNT): cv.int_range(min=1, max=64),
             cv.Optional(CONF_DECIMALS, default=0): cv.int_range(min=0, max=6),
@@ -645,7 +688,14 @@ def _validate_node_cross_fields(value):
                 f"role {value[CONF_ROLE]!r} is not in roles_available {roles_available!r}"
             )
 
-    own_keys = {v[CONF_KEY] for v in value.get(CONF_VALUES, [])}
+    own_keys = set()
+    for entry in value.get(CONF_VALUES, []):
+        key = entry[CONF_KEY]
+        if key in own_keys:
+            raise cv.Invalid(
+                f"duplicate value key {key!r} on node {value[CONF_SEGMENT]!r}"
+            )
+        own_keys.add(key)
     text_keys = {
         v[CONF_KEY] for v in value.get(CONF_VALUES, []) if CONF_TEXT_SENSOR in v
     }
@@ -716,7 +766,7 @@ def _apply_derived_budget(value):
         return value
     cadences = [v.get(CONF_CADENCE_MS) for v in values]
     value[CONF_BUDGET_MS] = (
-        None if any(c is None for c in cadences) else 3 * max(cadences)
+        None if any(c is None for c in cadences) else _budget_ms(3 * max(cadences))
     )
     return value
 
@@ -855,9 +905,14 @@ def _resolve_submodule_positions(config):
                 "submodule_position; the frame is never recovered from kind, key, label or unit."
             )
         if index_frame == SUBMODULE_CELL_FRAME:
-            series[CONF_RESOLVED_PACK_INDEX_BASE] = (position - 1) * config[
-                CONF_SUBMODULE_SIZE
-            ] + series[CONF_INDEX_BASE]
+            base = (position - 1) * config[CONF_SUBMODULE_SIZE] + series[
+                CONF_INDEX_BASE
+            ]
+            if base > INT32_MAX:
+                raise cv.Invalid(
+                    f"node {node_id!r}: derived pack_index_base must be at most {INT32_MAX}"
+                )
+            series[CONF_RESOLVED_PACK_INDEX_BASE] = base
         else:
             series[CONF_RESOLVED_PACK_INDEX_BASE] = None
 
@@ -1028,6 +1083,12 @@ def _check_before_against_entities(config, full):
 def _check_tree(config):
     """Rules that need the whole tree. Run at schema time (also reachable without the loader) and
     again in the final validation; both are idempotent."""
+    nodes = list(_iter_tree(config[CONF_TREE], ""))
+    seen = {"car"}
+    for node_id, _ in nodes:
+        if node_id in seen:
+            raise cv.Invalid(f"node id {node_id!r} is reserved or duplicated")
+        seen.add(node_id)
     _validate_owns(config)
     _resolve_submodule_positions(config)
     _check_ui_refs(config)
@@ -1104,6 +1165,20 @@ def _final_validate(config):
         )
 
     _check_tree(config)
+    for node_id, node in _iter_tree(config[CONF_TREE], ""):
+        for action in node.get(CONF_ACTIONS, []):
+            if CONF_SELECT not in action:
+                continue
+            target = _entity_config(full, CONF_SELECT, action[CONF_SELECT])
+            if target is not None:
+                options = target.get(CONF_OPTIONS, [])
+                for option in options:
+                    try:
+                        _select_option(str(option))
+                    except cv.Invalid as err:
+                        raise cv.Invalid(
+                            f"select action {node_id}/{action[CONF_KEY]}: {err}"
+                        ) from err
     _check_before_against_entities(config, full)
     config[CONF_RESOLVED_COMPONENTS] = sorted(
         key for key in full if key not in _NON_COMPONENT_TOP_LEVEL_KEYS
@@ -1270,6 +1345,9 @@ async def to_code(config):
         max(sum(len(n.get(CONF_ACTIONS, [])) for _, n in nodes), 1),
     )
     cg.add_define("PORTAL_TEXT_MAX", config[CONF_TEXT_MAX])
+    cg.add_define(
+        "PORTAL_PATH_MAX", max(len("car"), *(len(path) for path, _ in nodes)) + 1
+    )
 
     auth = config.get(CONF_AUTH)
     if auth is None and any(CONF_ACTIONS in node for _, node in nodes):

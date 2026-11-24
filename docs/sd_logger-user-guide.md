@@ -397,6 +397,8 @@ compiles on every change.
 | `label` | required, same rule as above |
 
 Tags and labels must be unique across `can_ports` *and* `sources` together.
+The combined list is limited to 255 entries (the source table's 8-bit count),
+even though individual tags may use any value from 0 to 255.
 
 ### `recovery:` (card-failure retry ladder, on by default)
 
@@ -445,6 +447,13 @@ exists and the card just fills.
 | `GET /sdlog/f/<name>` | raw bytes, `Range` supported for resume; SEALED only, `409` for the still-open file |
 | `POST /sdlog/done/<name>` | the confirm — renames SEALED → CONFIRMED; idempotent |
 | `GET /sdlog/status` | counters, card fill, oldest-un-collected seq, discarded totals (not used by `script/sdlog_collect.py` itself — a manual/monitoring endpoint) |
+
+The diagnostic `/sdlog/spitrace?clear=1` clears the displayed trace window and
+drop count after serving it; command sequence numbers continue across clears
+(wrapping at 32 bits). Trace reads retry at most three times for a coherent
+slot; an unavailable row has a mismatching sequence so consumers can detect
+loss. Write-failure summaries inspect at most the 512 retained slots and
+count older or unavailable entries as missing. The CSV columns are unchanged.
 
 ### Action: `sd_logger.log`
 

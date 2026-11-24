@@ -207,3 +207,45 @@ def test_mini_manifest_matches_blob():
     assert size == len((FIXTURES / "mini.dcat").read_bytes())
     for key in ("ecu", "totals", "groups", "skipped_fields"):
         assert manifest[key] == checked_in[key]
+
+
+@pytest.mark.parametrize(
+    "line", (FIXTURES / "mini-64-vectors.csv").read_text().splitlines()
+)
+def test_mini_64_bit_spec_vectors(line):
+    name, flags, wire, expected = line.split(",")
+    flags = int(flags)
+    field = catalog.Field(name, 0, 64, signed=bool(flags & 1), byteswap=bool(flags & 2))
+    raw = catalog.extract(field, bytes.fromhex(wire))
+    assert raw == int(expected)
+    assert catalog.evaluate(field, raw) == (float(expected), None)
+
+
+def compile_mini_multi():
+    """Two fictional ECUs share canonical and alias names, with different requests."""
+    from dataclasses import replace
+
+    cat, _ = compile_mini()
+    first = cat.ecus[0]
+    group = first.groups[0]
+    second = replace(
+        first,
+        name="MINI_SECOND",
+        request_id=0x7E6,
+        response_id=0x7EE,
+        groups=(replace(group, request=bytes.fromhex("220901")),),
+    )
+    return catalog.Catalog(ecus=(first, second))
+
+
+def test_mini_multi_dcat_is_byte_identical():
+    assert (
+        catalog.write_catalog(compile_mini_multi())
+        == (FIXTURES / "mini-multi.dcat").read_bytes()
+    )
+
+
+def test_mini_unsigned_64_never_matches_negative_scale():
+    field = catalog.Field("mini", 0, 64, scales=(catalog.Scale(-1, -1, 1.0, 0.0),))
+    response = bytes.fromhex("FFFFFFFFFFFFFFFF")
+    assert catalog.evaluate(field, catalog.extract(field, response)) == (None, None)

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from esphome.components import text_sensor
 import esphome.config_validation as cv
+from esphome.const import CONF_UPDATE_INTERVAL
 
-from . import BINDING_SCHEMA, binding_final_validate, register_binding
+from . import BINDING_SCHEMA, binding_final_validate, polling_interval, register_binding
 
 DEPENDENCIES = ["uds"]
 
@@ -21,7 +22,9 @@ CONFIG_SCHEMA = (
     .extend(
         # A VIN or a serial number does not change, so `never` — read once through `uds.read` — is
         # the honest default for this platform, unlike the numeric one.
-        cv.Schema({cv.Optional("update_interval", default="never"): cv.update_interval})
+        cv.Schema(
+            {cv.Optional(CONF_UPDATE_INTERVAL, default="never"): polling_interval}
+        )
     )
 )
 

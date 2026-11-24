@@ -206,6 +206,121 @@ def test_max_file_size_too_small_rejected(set_core_config) -> None:
         validate(sd_logger(max_file_size="1KB"))
 
 
+@pytest.mark.parametrize("key", ["max_file_size", "confine_bytes"])
+@pytest.mark.parametrize(
+    "value",
+    ["infMB", "1e10000", ".inf", "NaN", "1e308MB", float("inf"), float("-inf")],
+)
+def test_size_nonfinite_is_invalid(set_core_config, key, value) -> None:
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="invalid size"):
+        validate(sd_logger(**{key: value}))
+
+
+@pytest.mark.parametrize("with_port", [False, True])
+def test_source_table_rejects_256_entries(set_core_config, with_port) -> None:
+    setup_c6(set_core_config)
+    sources = [
+        {"tag": tag, "kind": "user", "label": f"s{tag}"}
+        for tag in range(255 if with_port else 256)
+    ]
+    ports = {"can_ports": [{"port": "seg1", "source": 255}]} if with_port else {}
+    with pytest.raises(cv.Invalid, match="255"):
+        validate(sd_logger(sources=sources, **ports))
+
+
+@pytest.mark.parametrize("with_port", [False, True])
+def test_source_table_accepts_255_entries(set_core_config, with_port) -> None:
+    setup_c6(set_core_config)
+    sources = [
+        {"tag": tag, "kind": "user", "label": f"s{tag}"}
+        for tag in range(1 if with_port else 0, 255)
+    ]
+    ports = {"can_ports": [{"port": "seg1", "source": 255}]} if with_port else {}
+    config = validate(sd_logger(sources=sources, **ports))
+    assert len(config["sources"]) + len(config.get("can_ports", [])) == 255
+
+
+@pytest.mark.parametrize("kind", ["sources", "can_ports"])
+def test_label_trailing_newline_cannot_collide_after_sanitization(
+    set_core_config, kind
+) -> None:
+    setup_c6(set_core_config)
+    bad = {"label": "abc\n"}
+    bad.update({"tag": 5, "kind": "user"} if kind == "sources" else {"port": "seg1"})
+    config = sd_logger(sources=[{"tag": 6, "kind": "user", "label": "abc_"}])
+    config.setdefault(kind, []).append(bad)
+    with pytest.raises(cv.Invalid, match="label"):
+        validate(config)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "ALWAYS_ON",
+        "RESTORE_DEFAULT_OFF",
+        "RESTORE_DEFAULT_ON",
+        "RESTORE_INVERTED_DEFAULT_OFF",
+        "RESTORE_INVERTED_DEFAULT_ON",
+        "DISABLED",
+    ],
+)
+def test_freeze_switch_rejects_unimplemented_restore_modes(
+    set_core_config, mode
+) -> None:
+    from esphome.components.sd_logger.switch import CONFIG_SCHEMA
+
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="ALWAYS_OFF"):
+        CONFIG_SCHEMA(
+            {"name": "Freeze writer", "sd_logger_id": "card_log", "restore_mode": mode}
+        )
+
+
+@pytest.mark.parametrize("options", [{}, {"restore_mode": "ALWAYS_OFF"}])
+def test_freeze_switch_boots_off(set_core_config, options) -> None:
+    from esphome.components.sd_logger.switch import CONFIG_SCHEMA
+
+    setup_c6(set_core_config)
+    config = CONFIG_SCHEMA(
+        {"name": "Freeze writer", "sd_logger_id": "card_log", **options}
+    )
+    assert config["restore_mode"] == "ALWAYS_OFF"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"initial_state": True},
+        {"restore_state": "all"},
+        {"restore_state": {"state": "INVERT"}},
+        {"restore_state": "none", "initial_state": True},
+    ],
+)
+def test_freeze_switch_rejects_unimplemented_boot_state_aliases(
+    set_core_config, options
+) -> None:
+    from esphome.components.sd_logger.switch import CONFIG_SCHEMA
+
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="ALWAYS_OFF"):
+        CONFIG_SCHEMA({"name": "Freeze writer", "sd_logger_id": "card_log", **options})
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"initial_state": False}, {"restore_state": "none", "initial_state": False}],
+)
+def test_freeze_switch_accepts_boot_off_aliases(set_core_config, options) -> None:
+    from esphome.components.sd_logger.switch import CONFIG_SCHEMA
+
+    setup_c6(set_core_config)
+    config = CONFIG_SCHEMA(
+        {"name": "Freeze writer", "sd_logger_id": "card_log", **options}
+    )
+    assert config["initial_state"] is False
+
+
 # -------------------------------------------------------------------------- V29
 
 

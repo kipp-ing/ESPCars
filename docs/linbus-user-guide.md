@@ -46,7 +46,7 @@ UARTs it has.
 
 1. **A transceiver wired to `tx_pin`/`rx_pin`** on a free UART, plus
    `cs_pin` if the transceiver has an enable/sleep pin (a TJA1021, the
-   reference part, does) — `linbus` drives it high once at boot and leaves it
+   reference part, does) — `linbus` drives it logically high (honoring inversion) once at boot and leaves it
    there; there is no runtime sleep control.
 2. **Firmware YAML** — one `linbus:` block per physical segment, in the mode
    that segment actually needs. **The default mode is `commander`** — an
@@ -108,7 +108,8 @@ rediscovery behave correctly; an entry needs **at least one** of those two
 keys. `on_frame:` fires per update on `data` (a byte vector) and
 `data_length`; it takes the same optional `length`/`checksum` keys, and
 firing is driven by the frame's internal update counter changing — including
-resetting back down, so a rediscovered id after an LRU eviction still fires.
+resetting back down, so a rediscovered id after an LRU eviction still fires. Every handler for the
+same ID receives that update; coalescing is counted once per ID, rather than once per handler.
 Only checksum-valid frames ever reach this stage; there is no
 checksum-valid/invalid flag exposed to the automation because an invalid one
 never gets this far.
@@ -144,7 +145,11 @@ interval:
 
 `linbus.update_response` on an id that already has a `responses:` entry keeps
 that entry's checksum mode; called on an id with no prior entry it creates
-one and defaults to enhanced. There is no `linbus.send` — a `linbus`
+one and defaults to enhanced. Its derived RX length follows payload-size changes for subsequent
+headers, leaving an in-flight frame's boundary intact. An explicit `length` in `rx_ids`, `on_frame`
+or `schedule` must match: incompatible updates warn and retain the old publication. Empty data clears
+the response and its derived length, retaining explicit hints. TX/RX require internal, non-inverted
+ESP32 pins; CS continues to use the GPIO abstraction. There is no `linbus.send` — a `linbus`
 instance can only publish response data for an id it's declared, never fire
 an arbitrary one-off frame.
 
@@ -278,9 +283,9 @@ CAN, check the CAN side before assuming the LIN wiring is at fault.
 |---|---|
 | `id` | this instance's id — required explicitly whenever more than one exists |
 | `tx_pin` / `rx_pin` | the only required keys |
-| `cs_pin` | optional; transceiver enable/sleep, driven high once at `setup()` and left there |
+| `cs_pin` | optional; transceiver enable/sleep, driven logically high once at `setup()`; inversion and expanders supported |
 | `baud_rate` | default `19200`; `1000`–`20000` |
-| `uart_port` | default `UART_NUM_1`; one of `UART_NUM_0`/`UART_NUM_1`/`UART_NUM_2` — only HP UARTs physically available on the target are accepted; each instance needs its own, checked at config time |
+| `uart_port` | default `UART_NUM_1`; one of `UART_NUM_0`/`UART_NUM_1`/`UART_NUM_2` — only HP UARTs physically available on the target are accepted; each instance needs its own, checked against LIN instances, active hardware logger and stock UART allocations at config time; an installed driver fails setup before UART reconfiguration |
 | `mode` | default `commander`; `commander` / `responder` / `listener` |
 | `schedule` | list, max 16, unique `lin_id`; **commander only** |
 | `responses` | list, max 16, unique `lin_id`; **not valid with `mode: listener`** |
@@ -346,9 +351,14 @@ and generated code are identical. Specifying both keys is an error.
 | `framing_errors` | UART framing/parity/overflow errors |
 | `collisions` | a self-transmitted byte didn't echo back as sent — a competing publisher answered the same id |
 | `frames_coalesced` | `on_frame:` update-count jumps by more than one — the automation is missing intermediate frames |
-| `send_failures` | genuine commander TX errors |
-| `bus_load` | `%`, estimated from bytes-on-wire vs. `baud_rate` over the window (assumes 8N1) |
-| `error_rate` | `%`, `(send_failures + pid_errors + checksum_errors) / (commander_requests + id_answers)` |
+| `send_failures` | header or response TX errors; a failed response counts no answer and queues no echo expectation |
+| `bus_load` | `%`, observed headers (3 byte equivalents) plus finalized response bytes including checksum, counting local echo once (assumes 8N1) |
+| `error_rate` | `%`, `100 * faults / (frames_received + faults)`; faults = send failures, PID/checksum/framing errors and collisions; empty window = 0 |
+
+Bus load is an estimate, excluding break-length differences, gaps and discarded partial/noise bytes;
+without readback, local transmission is not observable. Error rate is a fault-event fraction in every
+role, including a listener: fallback, coalescing and normal breaks are excluded, and several faults
+may belong to one damaged transaction. Fault counters are retained across table-lock contention.
 
 ### `binary_sensor: platform: linbus`
 

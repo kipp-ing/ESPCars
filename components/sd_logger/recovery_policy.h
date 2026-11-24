@@ -107,6 +107,12 @@ class RecoveryPolicy {
     if (this->state_ != RecoveryState::WAITING)
       return;
     this->attempts_++;
+    // This budget belongs to the current attempt, including the final allowed one.
+    // The second attempt is the first reset and gets the configured budget unmultiplied.
+    if (this->attempts_ > 2) {
+      this->busy_timeout_ms_ = this->busy_timeout_ms_ >= this->max_busy_timeout_ms_ / 2 ? this->max_busy_timeout_ms_
+                                                                                        : this->busy_timeout_ms_ * 2;
+    }
     if (this->max_attempts_ != SD_LOG_RECOVERY_UNLIMITED && this->attempts_ >= this->max_attempts_) {
       this->state_ = RecoveryState::EXHAUSTED;
       return;
@@ -115,12 +121,6 @@ class RecoveryPolicy {
     // overflow the ladder for any max_delay above 2^31.
     this->delay_ms_ = this->delay_ms_ >= this->max_delay_ms_ / 2 ? this->max_delay_ms_ : this->delay_ms_ * 2;
     this->deadline_ms_ = now_ms + this->delay_ms_;
-    // The busy budget starts doubling only from the *third* attempt: the second is the first one
-    // that resets at all, and it gets the configured budget unmultiplied. Same overflow-safe clamp.
-    if (this->attempts_ > 2) {
-      this->busy_timeout_ms_ = this->busy_timeout_ms_ >= this->max_busy_timeout_ms_ / 2 ? this->max_busy_timeout_ms_
-                                                                                        : this->busy_timeout_ms_ * 2;
-    }
   }
 
   /// The card is back. Clears the ladder so the next failure, whenever it comes, gets the full
