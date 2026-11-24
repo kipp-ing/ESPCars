@@ -24,14 +24,10 @@ switch:
 
 - **sd_logger_id** (**Required**, [ID](/guides/configuration-types/#id)): Logger whose writer is frozen when the switch
   is on.
-- **restore_mode** (*Optional*, enum): Standard switch restoration policy.
+- **restore_mode** (*Optional*, enum): The writer always starts unfrozen at boot. Only `ALWAYS_OFF` is supported;
+  modes that restore a saved value or start on are rejected. Equivalent `initial_state: OFF` /
+  `restore_state: none` settings are accepted; other boot-state settings are rejected.
   - `ALWAYS_OFF` *(default)*
-  - `ALWAYS_ON`
-  - `RESTORE_DEFAULT_OFF`
-  - `RESTORE_DEFAULT_ON`
-  - `RESTORE_INVERTED_DEFAULT_OFF`
-  - `RESTORE_INVERTED_DEFAULT_ON`
-  - `DISABLED`
 - All other options from [Switch](/components/switch/).
 
 Freezing for longer than the RAM rings can absorb causes record loss; use this only for controlled diagnostics.
