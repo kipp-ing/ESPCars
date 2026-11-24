@@ -15,6 +15,11 @@ LinSerial::LinSerial(uart_port_t uart_num, int tx_pin, int rx_pin, int baud_rate
     : uart_num_(uart_num), tx_pin_(tx_pin), rx_pin_(rx_pin), baud_rate_(baud_rate) {}
 
 esp_err_t LinSerial::init() {
+  if (uart_is_driver_installed(this->uart_num_)) {
+    ESP_LOGE(TAG, "UART port %d already has a driver; refusing to reconfigure it", this->uart_num_);
+    return ESP_ERR_INVALID_STATE;
+  }
+
   uart_config_t uart_config = {.baud_rate = baud_rate_,
                                .data_bits = UART_DATA_8_BITS,
                                .parity = UART_PARITY_DISABLE,

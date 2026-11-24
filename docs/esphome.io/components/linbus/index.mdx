@@ -8,7 +8,8 @@ import APIRef from '@components/APIRef.astro';
 The `linbus` component supports ESP32 with ESP-IDF only. Tested targets are classic ESP32, ESP32-C3 and ESP32-C6.
 There is no independent ESP32-C5 exclusion; CAN Gateway rejects C5 if also configured.
 Each segment needs a distinct UART and distinct GPIO pins. This component manages its own UART rather than using
-[UART Bus](/components/uart/).
+[UART Bus](/components/uart/). Configuration rejects ports used by an active hardware logger or allocated
+to a stock UART component. An already installed driver also fails LIN setup before UART reconfiguration.
 
 ## Passive Observation
 
@@ -26,10 +27,13 @@ linbus:
 
 - **id** (*Optional*, [ID](/guides/configuration-types/#id)): Instance identifier; specify it explicitly with multiple
   segments.
-- **tx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Transceiver transmit pin.
-- **rx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Transceiver receive pin.
-- **cs_pin** (*Optional*, [Pin](/guides/configuration-types/#pin)): Transceiver enable pin, driven high once during
-  setup.
+- **tx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Internal ESP32 transceiver transmit pin;
+  inversion is unsupported.
+- **rx_pin** (**Required**, [Pin](/guides/configuration-types/#pin)): Internal ESP32 transceiver receive pin;
+  inversion is unsupported.
+- **cs_pin** (*Optional*, [Pin](/guides/configuration-types/#pin)): Transceiver enable pin, driven logically high
+  once during
+  setup; inversion and GPIO expanders are supported.
 - **baud_rate** (*Optional*, int): Bus speed, 1000–20000 bits/s. Defaults to `19200`.
 - **uart_port** (*Optional*, enum): Select a UART physically present on the target.
   - `UART_NUM_0`
@@ -66,7 +70,8 @@ linbus:
 
 ### `on_frame` Trigger
 
-Receives `data` (byte vector) and `data_length`. Read within the supplied length.
+Receives `data` (byte vector) and `data_length`. Read within the supplied length. All handlers for an ID
+receive the same latest frame update; frames arriving between main-loop deliveries are coalesced once per ID.
 
 ```yaml
 linbus:
@@ -112,6 +117,9 @@ linbus:
 
 Warning: publishing response bytes enables transmission on a responder or commander bus.
 An existing entry keeps its checksum mode; a new entry uses enhanced checksum. A listener remains passive.
+Changing payload size updates the derived receive length for subsequent headers. An explicit length in
+`rx_ids`, `on_frame`, or `schedule` must agree; an incompatible update is refused with a warning and
+keeps the old response. Empty data clears the response and its derived length; explicit hints remain.
 
 ```yaml
 then:
