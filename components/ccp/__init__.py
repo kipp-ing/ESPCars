@@ -60,6 +60,7 @@ CONF_EXPECT = "expect"
 CONF_FIELDS = "fields"
 CONF_LIST = "list"
 CONF_DTO_ID = "dto_id"
+CONF_DAQ_IDS = "daq_ids"
 CONF_EVENT = "event"
 CONF_PRESCALER = "prescaler"
 CONF_SAMPLES = "samples"
@@ -98,6 +99,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_CAN_GATEWAY_ID): cv.use_id(GatewayPort),
             cv.Optional(CONF_COMMAND_ID, default=0x700): _can_id,
             cv.Optional(CONF_RESPONSE_ID, default=0x701): _can_id,
+            cv.Optional(CONF_DAQ_IDS, default=[]): cv.All(
+                cv.ensure_list(_can_id), cv.Length(max=0x800)
+            ),
             cv.Optional(CONF_STATION_ADDRESS, default=0x0001): cv.hex_uint16_t,
             cv.Optional(CONF_BYTE_ORDER, default="little"): _byte_order,
             cv.Optional(
@@ -140,6 +144,10 @@ async def to_code(config):
         cg.add_define("USE_CCP_WRITE")
     cg.add(var.set_command_id(config[CONF_COMMAND_ID]))
     cg.add(var.set_response_id(config[CONF_RESPONSE_ID]))
+    # Gateway observation IDs freeze during setup; register in generated main first.
+    cg.add(var.register_receive_id(config[CONF_RESPONSE_ID]))
+    for dto_id in config[CONF_DAQ_IDS]:
+        cg.add(var.register_receive_id(dto_id))
     cg.add(var.set_station_address(config[CONF_STATION_ADDRESS]))
     cg.add(
         var.set_byte_order(
@@ -452,6 +460,9 @@ async def ccp_stop_daq(config, action_id, template_arg, args):
 )
 async def ccp_daq_read(config, action_id, template_arg, args):
     var = await _action(config, action_id, template_arg, CcpDaqReadAction)
+    if not cg.is_template(config[CONF_DTO_ID]):
+        parent = await cg.get_variable(config[CONF_ID])
+        cg.add(parent.register_receive_id(config[CONF_DTO_ID]))
     for field in config[CONF_FIELDS]:
         cg.add(var.add_field(field[CONF_SIZE], field[CONF_EXT], field[CONF_ADDRESS]))
     cg.add(var.set_list(await cg.templatable(config[CONF_LIST], args, cg.uint8)))

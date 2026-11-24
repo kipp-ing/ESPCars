@@ -75,6 +75,7 @@ class IsoTpProtocol : public Component, public can_gateway::CanGatewayFrameConsu
     this->cfg_.address_extension_len = 1;
     this->cfg_.target_address = target_address;
   }
+  void set_receive_address(uint8_t address) { this->cfg_.receive_address = address; }
   void set_n_bs_timeout(uint32_t ms) { this->cfg_.n_bs_timeout_ms = ms; }
   void set_n_cr_timeout(uint32_t ms) { this->cfg_.n_cr_timeout_ms = ms; }
   void set_tx_stall_timeout(uint32_t ms) { this->cfg_.tx_stall_timeout_ms = ms; }

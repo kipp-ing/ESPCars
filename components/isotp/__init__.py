@@ -34,6 +34,7 @@ CONF_RX_ID = "rx_id"
 CONF_SOURCE = "source"
 CONF_TARGET = "target"
 CONF_TARGET_ADDRESS = "target_address"
+CONF_SOURCE_ADDRESS = "source_address"
 CONF_MAX_MESSAGE_SIZE = "max_message_size"
 CONF_BLOCK_SIZE = "block_size"
 CONF_ST_MIN = "st_min"
@@ -129,16 +130,17 @@ def _validate_addressing(config):
                     path=[key],
                 )
 
-    if mode == ADDRESSING_EXTENDED and CONF_TARGET_ADDRESS not in config:
-        raise cv.Invalid(
-            f"'{CONF_TARGET_ADDRESS}' is required with addressing '{mode}'",
-            path=[CONF_TARGET_ADDRESS],
-        )
-    if mode != ADDRESSING_EXTENDED and CONF_TARGET_ADDRESS in config:
-        raise cv.Invalid(
-            f"'{CONF_TARGET_ADDRESS}' is only used with addressing '{ADDRESSING_EXTENDED}'",
-            path=[CONF_TARGET_ADDRESS],
-        )
+    for key in (CONF_TARGET_ADDRESS, CONF_SOURCE_ADDRESS):
+        if mode == ADDRESSING_EXTENDED and key not in config:
+            raise cv.Invalid(
+                f"'{key}' is required with addressing '{mode}'",
+                path=[key],
+            )
+        if mode != ADDRESSING_EXTENDED and key in config:
+            raise cv.Invalid(
+                f"'{key}' is only used with addressing '{ADDRESSING_EXTENDED}'",
+                path=[key],
+            )
 
     # V1: an instance that talks to itself would reassemble its own requests.
     if config[CONF_TX_ID] == config[CONF_RX_ID]:
@@ -164,6 +166,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SOURCE): cv.hex_uint8_t,
             cv.Optional(CONF_TARGET): cv.hex_uint8_t,
             cv.Optional(CONF_TARGET_ADDRESS): cv.hex_uint8_t,
+            cv.Optional(CONF_SOURCE_ADDRESS): cv.hex_uint8_t,
             cv.Optional(CONF_MAX_MESSAGE_SIZE, default=256): cv.int_range(
                 min=MIN_MESSAGE_SIZE, max=MAX_MESSAGE_SIZE_LIMIT
             ),
@@ -261,6 +264,7 @@ async def to_code(config):
         cg.add(var.set_padding(padding))
     if (target_address := config.get(CONF_TARGET_ADDRESS)) is not None:
         cg.add(var.set_address_extension(target_address))
+        cg.add(var.set_receive_address(config[CONF_SOURCE_ADDRESS]))
 
     # Registration must land before App.setup(), which is where can_gateway freezes the
     # subscriber registry. Codegen statements run in main.cpp ahead of setup(), so this is safe.

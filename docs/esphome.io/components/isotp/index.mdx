@@ -38,7 +38,9 @@ The identifiers here are fictional. Configure the referenced port separately as 
   `normal_fixed` forces it to `true`.
 - **source** (*Optional*, int): Local address byte; required only for `normal_fixed`.
 - **target** (*Optional*, int): Peer address byte; required only for `normal_fixed`.
-- **target_address** (*Optional*, int): Address-extension byte; required only for `extended`.
+- **target_address** (*Optional*, int): Peer destination byte on outgoing frames; required only for `extended`.
+- **source_address** (*Optional*, int): Local destination byte on received frames; required only for `extended`.
+  Frames with another address are ignored for SF, FF, CF and FC, without granting flow control or changing a transfer.
 - **max_message_size** (*Optional*, int): Reassembly buffer, 8–4095 bytes. Defaults to `256`.
 - **block_size** (*Optional*, int): Consecutive frames granted per flow-control block, 1–255. Defaults to `8`.
   The port's observation queue must hold at least this many frames plus four.
@@ -81,6 +83,8 @@ isotp:
 ### `on_error` Trigger
 
 Receives the `IsoTpError` enum as `x`.
+An oversized incoming message reports `OVERFLOW_LOCAL` once and increments `transfers_failed`,
+while still attempting overflow flow control.
 
 ```yaml
 isotp:

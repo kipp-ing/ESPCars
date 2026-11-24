@@ -80,8 +80,9 @@ struct IsoTpConfig {
   uint16_t max_message_size{256};
   uint8_t address_extension_len{0};
   uint8_t target_address{0};
-  uint8_t block_size{8};  ///< frames per block we grant as receiver; never 0 (see below)
-  uint8_t st_min_raw{0};  ///< STmin we request, in the raw ISO encoding
+  uint8_t receive_address{0};  ///< local destination byte accepted on received frames
+  uint8_t block_size{8};       ///< frames per block we grant as receiver; never 0 (see below)
+  uint8_t st_min_raw{0};       ///< STmin we request, in the raw ISO encoding
   uint8_t padding_byte{0xCC};
   bool padding_enabled{false};
   uint32_t n_bs_timeout_ms{1000};
@@ -205,6 +206,9 @@ inline PciInfo decode_pci(const IsoTpConfig &cfg, const uint8_t *data, uint8_t d
   PciInfo info;
   const uint8_t pci = cfg.address_extension_len;
   if (dlc < static_cast<uint8_t>(pci + 1))
+    return info;
+  // Applies to SF/FF/CF and FC alike, before either state machine can act.
+  if (pci != 0 && data[0] != cfg.receive_address)
     return info;
   const uint8_t first = data[pci];
   switch (first >> 4) {
@@ -476,10 +480,11 @@ class TxTransfer {
 // -------------------------------------------------------------------------------------------
 
 enum class RxAction : uint8_t {
-  NOTHING,            ///< nothing to do, or the frame was ignored
-  SEND_FLOW_CONTROL,  ///< `out` holds a flow control frame to transmit
-  MESSAGE_COMPLETE,   ///< a full message is available via data()/size()
-  FAILED,             ///< see error()
+  NOTHING,                   ///< nothing to do, or the frame was ignored
+  SEND_FLOW_CONTROL,         ///< `out` holds a flow control frame to transmit
+  SEND_FLOW_CONTROL_FAILED,  ///< `out` holds overflow flow control; also report error()
+  MESSAGE_COMPLETE,          ///< a full message is available via data()/size()
+  FAILED,                    ///< see error()
 };
 
 /// Reassembles one incoming message into a caller-supplied buffer.
@@ -513,6 +518,7 @@ class RxTransfer {
         std::memcpy(this->buffer_, &data[info.payload_offset], info.payload_len);
         this->size_ = info.payload_len;
         this->state_ = State::IDLE;
+        this->error_ = IsoTpError::NONE;
         return RxAction::MESSAGE_COMPLETE;
 
       case PciType::FIRST: {
@@ -523,13 +529,14 @@ class RxTransfer {
           encode_flow_control(cfg, FlowStatus::BUFFER_OVERFLOW, 0, 0, out);
           this->state_ = State::IDLE;
           this->error_ = IsoTpError::OVERFLOW_LOCAL;
-          return RxAction::SEND_FLOW_CONTROL;
+          return RxAction::SEND_FLOW_CONTROL_FAILED;
         }
         std::memcpy(this->buffer_, &data[info.payload_offset], info.payload_len);
         this->size_ = info.payload_len;
         this->expected_ = info.length;
         this->sequence_ = 0;
         this->state_ = State::RECEIVING;
+        this->error_ = IsoTpError::NONE;
         this->block_remaining_ = cfg.block_size;
         this->timer_start_ = now_ms;
         encode_flow_control(cfg, FlowStatus::CONTINUE, cfg.block_size, cfg.st_min_raw, out);

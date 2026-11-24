@@ -40,3 +40,14 @@ def test_codegen_names_each_instance(set_core_config) -> None:
     generated = _generate(bms, charger)
     assert 'bms_isotp->set_log_name("bms_isotp");' in generated
     assert 'charger_isotp->set_log_name("charger_isotp");' in generated
+
+
+def test_codegen_configures_distinct_extended_receive_address(set_core_config) -> None:
+    setup_c6(set_core_config)
+    config = validate(
+        isotp(addressing="extended", target_address=0x13, source_address=0xF1)
+    )
+    CORE.register_variable(config["port_id"], cg.MockObj(PORT_ID, "->"))
+    generated = _generate(config)
+    assert "set_address_extension(0x13);" in generated
+    assert "set_receive_address(0xF1);" in generated
