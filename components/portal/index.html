@@ -569,14 +569,31 @@ function send(path, value, cb) {
       function () { cb({s:"refused", t:"HTTP " + r.status}); });
   }, function () { cb({s:"refused", t:L.net}); });
 }
-function waitDone(ref, cb, k) {
-  fetch("/api/v1/state").then(function (r) { return r.json(); }).then(function (b) {
-    take(b);
-    var a = C.findAction(b.tree, ref), r = a && a.result;
-    if (r && r.state !== "running") return cb(r);
-    if (k > 15) return cb(null);
-    setTimeout(function () { waitDone(ref, cb, k + 1); }, 200);
-  }, function () { cb(null); });
+function waitDone(ref, cb) {
+  var finished = false, timer = setTimeout(function () { done(L.transport_timeout); }, 4000);
+  function done(error) {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    cb(error);
+  }
+  function check() {
+    if (finished) return;
+    fetch("/api/v1/state").then(function (r) {
+      if (!r.ok) return Promise.reject("HTTP " + r.status);
+      return r.json();
+    }).then(function (b) {
+      if (finished) return;
+      var a = b && C.findAction(b.tree, ref), r = a && a.result;
+      if (!r) return done(L.entity_unavailable);
+      take(b);
+      if (r.state === "accepted") return done(null);
+      if (r.state === "refused") return done(wtxt(r.why) || L.refused);
+      if (r.state !== "running") return done(L.unknown);
+      setTimeout(check, 200);
+    }, function (error) { done(typeof error === "string" ? error : L.net); });
+  }
+  check();
 }
 function presets(list, k, cb) {
   if (k >= list.length) return cb(null);
@@ -584,10 +601,10 @@ function presets(list, k, cb) {
   if (!a || !a.path) return cb(p.action);
   send(a.path, p.value, function (r) {
     if (r.s === "refused") return cb(a.label + " (" + r.t + ")");
-    waitDone(p.action, function (res) {
-      if (res && res.state === "refused") return cb(a.label + " (" + wtxt(res.why) + ")");
+    waitDone(p.action, function (error) {
+      if (error) return cb(a.label + " (" + error + ")");
       presets(list, k + 1, cb);
-    }, 0);
+    });
   });
 }
 function doAction(a, value) {
