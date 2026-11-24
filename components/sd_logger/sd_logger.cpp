@@ -163,19 +163,13 @@ static StaticTask_t tap_drain_tcb;                          // NOLINT
 static StackType_t tap_drain_stack[TAP_DRAIN_STACK_WORDS];  // NOLINT
 #endif
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
-// `confirm <seq>` intents waiting for the writer to do the rename (design §8). Four is generous:
+// `confirm <seq, mount_generation>` intents waiting for the writer to do the rename (design §8). Four is generous:
 // the collector is strictly sequential — one request in flight, ever — so a second entry already
 // means the writer has not run for a whole confirm round trip, and the writer runs every 20 ms.
 // A full queue answers 503, which the client retries; it is not a backlog anyone is draining.
 static const uint8_t SD_LOGGER_CONFIRM_QUEUE_DEPTH = 4;
-// How long unmount_card_() waits for an in-flight chunk transfer to let go of its read fd before
-// pulling the filesystem out from under it. See the note there for why this is bounded and why it
-// gives up rather than blocking logging indefinitely.
-//
-// Derived from the server's own send timeout rather than picked: a handler stalled on a socket write
-// is released by `SO_SNDTIMEO`, so a drain bound *shorter* than that expires on every slow peer by
-// construction — which is what the previous 500 ms did against a 2 s send timeout, four times over.
-// The half second on top covers the card read that follows the send returning.
+// Diagnostic deadline for reader release, derived from the socket send timeout plus card slack.
+// Cancellation asks readers to leave; exceeding this deadline warns but never frees their card.
 static const uint32_t UNMOUNT_DRAIN_MS = SD_LOG_SEND_WAIT_S * 1000 + 500;
 #endif
 
@@ -242,9 +236,11 @@ bool mounted_volume_bounds(sdmmc_card_t *card, uint32_t *first_lba_out, uint32_t
   uint32_t sector_bytes = 0;
   uint32_t cluster_bytes = 0;
   if (!fat_bpb_cluster_bytes(boot, &sector_bytes, &cluster_bytes)) {
+    uint8_t partitions[FAT_PARTITION_COUNT * FAT_PARTITION_ENTRY_BYTES];
+    std::memcpy(partitions, boot + FAT_PARTITION_TABLE_OFFSET, sizeof(partitions));
     bool found = false;
     for (size_t i = 0; i < FAT_PARTITION_COUNT; i++) {
-      const uint8_t *entry = boot + FAT_PARTITION_TABLE_OFFSET + i * FAT_PARTITION_ENTRY_BYTES;
+      const uint8_t *entry = partitions + i * FAT_PARTITION_ENTRY_BYTES;
       const uint32_t candidate = read_le32(entry + 8);
       if (entry[4] == 0 || candidate == 0 || candidate >= card->csd.capacity)
         continue;
@@ -289,9 +285,11 @@ void log_fat_geometry(sdmmc_card_t *card) {
   if (!fat_bpb_cluster_bytes(boot, &sector_bytes, &cluster_bytes)) {
     // The mounted volume has a partition table in LBA 0. Inspect every primary entry because
     // FatFs's automatic partition search is not restricted to the first slot.
+    uint8_t partitions[FAT_PARTITION_COUNT * FAT_PARTITION_ENTRY_BYTES];
+    std::memcpy(partitions, boot + FAT_PARTITION_TABLE_OFFSET, sizeof(partitions));
     bool found = false;
     for (size_t i = 0; i < FAT_PARTITION_COUNT; i++) {
-      const uint8_t *entry = boot + FAT_PARTITION_TABLE_OFFSET + i * FAT_PARTITION_ENTRY_BYTES;
+      const uint8_t *entry = partitions + i * FAT_PARTITION_ENTRY_BYTES;
       if (entry[4] == 0)
         continue;
       const uint32_t candidate_lba = read_le32(entry + 8);
@@ -386,8 +384,10 @@ bool load_raw_fat32_geometry(sdmmc_card_t *card, RawFat32Geometry *geometry, cha
     return false;
   if (parse_raw_fat32_bpb(boot, 0, geometry, error, error_size))
     return true;
+  uint8_t partitions[FAT_PARTITION_COUNT * FAT_PARTITION_ENTRY_BYTES];
+  std::memcpy(partitions, boot + FAT_PARTITION_TABLE_OFFSET, sizeof(partitions));
   for (size_t i = 0; i < FAT_PARTITION_COUNT; i++) {
-    const uint8_t *entry = boot + FAT_PARTITION_TABLE_OFFSET + i * FAT_PARTITION_ENTRY_BYTES;
+    const uint8_t *entry = partitions + i * FAT_PARTITION_ENTRY_BYTES;
     const uint32_t volume_lba = read_le32(entry + 8);
     if (entry[4] == 0 || volume_lba == 0 || volume_lba >= card->csd.capacity)
       continue;
@@ -508,7 +508,7 @@ void SdLogger::setup() {
   // Both objects are static-sized FreeRTOS primitives; failing to get one is not fatal to logging,
   // so it costs the server rather than the run.
   this->index_mux_ = xSemaphoreCreateMutex();
-  this->confirm_q_ = xQueueCreate(SD_LOGGER_CONFIRM_QUEUE_DEPTH, sizeof(uint32_t));
+  this->confirm_q_ = xQueueCreate(SD_LOGGER_CONFIRM_QUEUE_DEPTH, sizeof(ConfirmIntent));
   if (this->index_mux_ == nullptr || this->confirm_q_ == nullptr) {
     ESP_LOGE(TAG, "collection: index mutex/queue alloc failed — no server this run");
   }
@@ -591,12 +591,26 @@ void SdLogger::setup() {
   // Writer task: below LIN (18) and the TWAI ISR so bus timing always wins,
   // above the esphome main loop (1) so draining is steady (spec D5). Started even with no card,
   // because it is also what drives recovery.
-  if (xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", SD_WRITER_STACK_BYTES, this, 6,
-                              &this->writer_task_, tskNO_AFFINITY) != pdPASS) {
+  this->publish_runtime_status_();
+  this->writer_task_.store(nullptr, std::memory_order_relaxed);
+  this->writer_stopped_.store(false, std::memory_order_release);
+  TaskHandle_t writer_task = nullptr;
+  if (xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", SD_WRITER_STACK_BYTES, this, 6, &writer_task,
+                              tskNO_AFFINITY) != pdPASS) {
     this->writer_task_ = nullptr;
     ESP_LOGE(TAG, "writer task could not be created (%" PRIu32 " B stack) — logging is off for this run",
              static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
+    this->mounted_ = false;
+    this->unmount_card_();
+    this->writer_stopped_.store(true, std::memory_order_release);
+    this->mark_failed(LOG_STR("SD writer task creation failed"));
+    return;
   }
+  portENTER_CRITICAL(&this->writer_mux_);
+  // A higher-priority task may already have completed before xTaskCreate returns.
+  if (!this->writer_stopped_.load(std::memory_order_acquire))
+    this->writer_task_.store(writer_task, std::memory_order_relaxed);
+  portEXIT_CRITICAL(&this->writer_mux_);
 
 #ifdef USE_SD_LOGGER_CAN_TAP
   // Tap drain: one step above the writer, so a writer stuck inside a card call (sdspi busy-polls a
@@ -617,6 +631,7 @@ void SdLogger::setup() {
     const adc_channel_t channel = static_cast<adc_channel_t>(this->vcc_adc_gpio_);
     esp_err_t err = adc_oneshot_new_unit(&init_cfg, &this->adc_handle_);
     if (err != ESP_OK) {
+      this->vcc_monitor_unavailable_ = true;
       ESP_LOGW(TAG, "ADC init failed (%s) — VCC emergency-close disabled", esp_err_to_name(err));
     } else {
       adc_oneshot_chan_cfg_t chan_cfg = {};
@@ -626,12 +641,18 @@ void SdLogger::setup() {
       // whatever the unit defaults to — so the monitor would trip on a number that means nothing.
       err = adc_oneshot_config_channel(this->adc_handle_, channel, &chan_cfg);
       if (err != ESP_OK) {
+        this->vcc_monitor_unavailable_ = true;
         ESP_LOGW(TAG, "ADC channel %d config failed (%s) — VCC emergency-close disabled", this->vcc_adc_gpio_,
                  esp_err_to_name(err));
       } else {
         this->init_vcc_calibration_(channel);
-        xTaskCreatePinnedToCore(&SdLogger::monitor_trampoline, "sdlog_vcc", 3072, this, 17, &this->monitor_task_,
-                                tskNO_AFFINITY);
+        if (xTaskCreatePinnedToCore(&SdLogger::monitor_trampoline, "sdlog_vcc", 3072, this, 17, &this->monitor_task_,
+                                    tskNO_AFFINITY) != pdPASS) {
+          this->monitor_task_ = nullptr;
+          this->vcc_monitor_unavailable_ = true;
+          this->status_set_warning();
+          ESP_LOGE(TAG, "VCC monitor task creation failed — emergency-close protection unavailable");
+        }
       }
     }
   }
@@ -672,7 +693,8 @@ void SdLogger::setup() {
       this->collection_serve_ && this->index_mux_ != nullptr && this->confirm_q_ != nullptr;
 #endif
 
-  ESP_LOGCONFIG(TAG, "SD logger up: mount=%s file seq=%" PRIu32, this->mount_point_.c_str(), this->seq_);
+  ESP_LOGCONFIG(TAG, "SD logger up: mount=%s file seq=%" PRIu32, this->mount_point_.c_str(),
+                this->seq_.load(std::memory_order_relaxed));
 }
 
 void SdLogger::init_vcc_calibration_(adc_channel_t channel) {
@@ -903,20 +925,23 @@ void SdLogger::unmount_card_() {
   {
     IndexLock lock(this->index_mux_);
     this->serving_open_ = false;
+    this->transfers_cancelled_.store(true, std::memory_order_release);
+    // A confirmation is valid only for this mount. Drop it before another card can be scanned.
+    if (this->confirm_q_ != nullptr)
+      xQueueReset(this->confirm_q_);
     this->collection_.clear();
   }
-  // Bounded, and it proceeds anyway when the bound expires: the handler is either inside a card
-  // read that is about to fail (fast) or inside a socket send (bounded by the server's
-  // send_wait_timeout, which is what UNMOUNT_DRAIN_MS is derived from), and a recovery that waited
-  // indefinitely for a stalled socket would stop logging to protect a transfer. Logging wins — that
-  // is the same rule §6 states about the SPI bus. What the bound risks is now only the *one*
-  // transfer that was already inside a read when the gate closed, never a fresh one.
-  for (uint16_t waited = 0; this->transfers_in_flight_.load(std::memory_order_acquire) != 0; waited++) {
-    if (waited >= UNMOUNT_DRAIN_MS / 10) {
-      ESP_LOGW(TAG, "unmount: a chunk transfer is still in flight after %u ms — tearing down anyway",
+  // Cancellation bounds progressing downloads, but an in-flight card call or socket send can
+  // outlive that budget. The deadline is diagnostic: the VFS/card must stay alive until every
+  // reader has released its fd/grant. A timeout cannot authorize freeing a reader's context.
+  uint32_t waited = 0;
+  while (this->transfers_in_flight_.load(std::memory_order_acquire) != 0) {
+    if (waited == UNMOUNT_DRAIN_MS / 10) {
+      ESP_LOGW(TAG, "unmount: transfer still active after %u ms — waiting for reader release",
                static_cast<unsigned>(UNMOUNT_DRAIN_MS));
-      break;
     }
+    if (waited <= UNMOUNT_DRAIN_MS / 10)
+      waited++;
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 #endif
@@ -1120,6 +1145,8 @@ bool SdLogger::mount_card_(bool allow_format) {
   // servable until the scan says so; what this restores is the *permission*, not the content.
   {
     IndexLock lock(this->index_mux_);
+    this->mount_generation_++;
+    this->transfers_cancelled_.store(false, std::memory_order_release);
     this->serving_open_ = true;
   }
 #endif
@@ -1137,9 +1164,11 @@ bool SdLogger::run_capacity_self_test_(uint64_t *volume_bytes_out) {
   }
   const uint32_t target_lba = first_lba + sector_count - 1;
   uint8_t primer_a[SD_LOGGER_CARD_SECTOR_BYTES];
-  uint8_t target_first[SD_LOGGER_CARD_SECTOR_BYTES];
+  // Zeroed so a failed read never leaves the copies below reading indeterminate bytes; the
+  // verdict ignores the buffers whenever reads_ok is false.
+  uint8_t target_first[SD_LOGGER_CARD_SECTOR_BYTES] = {};
   uint8_t primer_b[SD_LOGGER_CARD_SECTOR_BYTES];
-  uint8_t target_second[SD_LOGGER_CARD_SECTOR_BYTES];
+  uint8_t target_second[SD_LOGGER_CARD_SECTOR_BYTES] = {};
   char error[96] = "";
   // Reuse the just-primed destination for each high-LBA command. A counterfeit
   // read that returns ESP_OK without touching its destination then becomes an
@@ -1168,7 +1197,7 @@ bool SdLogger::run_capacity_self_test_(uint64_t *volume_bytes_out) {
 }
 
 const char *SdLogger::capacity_status() const {
-  switch (this->capacity_state_) {
+  switch (this->capacity_state_.load(std::memory_order_relaxed)) {
     case CapacityState::VOLUME_TOO_BIG:
       return "volume_too_big";
     case CapacityState::SELF_TEST_FAILED:
@@ -1179,16 +1208,22 @@ const char *SdLogger::capacity_status() const {
   }
 }
 
+void SdLogger::publish_runtime_status_() {
+  this->recovery_enabled_pub_.store(this->recovery_.enabled(), std::memory_order_relaxed);
+  this->recovery_busy_timeout_pub_.store(this->recovery_.busy_timeout_ms(), std::memory_order_relaxed);
+  this->recovery_attempts_pub_.store(this->recovery_.attempts(), std::memory_order_relaxed);
+  this->recovery_delay_pub_.store(this->recovery_.delay_ms(), std::memory_order_relaxed);
+  const char *state = this->write_recovery_stopped_ ? "stopped_no_bus_traffic"
+                      : this->recovery_.armed()     ? "retrying"
+                      : this->recovery_.exhausted() ? "exhausted"
+                      : this->recovery_.enabled()   ? "idle"
+                                                    : "off";
+  this->recovery_state_pub_.store(state, std::memory_order_release);
+}
+
 const char *SdLogger::get_recovery_state() const {
-  if (this->mounted_)
-    return "mounted";
-  if (this->write_recovery_stopped_)
-    return "stopped_no_bus_traffic";
-  if (this->recovery_.armed())
-    return "retrying";
-  if (this->recovery_.exhausted())
-    return "exhausted";
-  return this->recovery_.enabled() ? "idle" : "off";
+  return this->mounted_.load(std::memory_order_acquire) ? "mounted"
+                                                        : this->recovery_state_pub_.load(std::memory_order_acquire);
 }
 
 void SdLogger::confine_format(const std::string &confirmation) {
@@ -1230,11 +1265,11 @@ void SdLogger::confine_format(const std::string &confirmation) {
   // action pulls the VFS/card stack down; no asynchronous delete can safely
   // interrupt a FatFs call.
   this->confine_format_stop_requested_.store(true, std::memory_order_release);
-  if (this->writer_task_ != nullptr)
-    xTaskNotifyGive(this->writer_task_);
-  for (uint32_t waited = 0; this->writer_task_ != nullptr && waited < CONFINE_FORMAT_WRITER_STOP_MS / 10; waited++)
+  this->notify_writer_();
+  for (uint32_t waited = 0;
+       !this->writer_stopped_.load(std::memory_order_acquire) && waited < CONFINE_FORMAT_WRITER_STOP_MS / 10; waited++)
     vTaskDelay(pdMS_TO_TICKS(10));
-  if (this->writer_task_ != nullptr) {
+  if (!this->writer_stopped_.load(std::memory_order_acquire)) {
     ESP_LOGE(TAG, "confine format stopped: writer did not exit cleanly");
     this->confine_format_stop_requested_.store(false, std::memory_order_release);
     this->confine_format_in_progress_.store(false, std::memory_order_release);
@@ -1438,12 +1473,27 @@ void SdLogger::confine_format(const std::string &confirmation) {
   this->last_sync_ms_ = millis();
   this->mounted_ = true;
   this->confine_format_stop_requested_.store(false, std::memory_order_release);
-  if (xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", SD_WRITER_STACK_BYTES, this, 6,
-                              &this->writer_task_, tskNO_AFFINITY) != pdPASS) {
+  this->publish_runtime_status_();
+  this->writer_task_.store(nullptr, std::memory_order_relaxed);
+  this->writer_stopped_.store(false, std::memory_order_release);
+  TaskHandle_t writer_task = nullptr;
+  if (xTaskCreatePinnedToCore(&SdLogger::writer_trampoline, "sdlog_wr", SD_WRITER_STACK_BYTES, this, 6, &writer_task,
+                              tskNO_AFFINITY) != pdPASS) {
     this->writer_task_ = nullptr;
     ESP_LOGE(TAG, "writer task could not be created (%" PRIu32 " B stack) — logging is off for this run",
              static_cast<uint32_t>(SD_WRITER_STACK_BYTES));
+    this->mounted_ = false;
+    this->unmount_card_();
+    this->writer_stopped_.store(true, std::memory_order_release);
+    this->status_set_warning();
+    this->confine_format_in_progress_.store(false, std::memory_order_release);
+    return;
   }
+  portENTER_CRITICAL(&this->writer_mux_);
+  // A higher-priority task may already have completed before xTaskCreate returns.
+  if (!this->writer_stopped_.load(std::memory_order_acquire))
+    this->writer_task_.store(writer_task, std::memory_order_relaxed);
+  portEXIT_CRITICAL(&this->writer_mux_);
   ESP_LOGI(TAG, "confine format complete: %" PRIu64 " B volume; self-test passed", total);
   this->confine_format_in_progress_.store(false, std::memory_order_release);
 
@@ -1575,7 +1625,7 @@ bool SdLogger::open_next_file_() {
     this->reclaim_index_pressure_slot_();
 #endif
   char name[SD_LOG_NAME_LEN];
-  format_log_name(name, this->seq_);
+  format_log_name(name, this->seq_.load(std::memory_order_relaxed));
   const std::string path = this->mount_point_ + "/" + name;
   // O_APPEND, not truncate: the scan says this sequence is free, but if it is
   // ever wrong the right failure is a file that grows, not one that is erased.
@@ -1606,13 +1656,13 @@ bool SdLogger::open_next_file_() {
   uint16_t held;
   {
     IndexLock lock(this->index_mux_);
-    tracked = this->collection_.add(this->seq_, this->file_bytes_, ChunkState::OPEN);
+    tracked = this->collection_.add(this->seq_.load(std::memory_order_relaxed), this->file_bytes_, ChunkState::OPEN);
     held = this->collection_.count();
   }
 #ifdef USE_SD_LOGGER_COLLECTION
   if (!tracked && held >= SD_LOG_MAX_CHUNKS && this->reclaim_index_pressure_slot_()) {
     IndexLock lock(this->index_mux_);
-    tracked = this->collection_.add(this->seq_, this->file_bytes_, ChunkState::OPEN);
+    tracked = this->collection_.add(this->seq_.load(std::memory_order_relaxed), this->file_bytes_, ChunkState::OPEN);
     held = this->collection_.count();
   }
 #endif
@@ -1626,7 +1676,7 @@ bool SdLogger::open_next_file_() {
     ESP_LOGW(TAG,
              "chunk index full (%u of %u entries): L%07" PRIu32 " is untracked, so retention cannot reclaim it "
              "(raise collection.max_chunks or collect sooner; %" PRIu32 " refused so far)",
-             held, static_cast<unsigned>(SD_LOG_MAX_CHUNKS), this->seq_,
+             held, static_cast<unsigned>(SD_LOG_MAX_CHUNKS), this->seq_.load(std::memory_order_relaxed),
              this->index_refused_.load(std::memory_order_relaxed));
   }
   this->file_opened_us_ = static_cast<uint64_t>(esp_timer_get_time());
@@ -1651,8 +1701,10 @@ void SdLogger::write_file_header_() {
   // unflushed block and closes the file, and the next file to open comes through here.
   this->stamps_.reset();
 
-  if (this->ensure_room_(SD_LOG_MAX_LINE))
-    this->commit_line_(format_header(this->block_.cursor(), this->block_.room(), this->seq_, now, ESPHOME_VERSION));
+  if (this->ensure_room_(SD_LOG_MAX_LINE)) {
+    this->commit_line_(format_header(this->block_.cursor(), this->block_.room(),
+                                     this->seq_.load(std::memory_order_relaxed), now, ESPHOME_VERSION));
+  }
 
   // Which device, which build, when (spec F1j) — unconditionally, and right under `#sdlog` so it
   // also sits inside the collector's 256-byte head window. The date is the same statement the
@@ -1725,9 +1777,9 @@ void SdLogger::write_file_header_() {
   if (this->ensure_room_(2 * SD_LOG_SECTOR))
     this->commit_line_(format_pad(this->block_.cursor(), this->block_.room(), this->file_bytes_));
 
-  // Reset only baselines whose producers cannot move while there is no file. A marker baseline
-  // that resets during an outage makes a live non-zero counter absent from the first recovered
-  // file, which turns the only evidence of the loss into a console-only fact.
+  // Never spend loss baselines in a header. Producers can move between the last marker pass
+  // and rotation (including text), or while a file is unavailable; the next marker owes those
+  // deltas. A header reset would erase the only in-band evidence.
   //
   // `marked_card_dropped_` is deliberately NOT reset, and that is the whole point of it. It only
   // ever moves while there is no file to write into, so whatever it has accumulated by the time a
@@ -1742,7 +1794,7 @@ void SdLogger::write_file_header_() {
   // ring, write and tap baselines deliberately survive outages like card: any movement since the
   // last writable file must be stated by the next one. On an ordinary rotation they have not
   // moved, so retaining them emits nothing.
-  this->marked_text_dropped_ = this->text_dropped_.load(std::memory_order_relaxed);
+  // Text losses, like ring/card losses, are spent only by an emitted marker.
 }
 
 void SdLogger::capture_ident_() {
@@ -1820,8 +1872,7 @@ void SdLogger::set_utc_anchor(uint64_t utc_us, uint64_t boot_us_at_sync) {
     ESP_LOGW(TAG, "clock: sync lands %" PRIu64 " s before the card floor (%s) — accepted; is the clock source wrong?",
              (clock_project(floor, boot_us_at_sync) - utc_us) / 1000000ULL, clock_src_str(floor.src));
   }
-  if (this->writer_task_ != nullptr)
-    xTaskNotifyGive(this->writer_task_);
+  this->notify_writer_();
 }
 
 #ifdef USE_SWITCH
@@ -1829,14 +1880,13 @@ void SdLogger::set_debug_writer_freeze_requested(bool requested) {
   this->debug_writer_freeze_requested_.store(requested, std::memory_order_release);
   // A writer blocked in its normal poll must see a request promptly. This only
   // wakes it; all card work and the acknowledgement stay on the writer task.
-  if (this->writer_task_ != nullptr)
-    xTaskNotifyGive(this->writer_task_);
+  this->notify_writer_();
 }
 
 void SdLogger::publish_debug_writer_frozen_(bool frozen) {
   this->debug_writer_frozen_.store(frozen, std::memory_order_release);
-  if (this->debug_writer_freeze_switch_ != nullptr)
-    this->debug_writer_freeze_switch_->publish_frozen(frozen);
+  this->debug_writer_frozen_pending_.store(true, std::memory_order_release);
+  this->enable_loop_soon_any_context();
 }
 
 void SdLogger::debug_freeze_writer_() {
@@ -1849,7 +1899,7 @@ void SdLogger::debug_freeze_writer_() {
   if (this->file_ok_()) {
     if (this->close_file_("debug_freeze")) {
       this->debug_reopen_after_freeze_ = true;
-      ESP_LOGW(TAG, "debug writer freeze: sealed L%07" PRIu32 ".LOG", this->seq_);
+      ESP_LOGW(TAG, "debug writer freeze: sealed L%07" PRIu32 ".LOG", this->seq_.load(std::memory_order_relaxed));
     } else {
       ESP_LOGW(TAG, "debug writer freeze: could not seal the open chunk; writer remains parked");
     }
@@ -1857,8 +1907,9 @@ void SdLogger::debug_freeze_writer_() {
 
   this->publish_debug_writer_frozen_(true);
   while (this->debug_writer_freeze_requested_.load(std::memory_order_acquire) &&
-         !this->dying_.load(std::memory_order_acquire)) {
-    // No timeout: only a switch change, shutdown, or a benign time-sync wake
+         !this->dying_.load(std::memory_order_acquire) &&
+         !this->confine_format_stop_requested_.load(std::memory_order_acquire)) {
+    // No timeout: a switch change, format stop, shutdown, or a benign time-sync wake
     // reaches here. In all cases no filesystem/card function is called.
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
@@ -1868,14 +1919,16 @@ void SdLogger::debug_freeze_writer_() {
   // acknowledgement went false, so a host never mistakes a reopening write for
   // a frozen card. The rings deliberately stay live while parked; overflow is
   // counted by their existing dropped/tap_dropped counters.
-  if (this->debug_reopen_after_freeze_ && !this->dying_.load(std::memory_order_acquire) && this->mounted_) {
+  if (this->debug_reopen_after_freeze_ && !this->dying_.load(std::memory_order_acquire) &&
+      !this->confine_format_stop_requested_.load(std::memory_order_acquire) && this->mounted_) {
     this->debug_reopen_after_freeze_ = false;
-    this->seq_++;
+    this->seq_.fetch_add(1, std::memory_order_relaxed);
     if (this->open_next_file_()) {
       this->last_sync_ms_ = millis();
-      ESP_LOGI(TAG, "debug writer freeze: resumed with L%07" PRIu32 ".LOG", this->seq_);
+      ESP_LOGI(TAG, "debug writer freeze: resumed with L%07" PRIu32 ".LOG", this->seq_.load(std::memory_order_relaxed));
     } else {
-      ESP_LOGE(TAG, "debug writer freeze: could not reopen L%07" PRIu32 ".LOG", this->seq_);
+      ESP_LOGE(TAG, "debug writer freeze: could not reopen L%07" PRIu32 ".LOG",
+               this->seq_.load(std::memory_order_relaxed));
       this->enter_failed_("debug_freeze_resume");
     }
   }
@@ -2189,7 +2242,7 @@ bool SdLogger::close_file_(const char *reason) {
   // hence the lock (§8a).
   {
     IndexLock lock(this->index_mux_);
-    this->collection_.seal(this->seq_, this->file_bytes_);
+    this->collection_.seal(this->seq_.load(std::memory_order_relaxed), this->file_bytes_);
   }
   return true;
 }
@@ -2240,6 +2293,7 @@ void SdLogger::enter_failed_(const char *why, WriteFailureAction action) {
     // in the interval — including one from another task sharing the card — we keep the ladder,
     // because that ambiguity must bias toward retrying a card that may really be coming back.
     this->write_recovery_stopped_ = true;
+    this->publish_runtime_status_();
     ESP_LOGE(TAG,
              "log file lost (%s) — stopping recovery: write() failed before any SD command was issued; "
              "remounting cannot repair that filesystem/VFS refusal",
@@ -2254,6 +2308,7 @@ void SdLogger::enter_failed_(const char *why, WriteFailureAction action) {
   } else {
     ESP_LOGE(TAG, "log file lost (%s) — recovery is off, logging stops for this run", why);
   }
+  this->publish_runtime_status_();
 }
 
 namespace {
@@ -2478,12 +2533,12 @@ void SdLogger::rotate_file_() {
     // `sdlog.py check` reports rather than silently believing.
     return;
   }
-  this->seq_++;
+  this->seq_.fetch_add(1, std::memory_order_relaxed);
   if (!this->open_next_file_()) {
     // The failure that used to be invisible: the old file is closed, the new one never opened,
     // `mounted_` stayed true, and from here on every record was dropped into a -1 fd without
     // touching a single counter.
-    ESP_LOGE(TAG, "rotate: could not open L%07" PRIu32 ".LOG", this->seq_);
+    ESP_LOGE(TAG, "rotate: could not open L%07" PRIu32 ".LOG", this->seq_.load(std::memory_order_relaxed));
     this->enter_failed_("rotate");
   }
 }
@@ -2503,6 +2558,8 @@ bool SdLogger::push_record(const LogRecord &rec) {
     this->dropped_records_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  if (this->head_ == this->tail_)
+    this->ring_observed_us_ = static_cast<uint64_t>(esp_timer_get_time());
   this->ring_[this->head_] = rec;
   this->head_ = next;
   taskEXIT_CRITICAL(&this->ring_mux_);
@@ -2511,12 +2568,25 @@ bool SdLogger::push_record(const LogRecord &rec) {
 
 bool SdLogger::pop_record_(LogRecord &out) {
   taskENTER_CRITICAL(&this->ring_mux_);
+  const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+  if (this->head_ != this->tail_ && now - this->ring_observed_us_ >= QUEUE_MAX_AGE_US) {
+    const uint32_t lost = (this->head_ - this->tail_) & this->ring_mask_;
+    this->tail_ = this->head_.load(std::memory_order_relaxed);
+    this->ring_observed_us_ = now;
+    taskEXIT_CRITICAL(&this->ring_mux_);
+    this->card_dropped_.fetch_add(lost, std::memory_order_relaxed);
+    ESP_LOGW(TAG, "expired %" PRIu32 " record entries: timestamp epoch no longer bounded", lost);
+    return false;
+  }
+  this->record_sample_us_ = now;
   if (this->tail_ == this->head_) {
+    this->ring_observed_us_ = now;
     taskEXIT_CRITICAL(&this->ring_mux_);
     return false;
   }
   out = this->ring_[this->tail_];
   this->tail_ = (this->tail_ + 1) & this->ring_mask_;
+  this->ring_observed_us_ = now;
   taskEXIT_CRITICAL(&this->ring_mux_);
   return true;
 }
@@ -2550,6 +2620,8 @@ void SdLogger::on_log_message(uint8_t level, const char *tag, const char *messag
     this->text_dropped_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
+  if (this->text_head_ == this->text_tail_)
+    this->text_observed_us_ = static_cast<uint64_t>(esp_timer_get_time());
   TextRecord &slot = this->text_ring_[this->text_head_];
   slot.t_us = static_cast<uint32_t>(esp_timer_get_time());
   slot.level = level;
@@ -2578,12 +2650,25 @@ bool SdLogger::pop_text_(TextRecord &out) {
   if (this->text_ring_ == nullptr)
     return false;
   taskENTER_CRITICAL(&this->text_mux_);
+  const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+  if (this->text_head_ != this->text_tail_ && now - this->text_observed_us_ >= QUEUE_MAX_AGE_US) {
+    const uint32_t lost = (this->text_head_ - this->text_tail_) & this->text_mask_;
+    this->text_tail_ = this->text_head_;
+    this->text_observed_us_ = now;
+    taskEXIT_CRITICAL(&this->text_mux_);
+    this->card_dropped_.fetch_add(lost, std::memory_order_relaxed);
+    ESP_LOGW(TAG, "expired %" PRIu32 " text entries: timestamp epoch no longer bounded", lost);
+    return false;
+  }
+  this->text_sample_us_ = now;
   if (this->text_tail_ == this->text_head_) {
+    this->text_observed_us_ = now;
     taskEXIT_CRITICAL(&this->text_mux_);
     return false;
   }
   out = this->text_ring_[this->text_tail_];
   this->text_tail_ = (this->text_tail_ + 1) & this->text_mask_;
+  this->text_observed_us_ = now;
   taskEXIT_CRITICAL(&this->text_mux_);
   return true;
 }
@@ -2591,7 +2676,6 @@ bool SdLogger::pop_text_(TextRecord &out) {
 void SdLogger::capture_write_failure_(int32_t result, int err_no, uint32_t len, uint32_t offset,
                                       uint32_t derived_offset, int lseek_errno, uint32_t committed_end,
                                       int64_t elapsed_us, uint32_t spi_begin, uint32_t spi_end) {
-  this->write_failures_++;
   LastWriteFailure facts{};
   facts.result = result;
   facts.err_no = static_cast<int32_t>(err_no);
@@ -2613,6 +2697,10 @@ void SdLogger::capture_write_failure_(int32_t result, int err_no, uint32_t len, 
   facts.heap_dma_largest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
   facts.action = classify_write_failure(facts.spi.commands);
   this->last_write_failure_ = facts;
+  portENTER_CRITICAL(&this->status_mux_);
+  this->write_failure_pub_.facts = facts;
+  this->write_failure_pub_.count++;
+  portEXIT_CRITICAL(&this->status_mux_);
 }
 
 void SdLogger::log_frame(uint8_t source, uint32_t id, uint8_t flags, const uint8_t *data, uint8_t len) {
@@ -2690,7 +2778,7 @@ bool SdLogger::flush_block_(bool all) {
     }
     this->block_.consume(static_cast<size_t>(written));
     this->unflushed_records_.consume(static_cast<size_t>(written));
-    this->bytes_written_ += static_cast<uint32_t>(written);
+    this->bytes_written_.fetch_add(static_cast<uint32_t>(written), std::memory_order_relaxed);
     len -= static_cast<size_t>(written);
   }
   return true;
@@ -2736,7 +2824,7 @@ void SdLogger::write_record_(const LogRecord &rec, uint64_t now64) {
                                  reconstruct_us(now64, rec.t_us), this->sources_);
   this->commit_line_(n);
   this->unflushed_records_.commit_record(this->block_.pending());
-  this->records_written_++;
+  this->records_written_.fetch_add(1, std::memory_order_relaxed);
   this->maybe_rotate_(now64);
 }
 
@@ -3000,10 +3088,33 @@ void SdLogger::tap_drain_loop_() {
       vTaskDelete(nullptr);
       return;
     }
-    // Gated on mounted_, not file_ok_: with no card the records stay in the tap rings and the RX
-    // ISR sheds into tap_dropped, exactly as before this task existed — an outage keeps its
-    // counter. (push_record() would count them as card_dropped, which says "the card lost this",
-    // and during a mount retry that is true of every source but double-speak for a ring drain.)
+    // Expire only a nonempty queue whose consumer has made no progress for the timeout,
+    // including while unmounted/full/frozen: a 32-bit ISR timestamp cannot identify its epoch. Only this task pops
+    // these queues; snapshot size bounds the purge while the ISR keeps producing. All intentional losses use the
+    // existing card-loss marker.
+    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+    for (uint8_t i = 0; i < this->can_tap_count_; i++) {
+      auto expire = [&](auto *ring, uint64_t &observed) {
+        if (ring == nullptr)
+          return;
+        if (ring->empty()) {
+          observed = now;
+          return;
+        }
+        if (now - observed < QUEUE_MAX_AGE_US)
+          return;
+        const uint16_t buffered = ring->size();
+        uint32_t lost = 0;
+        can_gateway::TapRecord ignored;
+        while (lost < buffered && ring->pop(ignored))
+          lost++;
+        observed = now;
+        this->card_dropped_.fetch_add(lost, std::memory_order_relaxed);
+        ESP_LOGW(TAG, "expired %" PRIu32 " tap entries: timestamp epoch no longer bounded", lost);
+      };
+      expire(this->can_taps_[i].port->log_tap_ring(), this->can_taps_[i].rx_observed_us);
+      expire(this->can_taps_[i].port->log_tap_tx_ring(), this->can_taps_[i].tx_observed_us);
+    }
     if (this->mounted_) {
       bool record_ring_full = false;
       for (uint8_t i = 0; i < this->can_tap_count_ && !record_ring_full; i++) {
@@ -3014,11 +3125,13 @@ void SdLogger::tap_drain_loop_() {
         // One entry from each queue per turn preserves per-ring order without allowing a busy RX
         // ring to starve TX. The file reader interleaves the two rings by each record's capture
         // timestamp, which was already taken in the producing ISR.
-        auto drain_one = [&](auto *ring) {
+        auto drain_one = [&](auto *ring, uint64_t &observed) {
           can_gateway::TapRecord tap;
           LogRecord rec;
           if (ring == nullptr || !this->mounted_ || !ring->pop(tap))
             return false;
+          // Consumer progress refreshes this ring even if backpressure leaves it nonempty.
+          observed = static_cast<uint64_t>(esp_timer_get_time());
           this->can_taps_[i].drained.fetch_add(1, std::memory_order_relaxed);
           // Field by field, never a memcpy — see tap_translate.h for why, and
           // tests/host/test_tap_translate.cpp for the cases that hold it there.
@@ -3036,9 +3149,9 @@ void SdLogger::tap_drain_loop_() {
         };
         bool progressed = true;
         while (this->mounted_ && progressed) {
-          progressed = drain_one(rx_ring);
+          progressed = drain_one(rx_ring, this->can_taps_[i].rx_observed_us);
           if (!record_ring_full)
-            progressed = drain_one(tx_ring) || progressed;
+            progressed = drain_one(tx_ring, this->can_taps_[i].tx_observed_us) || progressed;
           if (record_ring_full)
             break;
         }
@@ -3248,7 +3361,7 @@ void SdLogger::drain_confirms_() {
   // inverse order loses it permanently on the same crash.
   if (this->confirm_q_ == nullptr || !this->file_ok_())
     return;
-  uint32_t seq = 0;
+  ConfirmIntent intent{};
   // **Peek, decide, then consume.** The intent stays in the queue until this task has committed to
   // executing it, so the deferral path below needs no re-queue at all — and that matters, because
   // the re-queue it replaces was documented as unable to fail and could: the httpd task may
@@ -3261,7 +3374,8 @@ void SdLogger::drain_confirms_() {
   //
   // Peeking is safe because this task is the queue's only consumer: nothing else can take the head
   // between the peek and the receive, and producers only ever append.
-  while (xQueuePeek(this->confirm_q_, &seq, 0) == pdTRUE) {
+  while (xQueuePeek(this->confirm_q_, &intent, 0) == pdTRUE) {
+    const uint32_t seq = intent.seq;
     bool reserved = false;
     bool renameable = true;
     {
@@ -3273,6 +3387,13 @@ void SdLogger::drain_confirms_() {
       // chunk it is still reading. The design doc offers exactly this choice — "verify, or defer the
       // rename until `is_serving(seq)` is false" — and this is the half that needs no hardware.
       IndexLock lock(this->index_mux_);
+      if (intent.mount_generation != this->mount_generation_) {
+        ConfirmIntent stale{};
+        if (xQueueReceive(this->confirm_q_, &stale, 0) != pdTRUE)
+          break;
+        ESP_LOGW(TAG, "confirm: stale mount intent for L%07" PRIu32 " dropped", seq);
+        continue;
+      }
       if (this->collection_.is_serving(seq))
         break;  // still at the head of the queue; the rest waits with it rather than reordering
       // Reading `is_serving()` under the lock and then renaming outside it decides nothing on its
@@ -3295,7 +3416,7 @@ void SdLogger::drain_confirms_() {
     // is the only consumer, so the receive cannot fail — but a peek that keeps succeeding while the
     // receive does not is an unbounded loop on the *writer* task, which is a worse failure than the
     // dropped intent it would be spinning over. Bounded by construction instead.
-    uint32_t taken = 0;
+    ConfirmIntent taken{};
     if (xQueueReceive(this->confirm_q_, &taken, 0) != pdTRUE) {
       if (reserved) {
         IndexLock lock(this->index_mux_);
@@ -3512,6 +3633,10 @@ SdLogger::RawReadResult SdLogger::collection_begin_raw_read(uint32_t lba, uint32
 }
 
 bool SdLogger::collection_raw_read_sector(uint32_t lba, uint8_t *out, char *error, size_t error_size) {
+  if (this->collection_transfer_cancelled()) {
+    snprintf(error, error_size, "card transfer cancelled for unmount");
+    return false;
+  }
   return raw_read_sector(this->card_, lba, out, error, error_size);
 }
 
@@ -3703,7 +3828,8 @@ SdLogger::ConfirmResult SdLogger::collection_confirm(uint32_t seq) {
   // says CONFIRMED with no rename queued would leave a `.LOG` file on the card that retention later
   // tries to unlink under its `.UPL` name and never finds — a file nothing lists, serves or
   // reclaims, which is the one failure mode this whole index exists to prevent.
-  if (this->confirm_q_ == nullptr || xQueueSend(this->confirm_q_, &seq, 0) != pdTRUE)
+  const ConfirmIntent intent{seq, this->mount_generation_};
+  if (this->confirm_q_ == nullptr || xQueueSend(this->confirm_q_, &intent, 0) != pdTRUE)
     return ConfirmResult::BUSY;
   this->collection_.confirm(seq);
   return ConfirmResult::CONFIRMED;
@@ -3745,8 +3871,29 @@ void SdLogger::sync_file_() {
   }
 }
 
+void SdLogger::notify_writer_() {
+  portENTER_CRITICAL(&this->writer_mux_);
+  TaskHandle_t writer = this->writer_task_.load(std::memory_order_relaxed);
+  if (writer != nullptr && !this->writer_stopped_.load(std::memory_order_acquire))
+    xTaskNotifyGive(writer);
+  portEXIT_CRITICAL(&this->writer_mux_);
+}
+
+void SdLogger::finish_writer_() {
+  portENTER_CRITICAL(&this->writer_mux_);
+  this->writer_task_.store(nullptr, std::memory_order_relaxed);
+  this->writer_stopped_.store(true, std::memory_order_release);
+  portEXIT_CRITICAL(&this->writer_mux_);
+}
+
 void SdLogger::writer_loop_() {
   for (;;) {
+    if (this->dying_.load(std::memory_order_acquire)) {
+      this->emergency_close_();
+      this->finish_writer_();
+      vTaskDelete(nullptr);
+      return;
+    }
     if (this->confine_format_stop_requested_.load(std::memory_order_acquire)) {
       // The format action waits for this acknowledgement before it unmounts.
       // Closing here keeps every filesystem call on the writer task, exactly as
@@ -3754,13 +3901,15 @@ void SdLogger::writer_loop_() {
       if (this->file_ok_())
         this->close_file_("confine-format");
       this->mounted_ = false;
-      this->writer_task_ = nullptr;
+#ifdef USE_SWITCH
+      this->debug_reopen_after_freeze_ = false;
+#endif
+      this->finish_writer_();
       vTaskDelete(nullptr);
       return;
     }
-    // One 64-bit clock read per pass; every record's 32-bit stamp is rebuilt
-    // against it (spec D8). The reconstruction is signed precisely because
-    // producers keep stamping records *after* this read for the whole pass.
+    // Pass clock for policy/markers. Each FIFO pop also samples time to bound the record's
+    // reconstruction even when an earlier card operation stalled this pass (spec D8).
     const uint64_t now64 = static_cast<uint64_t>(esp_timer_get_time());
     const uint32_t now = millis();
 
@@ -3795,13 +3944,13 @@ void SdLogger::writer_loop_() {
       // drain a whole ring, and the boot tail scan relies on a restatement every 32 KiB (C5).
       LogRecord rec;
       while (this->file_ok_() && this->pop_record_(rec)) {
-        this->write_record_(rec, now64);
+        this->write_record_(rec, this->record_sample_us_);
         if (this->clock_bytes_since_ >= SD_LOG_CLOCK_RESTATE_BYTES)
           this->write_clock_line_(now64);
       }
       TextRecord text;
       while (this->file_ok_() && this->pop_text_(text)) {
-        this->write_text_(text, now64);
+        this->write_text_(text, this->text_sample_us_);
         if (this->clock_bytes_since_ >= SD_LOG_CLOCK_RESTATE_BYTES)
           this->write_clock_line_(now64);
       }
@@ -3855,7 +4004,7 @@ void SdLogger::writer_loop_() {
       if (this->try_recover_()) {
         if (this->mounted_) {
           ESP_LOGI(TAG, "card recovered after %" PRIu32 " attempt(s) — logging to L%07" PRIu32 ".LOG",
-                   this->recovery_.attempts(), this->seq_);
+                   this->recovery_.attempts(), this->seq_.load(std::memory_order_relaxed));
         } else {
           ESP_LOGE(TAG, "card recovered read-only after %" PRIu32 " attempt(s): capacity=%s",
                    this->recovery_.attempts(), this->capacity_status());
@@ -3875,7 +4024,7 @@ void SdLogger::writer_loop_() {
 
     if (this->dying_.load(std::memory_order_acquire)) {
       this->emergency_close_();
-      this->writer_task_ = nullptr;
+      this->finish_writer_();
       vTaskDelete(nullptr);
       return;
     }
@@ -3888,30 +4037,18 @@ void SdLogger::writer_loop_() {
     // A time sync uses the task notification to put its #utc line ahead of the
     // normal 20 ms poll deadline. Nothing else relies on the notification, so
     // consuming its count here is safe.
+    this->publish_runtime_status_();
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WRITER_POLL_MS));
   }
 }
 
 void SdLogger::on_shutdown() {
-  // The third exit path, and the reason a missing `#close` means power loss
-  // rather than "the firmware restarted". OTA and a requested reboot both come
-  // through here; the writer task is still running, so hand it the same
-  // dying_ flag the VCC monitor uses and give it a moment to finish.
-  // The writer task now outlives a card failure, so its existence — not the file's — is what says
-  // there is something to wind down. Skipping this when a recovery happens to be pending would
-  // leave the task running through the reboot.
-#ifdef USE_SD_LOGGER_COLLECTION_SERVER
-  // First, and before the writer is told to wind down: httpd_stop() blocks until the server task
-  // has finished whatever handler is in flight, so after this no serving flag is held, no read fd
-  // is open on the card, and nothing can post a confirm the writer will never drain.
-  this->collection_server_.stop();
-#endif
-  if (this->writer_task_ == nullptr && this->fd_ < 0)
-    return;
+  // ESPHome 2026.11 calls on_shutdown() before polling teardown(). Do not spend that shared
+  // deadline blocking the main loop; the writer owns all close/unmount work, including httpd stop.
   this->request_emergency_close("clean");
-  for (uint8_t i = 0; i < 20 && this->writer_task_ != nullptr; i++)
-    vTaskDelay(pdMS_TO_TICKS(10));
 }
+
+bool SdLogger::teardown() { return this->writer_stopped_.load(std::memory_order_acquire); }
 
 void SdLogger::emergency_close_() {
   // Best-effort clean close on a sagging supply — or an orderly one on
@@ -3919,8 +4056,8 @@ void SdLogger::emergency_close_() {
   // Every step is bounded by the VFS timeouts; the hold-up cap (spec §7 H6)
   // must cover this window.
   const char *reason = this->close_reason_;
-  ESP_LOGW(TAG, "closing log (%s): %" PRIu32 " records, %" PRIu32 " dropped", reason, this->records_written_,
-           this->dropped_records_.load());
+  ESP_LOGW(TAG, "closing log (%s): %" PRIu32 " records, %" PRIu32 " dropped", reason,
+           this->records_written_.load(std::memory_order_relaxed), this->dropped_records_.load());
   this->mounted_ = false;  // stop accepting new records
 #ifdef USE_SD_LOGGER_CAN_TAP
   // The drain task may stop immediately after mounted_ goes false. Snapshot both SPSC queues
@@ -3933,25 +4070,25 @@ void SdLogger::emergency_close_() {
   }
 #endif
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
-  // **Fence the server before anything else.** `on_shutdown()` stops it up front, but that is only
-  // one of the three ways this function is reached: the VCC monitor's `dying_` store and the public
-  // `request_emergency_close()` both arrive here with the httpd task still running and still willing
-  // to grant transfers — against a card this function is about to unmount and then power off.
+  // Fence every close path, including shutdown and the VCC monitor: the server must stop
+  // granting transfers before this task unmounts and powers off the card.
   //
   // Closing the gate rather than calling `stop()` here, and `stop()` only at the end: `httpd_stop()`
   // blocks until the handler in flight returns, which on a stalled socket is `send_wait_timeout`
   // (2 s) — spent from the hold-up budget (spec §7 H6), which is sized to finish one write, not to
   // wait out a TCP peer. So the flag fences first (no new transfer, no confirm answered 200 into a
-  // queue this task is about to stop draining), the bounded drain inside `unmount_card_()` collects
+  // queue this task is about to stop draining), the reader-release barrier in `unmount_card_()` collects
   // whatever was already in flight, and the blocking part happens once the card is safe.
   {
     IndexLock lock(this->index_mux_);
     this->serving_open_ = false;
+    this->transfers_cancelled_.store(true, std::memory_order_release);
   }
 #endif
   // The rail is going, or the firmware is: there is no "later" to retry into, and a remount here
   // would spend the hold-up budget (spec §7 H6) on a card it is about to power down anyway.
   this->recovery_.disable();
+  this->publish_runtime_status_();
 
   // Drain every tail into the file — but only if there is one. Reaching here with no file is
   // normal now (a shutdown during a recovery window), and draining then would push the whole ring
@@ -3965,10 +4102,10 @@ void SdLogger::emergency_close_() {
     // hold-up budget nobody has, and the RX ISR keeps counting it into tap_dropped.
     LogRecord rec;
     while (this->file_ok_() && this->pop_record_(rec))
-      this->write_record_(rec, now64);
+      this->write_record_(rec, this->record_sample_us_);
     TextRecord text;
     while (this->file_ok_() && this->pop_text_(text))
-      this->write_text_(text, now64);
+      this->write_text_(text, this->text_sample_us_);
     // Markers before the close line: a run that ended while shedding should say
     // so in the file it ended in, not in the next one.
     this->write_drop_markers_(now64);
@@ -3986,8 +4123,8 @@ void SdLogger::emergency_close_() {
   // those refuse rather than lie; this is what stops them being asked at all, and it frees the
   // server's task, sockets and 4 KB block on the way out.
   //
-  // Idempotent and safe against `on_shutdown()` having called it first from the main loop — see
-  // `CollectionServer::stop()`, which claims the handle atomically so only one caller tears down.
+  // This task owns shutdown; on_shutdown() only requests it. stop() remains idempotent for a
+  // server that never started or was stopped separately (CollectionServer::stop()).
   this->collection_server_.stop();
 #endif
 }
@@ -4007,7 +4144,7 @@ void SdLogger::monitor_loop_() {
               TAG, "VCC sag: rail %.2f V < threshold %.2f V (raw %d, %s) — closing the log", v_rail,
               this->vcc_threshold_v_, raw,
               this->adc_cali_ != nullptr ? LOG_STR_LITERAL("calibrated") : LOG_STR_LITERAL("UNCALIBRATED estimate"));
-          this->dying_.store(true, std::memory_order_release);
+          this->request_emergency_close();
           this->monitor_task_ = nullptr;
           vTaskDelete(nullptr);
           return;
@@ -4021,6 +4158,17 @@ void SdLogger::monitor_loop_() {
 }
 
 void SdLogger::loop() {
+#ifdef USE_SWITCH
+  if (this->debug_writer_frozen_pending_.exchange(false, std::memory_order_acq_rel) &&
+      this->debug_writer_freeze_switch_ != nullptr)
+    this->debug_writer_freeze_switch_->publish_frozen(this->is_debug_writer_frozen());
+#endif
+  // Component status belongs to the main loop, including failures observed by the writer.
+  if (!this->mounted_.load(std::memory_order_acquire) || this->vcc_monitor_unavailable_) {
+    this->status_set_warning();
+  } else {
+    this->status_clear_warning();
+  }
 #ifdef USE_SD_LOGGER_COLLECTION_SERVER
   // Before the stats early-return, because `statistics:` is optional and a config without it must
   // still get a server. One branch on a bool per main-loop pass for the life of the run, which is
@@ -4054,16 +4202,18 @@ void SdLogger::loop() {
            "records=%" PRIu32 " dropped=%" PRIu32 " tap_dropped=%" PRIu32 " text_dropped=%" PRIu32
            " card_dropped=%" PRIu32 " bytes=%" PRIu32 " file=L%07" PRIu32 " index_refused=%" PRIu32
            " mounted=%d capacity=%s",
-           this->records_written_, this->dropped_records_.load(), this->get_tap_dropped_records(),
-           this->text_dropped_.load(), this->card_dropped_.load(), this->bytes_written_, this->seq_,
+           this->records_written_.load(std::memory_order_relaxed), this->dropped_records_.load(),
+           this->get_tap_dropped_records(), this->text_dropped_.load(), this->card_dropped_.load(),
+           this->bytes_written_.load(std::memory_order_relaxed), this->seq_.load(std::memory_order_relaxed),
            this->index_refused_.load(std::memory_order_relaxed), this->mounted_ ? 1 : 0, this->capacity_status());
 #else
   ESP_LOGI(TAG,
            "records=%" PRIu32 " dropped=%" PRIu32 " text_dropped=%" PRIu32 " card_dropped=%" PRIu32 " bytes=%" PRIu32
            " file=L%07" PRIu32 " index_refused=%" PRIu32 " mounted=%d capacity=%s",
-           this->records_written_, this->dropped_records_.load(), this->text_dropped_.load(),
-           this->card_dropped_.load(), this->bytes_written_, this->seq_,
-           this->index_refused_.load(std::memory_order_relaxed), this->mounted_ ? 1 : 0, this->capacity_status());
+           this->records_written_.load(std::memory_order_relaxed), this->dropped_records_.load(),
+           this->text_dropped_.load(), this->card_dropped_.load(), this->bytes_written_.load(std::memory_order_relaxed),
+           this->seq_.load(std::memory_order_relaxed), this->index_refused_.load(std::memory_order_relaxed),
+           this->mounted_ ? 1 : 0, this->capacity_status());
 #endif
   // Its own line, and only when it is true, so the counters above stay the shape every reader
   // already parses. A latched card that is being written through the masked idle bit is working,
@@ -4099,14 +4249,15 @@ void SdLogger::loop() {
              discarded, this->discarded_kib_.load(std::memory_order_relaxed) / 1024);
   }
 #endif
-  if (!this->mounted_ && this->recovery_.armed()) {
+  const char *recovery_state = this->get_recovery_state();
+  if (strcmp(recovery_state, "retrying") == 0) {
     ESP_LOGW(TAG, "  no card: recovery attempt %" PRIu32 " pending, next in <=%" PRIu32 " ms",
-             this->recovery_.attempts() + 1, this->recovery_.delay_ms());
-  } else if (!this->mounted_ && this->write_recovery_stopped_) {
+             this->get_recovery_attempts() + 1, this->recovery_delay_pub_.load(std::memory_order_relaxed));
+  } else if (strcmp(recovery_state, "stopped_no_bus_traffic") == 0) {
     ESP_LOGE(TAG, "  logging stopped: last write failed without SD commands (write_failures=%" PRIu32 ")",
-             this->write_failures_);
-  } else if (!this->mounted_ && this->recovery_.exhausted()) {
-    ESP_LOGE(TAG, "  no card: recovery exhausted after %" PRIu32 " attempts", this->recovery_.attempts());
+             this->get_write_failures());
+  } else if (strcmp(recovery_state, "exhausted") == 0) {
+    ESP_LOGE(TAG, "  no card: recovery exhausted after %" PRIu32 " attempts", this->get_recovery_attempts());
   }
 }
 
@@ -4176,43 +4327,42 @@ void SdLogger::dump_config() {
   if (this->card_power_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  card_power_pin=%d", this->card_power_pin_);
   }
-  if (this->recovery_.enabled()) {
+  if (this->recovery_enabled_pub_.load(std::memory_order_relaxed)) {
     ESP_LOGCONFIG(TAG, "  recovery: retry in %" PRIu32 " ms, max_attempts=%" PRIu32 ", power_cycle=%s",
-                  this->recovery_.delay_ms(), this->recovery_.attempts_limit(),
+                  this->recovery_delay_pub_.load(std::memory_order_relaxed), this->recovery_.attempts_limit(),
                   this->recovery_power_cycle_ ? LOG_STR_LITERAL("yes") : LOG_STR_LITERAL("no"));
     if (this->recovery_.in_band_reset()) {
-      ESP_LOGCONFIG(TAG,
-                    "  recovery: in-band reset from attempt 2, busy budget %" PRIu32 " ms doubling to %" PRIu32 " ms",
-                    this->recovery_.busy_timeout_ms(), this->recovery_.max_busy_timeout_ms());
+      ESP_LOGCONFIG(
+          TAG, "  recovery: in-band reset from attempt 2, busy budget %" PRIu32 " ms doubling to %" PRIu32 " ms",
+          this->recovery_busy_timeout_pub_.load(std::memory_order_relaxed), this->recovery_.max_busy_timeout_ms());
     } else {
       ESP_LOGCONFIG(TAG, "  recovery: in-band reset off (a card wedged mid-write will not come back)");
     }
   } else {
     ESP_LOGCONFIG(TAG, "  recovery: off (a card failure disables logging for the run)");
   }
+  const auto failure = this->get_write_failure_snapshot();
   ESP_LOGCONFIG(TAG, "  recovery_state=%s write_failures=%" PRIu32 " last_write_action=%s", this->get_recovery_state(),
-                this->write_failures_, this->get_last_write_action());
-  if (this->write_failures_ > 0) {
+                failure.count,
+                failure.count == 0 ? LOG_STR_LITERAL("none") : write_failure_action_str(failure.facts.action));
+  if (failure.count > 0) {
     ESP_LOGCONFIG(
         TAG,
         "  last_write: vfs_offset=%" PRIu32 " derived_offset=%" PRIu32 " lseek_errno=%" PRId32 " committed_end=%" PRIu32
         " len=%" PRIu32 " errno=%" PRId32 " result=%" PRId32 " elapsed=%" PRIu32 " us",
-        this->last_write_failure_.offset, this->last_write_failure_.derived_offset,
-        this->last_write_failure_.lseek_errno, this->last_write_failure_.committed_end, this->last_write_failure_.len,
-        this->last_write_failure_.err_no, this->last_write_failure_.result, this->last_write_failure_.elapsed_us);
+        failure.facts.offset, failure.facts.derived_offset, failure.facts.lseek_errno, failure.facts.committed_end,
+        failure.facts.len, failure.facts.err_no, failure.facts.result, failure.facts.elapsed_us);
     ESP_LOGCONFIG(TAG,
                   "  last_write: spi_seq=%" PRIu32 "..%" PRIu32 " commands=%" PRIu32 " available=%" PRIu32
                   " missing=%" PRIu32 " worst_err=%" PRId32,
-                  this->last_write_failure_.spi_begin, this->last_write_failure_.spi_end,
-                  this->last_write_failure_.spi.commands, this->last_write_failure_.spi.available,
-                  this->last_write_failure_.spi.missing, this->last_write_failure_.spi.worst_err);
+                  failure.facts.spi_begin, failure.facts.spi_end, failure.facts.spi.commands,
+                  failure.facts.spi.available, failure.facts.spi.missing, failure.facts.spi.worst_err);
     ESP_LOGCONFIG(TAG,
                   "  last_write: card_sectors=%" PRIu32 " volume_lba=%" PRIu32 " volume_sectors=%" PRIu32
                   " heap_default=%" PRIu32 "/%" PRIu32 " heap_dma=%" PRIu32 "/%" PRIu32,
-                  this->last_write_failure_.card_sectors, this->last_write_failure_.volume_first_lba,
-                  this->last_write_failure_.volume_sectors, this->last_write_failure_.heap_default_free,
-                  this->last_write_failure_.heap_default_largest, this->last_write_failure_.heap_dma_free,
-                  this->last_write_failure_.heap_dma_largest);
+                  failure.facts.card_sectors, failure.facts.volume_first_lba, failure.facts.volume_sectors,
+                  failure.facts.heap_default_free, failure.facts.heap_default_largest, failure.facts.heap_dma_free,
+                  failure.facts.heap_dma_largest);
   }
   const uint32_t fil_size = static_cast<uint32_t>(sizeof(FIL));
   const uint32_t fil_array_bytes = sd_fat_fil_array_bytes(fil_size, SD_LOGGER_FAT_MAX_FILES);
@@ -4234,6 +4384,9 @@ void SdLogger::dump_config() {
   ESP_LOGCONFIG(TAG, "  fatfs: %" PRIu32 " volume slot(s) — a mount can only be registered this many times at once",
                 SD_FATFS_VOLUME_SLOTS);
   if (this->vcc_adc_gpio_ >= 0) {
+    if (this->vcc_monitor_unavailable_) {
+      ESP_LOGW(TAG, "  vcc_monitor: unavailable — emergency-close protection disabled");
+    }
     ESP_LOGCONFIG(
         TAG, "  vcc_monitor: adc_gpio=%d threshold=%.2fV divider=%.2f (%s)", this->vcc_adc_gpio_,
         this->vcc_threshold_v_, this->vcc_divider_,

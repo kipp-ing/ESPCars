@@ -72,10 +72,8 @@ static const uint32_t SD_LOG_HTTPD_STACK_SIZE = 8192;
 
 /// `SO_SNDTIMEO` on the server's sockets, in whole seconds — `httpd_config_t` takes no finer unit.
 /// It is how long a blocked `httpd_send()` can stall the httpd task, and the httpd task is the one
-/// holding a read fd on the card, so it is also the *floor* for `unmount_card_()`'s drain bound in
-/// sd_logger.cpp. Named here, and read there, so the two cannot drift apart: a drain shorter than
-/// this gives up by construction on every stalled socket, which is how the original 500 ms bound
-/// read as "the transfer is wedged" on a case that was merely slow.
+/// holding a read fd on the card, so it is also the floor for the reader-release warning deadline
+/// in sd_logger.cpp. Unmount always waits for release, including after that diagnostic deadline.
 static const uint32_t SD_LOG_SEND_WAIT_S = 2;
 
 /// Ring fill above which a transfer sleeps before the next card read (§6). "Logging always wins":

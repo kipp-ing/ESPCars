@@ -660,6 +660,8 @@ esp_err_t CollectionServer::serve_chunk_(httpd_req_t *req) {
   uint32_t remaining = body;
   bool logged_64k_read = false;
   while (remaining > 0) {
+    if (this->parent_->collection_transfer_cancelled())
+      return ESP_FAIL;  // guards release the fd/grant before unmount may proceed
     // Between blocks, not inside them: the card read is the part that competes with the writer for
     // SPI2, so the sleep has to happen before it (§6). Bounded, so a busy ring throttles the
     // transfer instead of stalling it past the client's 10 s socket timeout.
@@ -778,6 +780,7 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
   // additive diagnostics should not silently turn the route into 500. The handler still fails safe
   // either way (`n >= sizeof(body)` below -> HTTP 500); this is margin, not a live bug.
   char body[1536];
+  const auto failure = this->parent_->get_write_failure_snapshot();
   const StatusFields fields{
       this->device_,
       sealed,
@@ -801,29 +804,29 @@ esp_err_t CollectionServer::serve_status_(httpd_req_t *req) {
       this->parent_->get_tap_drained_records(),
       this->parent_->get_tap_record_ring_accepted_records(),
       this->parent_->get_recovery_state(),
-      this->parent_->get_write_failures(),
-      this->parent_->get_last_write_action(),
-      this->parent_->get_last_write_errno(),
-      this->parent_->get_last_write_result(),
-      this->parent_->get_last_write_offset(),
-      this->parent_->get_last_write_derived_offset(),
-      this->parent_->get_last_write_lseek_errno(),
-      this->parent_->get_last_write_committed_end(),
-      this->parent_->get_last_write_len(),
-      this->parent_->get_last_write_elapsed_us(),
-      this->parent_->get_last_write_spi_begin(),
-      this->parent_->get_last_write_spi_end(),
-      this->parent_->get_last_write_spi_commands(),
-      this->parent_->get_last_write_spi_available(),
-      this->parent_->get_last_write_spi_missing(),
-      this->parent_->get_last_write_spi_worst_err(),
-      this->parent_->get_last_write_card_sectors(),
-      this->parent_->get_last_write_volume_first_lba(),
-      this->parent_->get_last_write_volume_sectors(),
-      this->parent_->get_last_write_heap_default_free(),
-      this->parent_->get_last_write_heap_default_largest(),
-      this->parent_->get_last_write_heap_dma_free(),
-      this->parent_->get_last_write_heap_dma_largest(),
+      failure.count,
+      failure.count == 0 ? "none" : write_failure_action_str(failure.facts.action),
+      failure.facts.err_no,
+      failure.facts.result,
+      failure.facts.offset,
+      failure.facts.derived_offset,
+      failure.facts.lseek_errno,
+      failure.facts.committed_end,
+      failure.facts.len,
+      failure.facts.elapsed_us,
+      failure.facts.spi_begin,
+      failure.facts.spi_end,
+      failure.facts.spi.commands,
+      failure.facts.spi.available,
+      failure.facts.spi.missing,
+      failure.facts.spi.worst_err,
+      failure.facts.card_sectors,
+      failure.facts.volume_first_lba,
+      failure.facts.volume_sectors,
+      failure.facts.heap_default_free,
+      failure.facts.heap_default_largest,
+      failure.facts.heap_dma_free,
+      failure.facts.heap_dma_largest,
       this->parent_->get_writer_stack_free(),
   };
   const int n = format_status_json(body, sizeof(body), fields);
