@@ -26,6 +26,7 @@
 #include <esp_twai_onchip.h>
 #include <esp_twai_types.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <cmath>
 #if defined(USE_CAN_GATEWAY_ID_STATS) || defined(USE_CAN_GATEWAY_LOG_TAP) || defined(USE_CAN_GATEWAY_ISR_HOOK)
@@ -221,13 +222,13 @@ class GatewayPort {
     this->recovered_callback_.add(std::forward<F>(callback));
   }
 
-  /// Frame injection. Safe from ESPHome loop context or a FreeRTOS task, never
-  /// blocks; it must not be called from an ISR. SlotPool uses atomic claims and
-  /// the task-safe critical section serializes the driver hand-off and
-  /// OutstandingTracker against both TWAI ISRs. `node_` is immutable after
-  /// setup, and each caller owns `data` only until this function returns.
-  /// Returns false (with a throttled warning) when the port cannot transmit
-  /// (listen-only, bus-off), no inject slot is free, or the TX queue is full.
+  /// Frame injection, ESPHome main-loop task only, never from an ISR. Other
+  /// tasks are rejected before touching slots or the driver. setup() records
+  /// the owning task, on whose pinned core both TWAI interrupts are allocated;
+  /// masking interrupts there serializes hand-off/tracker publication without
+  /// adding locks to the ISRs. `data` need only live until this call returns.
+  /// Returns false (with a throttled warning) for a wrong task, unavailable
+  /// port (listen-only, bus-off), exhausted slots, or a full TX queue.
   bool inject(uint32_t can_id, bool extended, bool rtr, const uint8_t *data, uint8_t len);
 
 #ifdef USE_CAN_GATEWAY_ISR_HOOK
@@ -476,6 +477,7 @@ class GatewayPort {
   uint8_t tx_queue_depth_{8};
 
   twai_node_handle_t node_{nullptr};
+  TaskHandle_t loop_task_{nullptr};  // captured before allocating the TWAI interrupts
   bool hw_filter_engaged_{false};
   /// Written by on_state_change (ISR), read by the fast path (peer bus-off
   /// check) and the control plane (recovery).
@@ -503,7 +505,7 @@ class GatewayPort {
   /// peer's RX ISR, this port's tx_done ISR, and loop context under mux_.
   OutstandingTracker<TxSlot *, CAN_GATEWAY_TX_SLOTS + CAN_GATEWAY_INJECT_SLOTS> outstanding_{};
   /// Serializes loop-context tracker access against both TWAI ISRs
-  /// (single-core: masking interrupts is sufficient; ISRs never lock).
+  /// (same pinned core: masking interrupts is sufficient; ISRs never lock).
   portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
   /// One eager head-reclaim per bus-off event (loop context only).
   bool bus_off_head_reclaimed_{true};

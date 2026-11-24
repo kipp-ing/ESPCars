@@ -75,6 +75,9 @@ CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$
             -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
 
+# Exercise the filter-enabled decoder branch with protected entity filter storage.
+$(BUILD)/test_glue_gateway_decode.o: CXXFLAGS += -DUSE_SENSOR_FILTER -DUSE_BINARY_SENSOR_FILTER -DUSE_TEXT_SENSOR_FILTER
+
 # Execute the real UdsHub glue against a controlled ESPHome/transport boundary.
 $(BUILD)/test_glue_uds_hub.o: CXXFLAGS += -Iuds_stubs -DUSE_SENSOR -DUSE_TEXT_SENSOR
 
@@ -196,7 +199,7 @@ $(GEN): $(CORE_DIR)/can_gateway.h | $(BUILD)
 	@grep -q 'void set_byte' $@ || { \
 	  echo "ERROR: extracted RulePatch is missing set_byte; see $<." >&2; rm -f $@; exit 1; }
 
-$(BUILD)/test_glue_gateway_rx.o $(BUILD)/test_glue_gateway_switch.o $(BUILD)/test_glue_gateway_frame_data.o: $(RUNTIME_GEN)
+$(BUILD)/test_glue_gateway_decode.o $(BUILD)/test_glue_gateway_port.o $(BUILD)/test_glue_gateway_rx.o $(BUILD)/test_glue_gateway_switch.o $(BUILD)/test_glue_gateway_frame_data.o: $(RUNTIME_GEN)
 
 $(RUNTIME_GEN): extract_gateway_runtime.py $(CORE_DIR)/can_gateway.h $(CORE_DIR)/can_gateway.cpp | $(BUILD)
 	@echo "  GEN   gateway runtime (repository code only)"

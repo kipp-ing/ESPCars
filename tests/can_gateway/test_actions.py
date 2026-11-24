@@ -298,3 +298,37 @@ def test_v26_inject_alias_still_generates_code(set_core_config) -> None:
     assert "gen_inject->set_parent(port_a);" in generated
     assert "gen_inject->set_can_id(291);" in generated  # 0x123
     assert "gen_inject->set_data_static(gen_inject_data, 2);" in generated
+
+
+@pytest.mark.parametrize("count", [9, 256])
+def test_set_patch_rejects_more_than_eight_entries(set_core_config, count) -> None:
+    set_patch_schema, _ = _schemas()
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="8"):
+        set_patch_schema(
+            {
+                "id": "charge_limit",
+                "data": [{"index": i % 8, "value": i % 256} for i in range(count)],
+            }
+        )
+
+
+def test_set_patch_rejects_duplicate_indices(set_core_config) -> None:
+    set_patch_schema, _ = _schemas()
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="byte index 2.*once"):
+        set_patch_schema(
+            {
+                "id": "charge_limit",
+                "data": [{"index": 2, "value": 1}, {"index": 2, "value": 2}],
+            }
+        )
+
+
+def test_set_patch_accepts_eight_distinct_indices(set_core_config) -> None:
+    set_patch_schema, _ = _schemas()
+    setup_c6(set_core_config)
+    action = set_patch_schema(
+        {"id": "charge_limit", "data": [{"index": i, "value": i} for i in range(8)]}
+    )
+    assert len(action["data"]) == 8
