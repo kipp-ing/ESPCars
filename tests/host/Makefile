@@ -49,7 +49,9 @@ BIN      := $(BUILD)/run_tests
 GEN      := $(BUILD)/rule_patch_extracted.h
 
 SRCS     := main.cpp $(sort $(wildcard test_*.cpp))
-OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o)
+LINBUS_DIR := ../../components/linbus
+LINBUS_OBJS := $(BUILD)/lin_communication.o $(BUILD)/lin_protocol_handler.o
+OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o) $(LINBUS_OBJS)
 DEPS     := $(OBJS:.o=.d)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
@@ -104,6 +106,13 @@ lockcheck: $(LOGGER_DIR)/sd_logger.cpp
 $(BIN): $(OBJS)
 	@echo "  LD    $@"
 	@$(CXX) $(OBJS) $(LDFLAGS) -o $@
+
+# Compile the production LIN tables/sender against host RTOS/UART adapters.
+$(BUILD)/test_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
+
+$(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
+	@echo "  CXX   $<"
+	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/%.o: %.cpp | $(GEN)
 	@echo "  CXX   $<"

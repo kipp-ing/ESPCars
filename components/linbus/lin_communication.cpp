@@ -420,14 +420,36 @@ void LINCommunication::dump_received_pids_to_log() const {
 
 // TEST stuff
 
+bool LINCommunication::self_test_restore_() {
+  if (!this->self_test_initialized_)
+    return true;
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Self-test restoration could not acquire the TX table mutex");
+    return false;
+  }
+  // Both commander_send() and on_id() hold this mutex through the physical send.
+  // After restoration returns no test-only header or response can start sending.
+  memcpy(this->schedule_, this->self_test_schedule_backup_, sizeof(this->schedule_));
+  memcpy(this->responses_, this->self_test_responses_backup_, sizeof(this->responses_));
+  this->self_test_initialized_ = false;
+  this->self_test_enabled_ = false;
+  this->self_test_count_ = 0;
+  xSemaphoreGive(this->data_mutex_);
+  return true;
+}
+
 void LINCommunication::enable_self_test(bool enable) {
-  self_test_enabled_ = enable;
   if (!enable) {
-    self_test_initialized_ = false;
-    // Clear the slot count too, or a re-arm evaluates stale stats from the
-    // previous run before self_test_init_if_needed_() has refilled them.
-    self_test_count_ = 0;
-    self_test_passed_ = false;
+    if (!this->self_test_restore_())
+      return;
+    this->self_test_enabled_ = false;
+    this->self_test_passed_ = false;
+    this->self_test_incomplete_ = false;
+    ESP_LOGW(TAG, "LIN self-test stopped; pre-test TX tables restored");
+  } else if (!this->self_test_enabled_) {
+    this->self_test_passed_ = false;
+    this->self_test_incomplete_ = false;
+    this->self_test_enabled_ = true;
   }
 }
 
@@ -492,51 +514,87 @@ void LINCommunication::self_test_init_if_needed_() {
   static const CaseDef CASES[] = {{120, 0x00, 3}, {150, 0x01, 2}, {180, 0x15, 4}, {200, 0x1F, 8}, {220, 0x3B, 3},
                                   {250, 0x3C, 2}, {280, 0x3D, 2}, {300, 0x3E, 6}, {330, 0x3F, 1}};
   const size_t case_count = sizeof(CASES) / sizeof(CASES[0]);
-  if (case_count > SELF_TEST_MAX_IDS) {
-    ESP_LOGV(TAG, "SelfTest truncated: too many cases (%zu)", case_count);
+  static_assert(case_count <= SELF_TEST_MAX_IDS);
+  if (this->data_mutex_ == nullptr || xSemaphoreTake(this->data_mutex_, portMAX_DELAY) != pdTRUE) {
+    this->self_test_enabled_ = false;
+    this->self_test_incomplete_ = true;
+    ESP_LOGW(TAG, "LIN self-test INCOMPLETE: no TX table lock; test traffic refused");
+    return;
   }
-  size_t added = 0;
-  for (size_t i = 0; i < case_count && added < SELF_TEST_MAX_IDS; ++i) {
+  memcpy(this->self_test_schedule_backup_, this->schedule_, sizeof(this->schedule_));
+  memcpy(this->self_test_responses_backup_, this->responses_, sizeof(this->responses_));
+
+  // Install the whole run under the same lock used by every header/response send.
+  // On capacity failure roll back BEFORE unlocking, so no partial run reaches the wire.
+  for (size_t i = 0; i < case_count; ++i) {
     const auto &c = CASES[i];
-    if (!commander_add_id_schedule(c.id, c.interval_ms)) {
-      ESP_LOGV(TAG, "Schedule full while adding self-test ID 0x%02X", c.id);
-      continue;
+    LinScheduleItem *schedule = nullptr;
+    for (auto &item : this->schedule_) {
+      if (item.updateInterval != 0 && item.id == c.id) {
+        schedule = &item;
+        break;
+      }
+      if (item.updateInterval == 0 && schedule == nullptr)
+        schedule = &item;
     }
-    uint8_t payload[LIN_MAX_DATA_SIZE]{};
-    for (uint8_t k = 0; k < c.payload_len && k < LIN_MAX_DATA_SIZE; ++k) {
-      payload[k] = (uint8_t) (0xA0 + c.id + k);
+    LinRespondData *response = nullptr;
+    for (auto &item : this->responses_) {
+      if (item.dataLength != 0 && item.id == c.id) {
+        response = &item;
+        break;
+      }
+      if (item.dataLength == 0 && response == nullptr)
+        response = &item;
     }
-    set_response_data(c.id, payload, c.payload_len);
-    self_test_stats_[added] = {.id = c.id,
-                               .scheduled_interval_ms = c.interval_ms,
-                               .seen_updates = 0,
-                               .last_update_time_us = 0,
-                               .first_update_time_us = 0,
-                               .missed_windows = 0,
-                               .min_interval_us = 0,
-                               .max_interval_us = 0};
-    added++;
+    if (schedule == nullptr || response == nullptr) {
+      memcpy(this->schedule_, this->self_test_schedule_backup_, sizeof(this->schedule_));
+      memcpy(this->responses_, this->self_test_responses_backup_, sizeof(this->responses_));
+      this->self_test_enabled_ = false;
+      this->self_test_incomplete_ = true;
+      xSemaphoreGive(this->data_mutex_);
+      ESP_LOGW(TAG, "LIN self-test INCOMPLETE: tables full at ID 0x%02X; test traffic refused", c.id);
+      return;
+    }
+    schedule->id = c.id;
+    schedule->updateInterval = c.interval_ms;
+    schedule->last_send_time_ms = 0;
+    schedule->sent_once = false;
+    for (uint8_t k = 0; k < c.payload_len; ++k)
+      response->responseData[k] = (uint8_t) (0xA0 + c.id + k);
+    response->responseData[c.payload_len] =
+        this->lin_protocol_handler_->calculate_checksum(c.id, response->responseData, c.payload_len);
+    response->id = c.id;
+    response->dataLength = c.payload_len + 1;
+    response->enhancedChecksum = true;
+    response->lastResponseTime = 0;
+    this->self_test_stats_[i] = {.id = c.id,
+                                 .scheduled_interval_ms = c.interval_ms,
+                                 .seen_updates = 0,
+                                 .last_update_time_us = 0,
+                                 .first_update_time_us = 0,
+                                 .missed_windows = 0,
+                                 .min_interval_us = 0,
+                                 .max_interval_us = 0};
   }
-  self_test_count_ = added;
-  self_test_start_time_us_ = esp_timer_get_time();
-  self_test_initialized_ = true;
-  ESP_LOGV(TAG, "LIN self-test initialized with %zu IDs", added);
+  this->self_test_count_ = case_count;
+  this->self_test_start_time_us_ = esp_timer_get_time();
+  this->self_test_last_eval_us_ = 0;
+  this->self_test_initialized_ = true;
+  xSemaphoreGive(this->data_mutex_);
+  ESP_LOGV(TAG, "LIN self-test initialized with %zu IDs", case_count);
 }
 
 void LINCommunication::self_test_evaluate_() {
-  int64_t elapsed_us = esp_timer_get_time() - self_test_start_time_us_;
-  if (elapsed_us - self_test_last_eval_us_ < 2'000'000)
+  int64_t elapsed_us = esp_timer_get_time() - this->self_test_start_time_us_;
+  if (elapsed_us - this->self_test_last_eval_us_ < 2'000'000)
     return;
-  self_test_last_eval_us_ = elapsed_us;
+  this->self_test_last_eval_us_ = elapsed_us;
 
   ESP_LOGV(TAG, "---- LIN Self-Test Status (%.2fs) ----", elapsed_us / 1e6f);
-  // Iterate the slots that were actually filled. This used to run to
-  // SELF_TEST_MAX_IDS and skip `st.id == 0` as an empty-slot sentinel, which
-  // also skipped the scheduled id 0x00 — the first case the exerciser adds — so
-  // a 0x00 that never answered could not fail the verdict.
-  bool all_have_updates = self_test_count_ > 0;
-  for (size_t i = 0; i < self_test_count_; ++i) {
-    const auto &st = self_test_stats_[i];
+  // Installation is atomic: a nonzero count covers every case, including ID 0x00.
+  bool all_have_updates = this->self_test_count_ > 0;
+  for (size_t i = 0; i < this->self_test_count_; ++i) {
+    const auto &st = this->self_test_stats_[i];
     bool pass = st.seen_updates >= 2;
     all_have_updates &= pass;
     ESP_LOGV(TAG, "ID 0x%02X upd=%" PRIu32 " miss=%" PRIu32 " min=%.1fms max=%.1fms exp=%.1fms %s", st.id,
@@ -545,7 +603,9 @@ void LINCommunication::self_test_evaluate_() {
              pass ? LOG_STR_LITERAL("OK") : LOG_STR_LITERAL("WAIT"));
   }
   if (all_have_updates && elapsed_us > 5'000'000) {
-    self_test_passed_ = true;
+    // PASS is a latch, not teardown: the bench observes synthetic traffic until
+    // the caller explicitly stops the test with enable_self_test(false).
+    this->self_test_passed_ = true;
     ESP_LOGV(TAG, "LIN self-test: BASIC PASS (all IDs active).");
   }
 }

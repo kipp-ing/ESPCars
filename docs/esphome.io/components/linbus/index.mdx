@@ -34,7 +34,7 @@ linbus:
 - **uart_port** (*Optional*, enum): Select a UART physically present on the target.
   - `UART_NUM_0`
   - `UART_NUM_1` *(default)*
-  - `UART_NUM_2`
+  - `UART_NUM_2` (only on targets with a third HP UART; rejected on C3/C6)
 - **mode** (*Optional*, enum): Operating role. Select `listener` explicitly to start observing.
   - `listener`: Never transmits.
   - `responder`: Answers registered identifiers.
@@ -142,6 +142,12 @@ then:
 
 - **id** (*Optional*, [ID](/guides/configuration-types/#id)): LIN instance.
 - **enable** (*Optional*, templatable boolean): Start or stop self-test. Defaults to `true`.
+
+BASIC PASS latches while test traffic continues until explicitly stopped. Only `enable: false`
+clears that latch and restores the exact pre-test schedule and response tables, including overwritten
+user entries. Restored user traffic resumes; in-flight UART bytes may finish. Edits to those tables
+during a run are temporary. All nine cases must fit in both tables, or installation is refused
+atomically with an `INCOMPLETE` log and component warning; the pass sensor stays false.
 
 ## Transmitting Roles
 
