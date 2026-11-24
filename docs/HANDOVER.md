@@ -165,40 +165,40 @@ mostly for Codex, one phase per PR. A PR titled `[bench-pending]` waits for
 
   An ESPHome-style review (2026-11-23, upstream's own review prompts) is the
   queue for the rest: [`REVIEW-esphome-2026-11.md`](REVIEW-esphome-2026-11.md),
-  one row per finding with an ID and a status. #49–#53 fixed the TX-safety
-  findings and the worst glue bugs (uds#1–4, lin#1/9/11, cg#4/6/8, po#1/2/9,
-  ci#1/2/3/5/8/9); all five are bench-pending in the P9 ledger, and #53 makes
-  `source_address` mandatory for isotp extended addressing. Open functional
-  bugs, roughly in the order to pick them up (the next Codex batch, after a go):
-  - `can_gateway`: RTR frames decoded from a stale buffer (cg#7); publish-on-change
-    runs before ESPHome filters, breaking timeout/window filters (cg#14); bus-off
-    never initially published (cg#16); `% N` on free-running counters breaks at
-    the 2^32 wrap for non-power-of-two depths (cg#5); an ISR hook does not stop
-    hardware filter offload (cg#9); `#error` on IDF ≥ 5.6 while upstream dev
-    defaults to 6.1.1 (cg#1).
-  - `linbus`: stock `uart`/`logger` on the same port re-pins or deletes the driver
-    (lin#2); a second `on_frame` for one ID never fires (lin#3); `update_response`
-    changes length without the RX hint (lin#4); pin inversion and expanders
-    accepted but ignored (lin#10); a failed response write still counts as
-    answered (lin#8); listener `error_rate` always 0 and bus load counting its own
-    echo (lin#19/20).
-  - `uds`: one group name on two ECUs is unresolvable (uds#6); unsigned 64-bit
-    above `INT64_MAX` decodes negative on the MCU (uds#8); P2 starts at queueing,
-    not at transmit end (uds#5); flashed-catalog rebinding checks names only
-    (uds#7).
-  - `ccp`/`isotp`: a second `connect_and` overwrites the pending callback (ci#4);
-    payload lengths narrow before validation (ci#7); a refused flow control
-    survives timeout and replacement (ci#10); a PCI-only consecutive frame
-    advances the sequence (ci#11); `collect_timeout` up to `0xFFFFFFFF` (ci#12); a
-    negative response is not surfaced (ci#13).
-  - `portal`: `switch_off` reads `Switch::state` from the httpd task (po#3);
-    `segment: car` duplicates the root ID and duplicate value keys collapse
-    (po#5/6); non-finite limits emit invalid C++ (po#7); `?path=` caps IDs at 26
-    characters (po#10); `\u0000` truncates matched strings (po#13).
-  - `sd_logger`: see the two `sd_logger` tables. Shutdown is 1.0c; the rest
-    includes a pending confirm that survives a card swap and marks the other
-    card's file uploadable, an unmount under an in-flight `f_read`, the MBR
-    buffer overwritten while iterating, and `spitrace` clear looping 2^32 times.
+  one row per finding with an ID and a status. Batch 1 (#49–#53) fixed the
+  TX-safety findings and the worst glue bugs; #53 makes `source_address`
+  mandatory for isotp extended addressing. Batch 2 (#55–#61, 2026-11-24) fixed
+  the functional bugs of every component (uds#5/6/8/9/11, ci#4/7/10–13,
+  lin#2–5/7/8/10/19–22, cg#3/5/7/9/11/12/14–16/25, po#3/5–8/10–13/22,
+  sdc#1–7/10–14, sdr#1–4/7–9). All twelve PRs are bench-pending in the P9 ledger.
+
+  **Next is the P9 bench run, not batch 3** (decided with Jan 2026-11-24):
+  [`../tests/hil/P9-RUNBOOK.md`](../tests/hil/P9-RUNBOOK.md) against `cb0db60`.
+  The batches touch hot paths — LIN RX decode, the gateway ring push (depth 48
+  gained five instructions per push), the sd_logger writer and tap drain — so
+  P9 must cover `verify.py` (19.4 laps/s, zero errors), the CAN-only stress rig
+  with M6 loss = 0, LIN wire timing on the scope, a card swap, and the heap floor
+  over a long run. Behaviour changes to expect there: `inject()` refuses callers
+  outside the main loop (cg#3); `bus_off` publishes at startup (cg#16); a queue
+  whose consumer made no progress for 10 min is expired with loss markers
+  (sdc#10 — a streaming queue never expires); LIN `error_rate` counts fault
+  events over observed frames (lin#19); several configs that compiled but were
+  broken now fail validation.
+
+  Open "blocker" rows after batch 2, for after P9:
+  - heap churn on hot paths — a vector or string per frame or action (lin#6,
+    cg#13, ci#6, po#14, sdc#8, sdc#9, sdr#5). Works today; matters for a
+    long-running car config, so let P9's heap-floor numbers rank them.
+  - uds#7: flashed-catalog rebinding checks names and element count only, so a
+    type change in a re-flashed catalog publishes wrong values silently.
+  - upstream-only: cg#1 (`#error` on IDF ≥ 5.6), cg#2 (ISR rings may land in
+    PSRAM — no PSRAM on the C6 boards).
+  - convention/tests: schema extractors (uds#10, cg#10, po#4, sdr#6), `CONF_`
+    redefinitions (lin#12), runtime coverage (lin#13, ci#14 — partly met by the
+    `test_glue_*` binaries).
+  - clang-tidy on the non-CI fixture `sd_logger/test-taponly` still reports two
+    pre-existing findings (redundant `return` in the confine-format path,
+    `tap_translate.h` nested namespaces); CI analyses only each `test.yaml`.
 
   The convention rows (enum prefixes, `millis()` in `loop()`, bare
   `mark_failed()`, annotations, schema extractors, `CONF_` redefinitions, `final`,
