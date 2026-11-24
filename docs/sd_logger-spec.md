@@ -976,6 +976,9 @@ driver's fixed 40 ms (`wait_for_miso`, capped at 127 ms), then CMD12, CMD0 and
 CMD13. It reports the measured busy time and the card's own status byte, which
 are the two numbers that separate "wedged", "merely slower than 40 ms" and
 "absent" — a distinction the bare `mount failed: ESP_ERR_TIMEOUT` never carried.
+The busy budget doubles from the third attempt up to `max_busy_timeout`,
+including the final attempt allowed by `max_attempts` (2 s, 2 s, 4 s, 8 s
+for the first four attempts with the default initial budget).
 
 **Proven on hardware 2026-07-29** (`tests/hil/probe-orange-wedge.yaml`, Mr.
 Orange, log in wedge run (2026-07-29, 12/12, git history)). The control run — the same
@@ -1071,7 +1074,9 @@ New with format v1 (§6). Each still needs both an accept and a reject test:
   **and** `sources` — two wires answering to one label makes every line
   ambiguous, and the file is the only artifact that survives the run.
 - **V14** `sources[].tag` in 0–255 and disjoint from every `can_ports` tag;
-  `kind` ∈ {`can`,`lin`,`user`}. Same reasoning as V11, other direction.
+  `kind` ∈ {`can`,`lin`,`user`}. At most 255 entries across `can_ports` and
+  `sources` together, matching the source table's 8-bit count. Same reasoning
+  as V11, other direction.
 - **V15** `esphome_logs:` requires the `logger:` component — without
   `request_log_listener()` the callback compiles to a **no-op** and capture
   silently does nothing (§4a).

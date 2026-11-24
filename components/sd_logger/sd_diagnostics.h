@@ -280,6 +280,13 @@ class SdSpiTraceRing {
   void append(const SdSpiTraceEntry &entry) {
     const uint32_t seq = this->write_index_.fetch_add(1, std::memory_order_relaxed);
     TraceSlot &slot = this->entries_[seq % SD_SPI_TRACE_ENTRIES];
+    uint32_t version = slot.version.load(std::memory_order_relaxed);
+    // Never wait on a reader or another appender. If an appender is preempted for an entire
+    // ring, leave this ticket missing rather than mix two writers in the same slot.
+    if ((version & 1u) != 0 || !slot.version.compare_exchange_strong(version, version + 1, std::memory_order_relaxed))
+      return;
+    // Publish "writing" before any payload store, including on weakly ordered CPUs.
+    std::atomic_thread_fence(std::memory_order_release);
     slot.us_low.store(static_cast<uint32_t>(entry.us), std::memory_order_relaxed);
     slot.us_high.store(static_cast<uint32_t>(static_cast<uint64_t>(entry.us) >> 32), std::memory_order_relaxed);
     slot.arg.store(entry.arg, std::memory_order_relaxed);
@@ -296,45 +303,64 @@ class SdSpiTraceRing {
     std::memcpy(&task_high, entry.task + sizeof(task_low), sizeof(task_high));
     slot.task_low.store(task_low, std::memory_order_relaxed);
     slot.task_high.store(task_high, std::memory_order_relaxed);
-    // Last so a reader can compare this sequence with the CSV row it receives. The individual
-    // fields are atomic too: a tail may be mixed during a wrap, but it is never a C++ data race.
     slot.seq.store(seq, std::memory_order_relaxed);
-    if (seq >= SD_SPI_TRACE_ENTRIES)
-      this->dropped_.store(seq - static_cast<uint32_t>(SD_SPI_TRACE_ENTRIES) + 1, std::memory_order_relaxed);
+    slot.version.store(version + 2, std::memory_order_release);
   }
 
   uint32_t write_index() const { return this->write_index_.load(std::memory_order_relaxed); }
-  uint32_t dropped() const { return this->dropped_.load(std::memory_order_relaxed); }
+  uint32_t dropped() const {
+    const uint32_t baseline = this->clear_index_.load(std::memory_order_relaxed);
+    const uint32_t distance = this->write_index() - baseline;
+    return distance > SD_SPI_TRACE_ENTRIES ? distance - static_cast<uint32_t>(SD_SPI_TRACE_ENTRIES) : 0;
+  }
   uint32_t count(uint32_t write_index) const {
-    return write_index < SD_SPI_TRACE_ENTRIES ? write_index : static_cast<uint32_t>(SD_SPI_TRACE_ENTRIES);
+    const uint32_t distance = write_index - this->clear_index_.load(std::memory_order_relaxed);
+    return distance < SD_SPI_TRACE_ENTRIES ? distance : static_cast<uint32_t>(SD_SPI_TRACE_ENTRIES);
   }
   uint32_t oldest(uint32_t write_index) const { return write_index - this->count(write_index); }
   SdSpiTraceEntry read(uint32_t seq) const {
     const TraceSlot &slot = this->entries_[seq % SD_SPI_TRACE_ENTRIES];
-    SdSpiTraceEntry entry{};
-    entry.seq = slot.seq.load(std::memory_order_relaxed);
-    const uint64_t us = static_cast<uint64_t>(slot.us_low.load(std::memory_order_relaxed)) |
-                        (static_cast<uint64_t>(slot.us_high.load(std::memory_order_relaxed)) << 32);
-    entry.us = static_cast<int64_t>(us);
-    entry.arg = slot.arg.load(std::memory_order_relaxed);
-    entry.blklen = slot.blklen.load(std::memory_order_relaxed);
-    entry.datalen = slot.datalen.load(std::memory_order_relaxed);
-    entry.flags = slot.flags.load(std::memory_order_relaxed);
-    entry.response_raw = slot.response_raw.load(std::memory_order_relaxed);
-    entry.response = slot.response.load(std::memory_order_relaxed);
-    entry.err = slot.err.load(std::memory_order_relaxed);
-    entry.opcode = slot.opcode.load(std::memory_order_relaxed);
-    const uint32_t task_low = slot.task_low.load(std::memory_order_relaxed);
-    const uint32_t task_high = slot.task_high.load(std::memory_order_relaxed);
-    std::memcpy(entry.task, &task_low, sizeof(task_low));
-    std::memcpy(entry.task + sizeof(task_low), &task_high, sizeof(task_high));
-    entry.task[sizeof(entry.task) - 1] = '\0';
-    return entry;
+    // Bounded retries: diagnostics must not stall SDSPI or the HTTP task under continuous writes.
+    for (unsigned attempt = 0; attempt < 3; attempt++) {
+      const uint32_t before = slot.version.load(std::memory_order_acquire);
+      if (before == 0 || (before & 1u) != 0)
+        continue;
+      SdSpiTraceEntry entry{};
+      entry.seq = slot.seq.load(std::memory_order_relaxed);
+      const uint64_t us = static_cast<uint64_t>(slot.us_low.load(std::memory_order_relaxed)) |
+                          (static_cast<uint64_t>(slot.us_high.load(std::memory_order_relaxed)) << 32);
+      entry.us = static_cast<int64_t>(us);
+      entry.arg = slot.arg.load(std::memory_order_relaxed);
+      entry.blklen = slot.blklen.load(std::memory_order_relaxed);
+      entry.datalen = slot.datalen.load(std::memory_order_relaxed);
+      entry.flags = slot.flags.load(std::memory_order_relaxed);
+      entry.response_raw = slot.response_raw.load(std::memory_order_relaxed);
+      entry.response = slot.response.load(std::memory_order_relaxed);
+      entry.err = slot.err.load(std::memory_order_relaxed);
+      entry.opcode = slot.opcode.load(std::memory_order_relaxed);
+      const uint32_t task_low = slot.task_low.load(std::memory_order_relaxed);
+      const uint32_t task_high = slot.task_high.load(std::memory_order_relaxed);
+      std::memcpy(entry.task, &task_low, sizeof(task_low));
+      std::memcpy(entry.task + sizeof(task_low), &task_high, sizeof(task_high));
+      entry.task[sizeof(entry.task) - 1] = '\0';
+      // Keep the payload loads before the second generation sample. Atomic payload fields
+      // make even a rejected copy data-race-free; the generation check makes accepted copies coherent.
+      std::atomic_thread_fence(std::memory_order_acquire);
+      if (before == slot.version.load(std::memory_order_relaxed))
+        return entry;
+    }
+    SdSpiTraceEntry unavailable{};
+    unavailable.seq = seq + 1;  // Always differs, including across uint32_t wrap; CSV readers detect loss.
+    return unavailable;
   }
   SdSpiTraceSummary summarize(uint32_t begin, uint32_t end) const {
     SdSpiTraceSummary summary{};
     summary.commands = end - begin;
-    for (uint32_t seq = begin; seq != end; seq++) {
+    const uint32_t limit =
+        summary.commands < SD_SPI_TRACE_ENTRIES ? summary.commands : static_cast<uint32_t>(SD_SPI_TRACE_ENTRIES);
+    summary.missing = summary.commands - limit;
+    for (uint32_t i = 0; i < limit; i++) {
+      const uint32_t seq = end - limit + i;
       const SdSpiTraceEntry entry = this->read(seq);
       if (entry.seq != seq) {
         summary.missing++;
@@ -352,12 +378,13 @@ class SdSpiTraceRing {
     return summary;
   }
   void clear() {
-    this->write_index_.store(0, std::memory_order_relaxed);
-    this->dropped_.store(0, std::memory_order_relaxed);
+    // Clear the display, never the command counter sampled around writer operations.
+    this->clear_index_.store(this->write_index(), std::memory_order_relaxed);
   }
 
  private:
   struct TraceSlot {
+    std::atomic<uint32_t> version{0};  // odd: writing; nonzero even: published
     std::atomic<uint32_t> seq{0};
     std::atomic<uint32_t> us_low{0};
     std::atomic<uint32_t> us_high{0};
@@ -375,7 +402,7 @@ class SdSpiTraceRing {
 
   TraceSlot entries_[SD_SPI_TRACE_ENTRIES]{};
   std::atomic<uint32_t> write_index_{0};
-  std::atomic<uint32_t> dropped_{0};
+  std::atomic<uint32_t> clear_index_{0};
 };
 
 /// Writer task stack, in BYTES. On the ESP-IDF RISC-V port `StackType_t` is

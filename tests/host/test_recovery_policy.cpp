@@ -381,3 +381,21 @@ TEST(recovery_exhausted_budget_stops_the_reset_ladder_too) {
   CHECK(policy.exhausted());
   CHECK(!policy.due(1000000));
 }
+
+TEST(recovery_final_attempt_gets_its_full_busy_budget) {
+  for (uint32_t limit : {3u, 4u}) {
+    RecoveryPolicy policy = make_policy(1000, 30000, limit);
+    policy.configure_reset(true, 2000, 10000);
+    policy.arm(0);
+    const uint32_t expected[] = {2000, 2000, 4000, 8000};
+    for (uint32_t attempt = 0; attempt < limit; attempt++) {
+      policy.note_attempt(0);
+      CHECK_EQ(policy.busy_timeout_ms(), expected[attempt]);
+    }
+    CHECK(policy.exhausted());
+    const uint32_t final_budget = policy.busy_timeout_ms();
+    policy.note_attempt(0);
+    CHECK_EQ(policy.busy_timeout_ms(), final_budget);
+    CHECK(!policy.due(1000000));
+  }
+}

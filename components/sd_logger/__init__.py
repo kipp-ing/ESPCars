@@ -135,6 +135,8 @@ KIND_LETTERS = {"can": "C", "lin": "L", "user": "U"}
 # at production load (spec F1g), which is why 8 is the cap and 4 the advice.
 LABEL_MAX = 8
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,8}$")
+# SourceTable stores its entry count in uint8_t, independently of the tag range.
+MAX_SOURCES = 255
 
 # V18: text-ring depth. Small because a log line is 192 B of slot, and the ring
 # only has to cover one writer poll period.
@@ -183,7 +185,10 @@ def _validate_size(value):
     elif text.endswith("B"):
         text = text[:-1]
     try:
-        return int(float(text) * mult)
+        size = float(text) * mult
+        if not math.isfinite(size):
+            raise ValueError("size must be finite")
+        return int(size)
     except ValueError as err:
         raise cv.Invalid(f"invalid size {value!r}") from err
 
@@ -346,7 +351,7 @@ def _validate_label(value):
     recommendation is 4 (spec F1g).
     """
     text = cv.string_strict(value)
-    if not LABEL_PATTERN.match(text):
+    if not LABEL_PATTERN.fullmatch(text):
         raise cv.Invalid(
             f"'{text}' is not a usable label: use 1-{LABEL_MAX} characters from "
             f"A-Z a-z 0-9 _ - . The label names its bus on every line of the "
@@ -456,6 +461,11 @@ def _validate_sources_and_labels(config):
     """
     can_ports = config.get(CONF_CAN_PORTS) or []
     sources = config.get(CONF_SOURCES) or []
+    if len(can_ports) + len(sources) > MAX_SOURCES:
+        raise cv.Invalid(
+            f"can_ports and sources together must contain at most {MAX_SOURCES} "
+            "entries; the source table uses an 8-bit count"
+        )
 
     tags: dict[int, str] = {}
     labels: dict[str, str] = {}
