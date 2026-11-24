@@ -16,6 +16,10 @@ value must stay a *list* even for the single-block shorthand.
 
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 
 from esphome import config_validation as cv
@@ -24,8 +28,8 @@ from esphome.const import CONF_TRIGGER_ID
 from .common import PORT_A, PORT_B, gateway, port, setup_c6, validate
 
 # A lambda with the full trigger signature: can_id, data, dlc, extended, rtr.
-# `data` is a borrowed `const uint8_t *`, never a container — the bench
-# catcher's `topo::observe()` call has exactly this shape. Pre-wrapped in
+# `data` owns eight bytes and converts to `const uint8_t *` for the bench
+# catcher's `topo::observe()` call. Pre-wrapped in
 # cv.Lambda because cv.lambda_ only attaches YAML source metadata to a plain
 # str, which a dict literal has none of (same reason as test_send.py).
 SNIFF = {
@@ -51,6 +55,68 @@ def test_on_frame_with_then_accepted(set_core_config) -> None:
         gateway(ports=[port(PORT_A, on_frame={"then": [SNIFF]}), dict(PORT_B)])
     )
     assert len(on_frame(config["ports"][0])) == 1
+
+
+def test_on_frame_delay_then_data_access_accepted(set_core_config) -> None:
+    """Deferred actions receive an owning copy, just like stock canbus."""
+    setup_c6(set_core_config)
+    config = validate(
+        gateway(
+            ports=[port(PORT_A, on_frame={"then": [{"delay": "1ms"}, SNIFF]})],
+            routes=[],
+        )
+    )
+    assert len(on_frame(config["ports"][0])[0]["then"]) == 2
+
+
+def test_on_frame_delayed_codegen_uses_owning_argument(tmp_path: Path) -> None:
+    """The owning C++ trigger type must also reach generated delayed actions."""
+    components = Path(__file__).resolve().parents[2] / "components"
+    config = tmp_path / "frame.yaml"
+    config.write_text(
+        f"""\
+esphome:
+  name: gateway-frame-lifetime
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+external_components:
+  - source:
+      type: local
+      path: {components.as_posix()}
+    components: [can_gateway]
+logger:
+can_gateway:
+  ports:
+    - id: wire
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 125kbps
+      listen_only: true
+      on_frame:
+        then:
+          - delay: 1ms
+          - lambda: |-
+              const uint8_t *bytes = data;
+              if (dlc > 0) ESP_LOGD("test", "%u %u", bytes[0], data[0]);
+"""
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "esphome", "compile", "--only-generate", str(config)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    cpp = (tmp_path / ".esphome/build/gateway-frame-lifetime/src/main.cpp").read_text()
+    assert (
+        "DelayAction<uint32_t, can_gateway::CanGatewayFrameData, uint8_t, bool, bool>"
+        in cpp
+    )
+    assert "can_gateway::CanGatewayFrameData data" in cpp
 
 
 def test_on_frame_shorthand_action_list_accepted(set_core_config) -> None:

@@ -596,26 +596,16 @@ void GatewayPort::log_id_timings_step_() {
 void IRAM_ATTR GatewayPort::handle_rx_isr() {
   GatewayRoute *route = this->route_out_;
   if (route == nullptr) {
-    // No outbound route. Any RX consumer — direct ISR hook, observation ring
-    // (A12/B20), or datalogger tap — receives into the static staging frame,
-    // even though nothing routes, decodes or triggers on this port. Found on
+    // No outbound route. Any RX consumer — statistics, snapshot, direct ISR
+    // hook, observation ring (A12/B20), or datalogger tap — receives into the
+    // static staging frame, even without routes, decoders or triggers. Found on
     // the bench as a port with only `log_tap: true` that never received a
     // frame — bus load 0.0 % against a live, several-hundred-frames/s sender,
     // because leaving the frame to the driver also skips run_rx_taps_()
     // (private/notes/HANDOVER-guest-bms.md §8). A true destination-only port
     // has no consumer and lets the driver discard the frame (v0.5 behavior).
-#if defined(USE_CAN_GATEWAY_OBSERVE) || defined(USE_CAN_GATEWAY_LOG_TAP) || defined(USE_CAN_GATEWAY_ISR_HOOK)
-    bool armed = false;
-#ifdef USE_CAN_GATEWAY_OBSERVE
-    armed = this->observe_ring_ != nullptr;
-#endif
-#ifdef USE_CAN_GATEWAY_LOG_TAP
-    armed = armed || this->log_tap_ring_ != nullptr;
-#endif
-#ifdef USE_CAN_GATEWAY_ISR_HOOK
-    armed = armed || this->isr_frame_hook_ != nullptr;
-#endif
-    if (armed)
+#ifdef CAN_GATEWAY_HAS_RX_TAPS
+    if (this->rx_taps_active_())
       this->receive_into_staging_();
 #endif
     return;

@@ -45,10 +45,12 @@ def test_hook_arms_a_route_less_port_and_inject_is_task_safe(set_core_config) ->
     source = (_component_dir() / "can_gateway.cpp").read_text()
     isr = _brace_block(source, "GatewayPort::handle_rx_isr()")
     no_route = _brace_block(isr, "if (route == nullptr)")
-    assert f"#ifdef {HOOK_DEFINE}" in no_route
-    assert "isr_frame_hook_ != nullptr" in no_route
+    assert "#ifdef CAN_GATEWAY_HAS_RX_TAPS" in no_route
+    assert "this->rx_taps_active_()" in no_route
     assert "receive_into_staging_" in no_route
-    assert "active = active || this->isr_frame_hook_ != nullptr;" in header
+    predicate = _brace_block(header, "bool rx_taps_active_()")
+    assert f"#ifdef {HOOK_DEFINE}" in predicate
+    assert "active = active || this->isr_frame_hook_ != nullptr;" in predicate
 
     inject = _brace_block(source, "bool GatewayPort::inject")
     assert "portENTER_CRITICAL(&this->mux_)" in inject

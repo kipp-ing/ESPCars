@@ -121,8 +121,10 @@ can_gateway:
 
 ### `on_frame` Trigger
 
-Runs under a port for every received frame. Arguments are `can_id`, `data` (byte pointer), `dlc`, `extended`
-and `rtr`. Access only `dlc` bytes during the callback; the buffer is temporary. This subscribes to all IDs,
+Runs under a port for every received frame. Arguments are `can_id`, `data` (an owning eight-byte value), `dlc`,
+`extended` and `rtr`. Access only `dlc` bytes. Delayed actions retain their own payload copy without a payload
+heap allocation. `data[i]` and calls taking `const uint8_t *` remain supported; separately retained pointers
+borrow the value's lifetime. This subscribes to all IDs,
 so a busy bus can overflow the observation ring if the main loop cannot drain it.
 
 ```yaml
