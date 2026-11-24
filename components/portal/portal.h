@@ -151,6 +151,7 @@ class Portal : public Component, public AsyncWebHandler {
     number::Number *number{nullptr};
 #endif
     std::vector<const char *> options;  // select: copied at setup
+    bool options_valid{true};
   };
   // Guarded by mutex_. One pending slot per action: while `pending`, a further POST is busy.
   struct ActionRuntime {
@@ -218,6 +219,8 @@ class Portal : public Component, public AsyncWebHandler {
   // Sampled once per loop() under mutex_. text is a pointer into sample_text_[i]; both are
   // member-owned (never on the stack) so the mutex-protected copy is a fixed-cost memcpy per
   // value with no allocation.
+  bool absent_samples_[PORTAL_MAX_NODES]{};
+  bool request_absent_[PORTAL_MAX_NODES]{};
   core::ValueSample samples_[PORTAL_MAX_VALUES]{};
   char sample_text_[PORTAL_MAX_VALUES][PORTAL_TEXT_MAX]{};
   ValueRuntime value_runtime_[PORTAL_MAX_VALUES]{};
@@ -243,6 +246,9 @@ class Portal : public Component, public AsyncWebHandler {
 
   SemaphoreHandle_t mutex_{nullptr};
   char chunk_buf_[core::CHUNK_BYTES]{};  // httpd task only
+  char path_buf_[PORTAL_PATH_MAX]{};
+  // Longest configured path plus both parameter names, separator, uint32 after, and NUL.
+  char query_buf_[PORTAL_PATH_MAX + sizeof("path=&after=4294967295") - 1]{};
   // POST body of the request being handled (httpd task only; one request at a time).
   char body_buf_[core::ACTION_BODY_MAX]{};
   size_t body_total_{0};

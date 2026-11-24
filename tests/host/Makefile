@@ -106,7 +106,7 @@ compile: lockcheck gluecheck $(BINS)
 # headers, whose fakes can be inline rather than under a *_stubs directory.
 gluecheck: $(CORE_OBJS)
 	@awk '\
-	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|gateway_[^ /]*[.]inc)" { \
+	  $$0 ~ "(^|[ /])([^ /]+_)?stubs([/.]|$$)|build/(transport_runtime[.]h|portal_runtime[.]h|gateway_[^ /]*[.]inc)" { \
 	    printf "%s:%d: %s\n", FILENAME, FNR, $$0; bad = 1; \
 	  } \
 	  END { exit bad ? 1 : 0 }' $(CORE_OBJS:.o=.d) || { \
@@ -168,6 +168,11 @@ $(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
 $(BUILD)/%.o: %.cpp | $(GEN) $(RUNTIME_GEN)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/test_glue_portal.o: $(BUILD)/portal_runtime.h
+
+$(BUILD)/portal_runtime.h: generate_portal_runtime.py $(PORTAL_DIR)/portal.h $(PORTAL_DIR)/portal.cpp | $(BUILD)
+	@python3 generate_portal_runtime.py
 
 $(BUILD)/test_glue_transport_runtime.o: $(BUILD)/transport_runtime.h
 
