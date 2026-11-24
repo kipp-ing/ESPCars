@@ -21,3 +21,8 @@ template<typename... Args> void log(const char *format, Args... args) {
 #define ESP_LOGW(tag, ...) ::linbus_test::log(__VA_ARGS__)
 #define ESP_LOGE(tag, ...) ::linbus_test::log(__VA_ARGS__)
 #define LOG_STR_LITERAL(value) value
+
+#define LOG_STR(value) value
+#define ESP_LOGI(tag, ...) ::linbus_test::log(__VA_ARGS__)
+#define ESP_LOGD(tag, ...) ::linbus_test::log(__VA_ARGS__)
+#define ESP_LOGCONFIG(tag, ...) ::linbus_test::log(__VA_ARGS__)

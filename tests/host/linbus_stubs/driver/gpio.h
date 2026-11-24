@@ -13,4 +13,7 @@ struct gpio_config_t {
   int intr_type;
 };
 inline void gpio_config(gpio_config_t *) {}
-inline void gpio_set_level(gpio_num_t, int) {}
+namespace linbus_test {
+inline unsigned raw_gpio_writes = 0;
+}
+inline void gpio_set_level(gpio_num_t, int) { ++linbus_test::raw_gpio_writes; }

@@ -5,3 +5,6 @@ constexpr int ESP_FAIL = -1;
 constexpr int ESP_ERR_INVALID_STATE = -2;
 constexpr int ESP_ERR_INVALID_ARG = -3;
 inline const char *esp_err_to_name(esp_err_t) { return "host error"; }
+
+constexpr int ESP_ERR_NO_MEM = -4;
+#define ESP_ERROR_CHECK(expr) ((void) (expr))
