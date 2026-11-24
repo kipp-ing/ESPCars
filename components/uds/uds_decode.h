@@ -50,12 +50,10 @@ inline bool field_covered(const FieldView &f, size_t resp_len, uint16_t element 
 /// v1 compilers emit repeat_count == 1, but the stride is implemented here so a later catalog
 /// works against unchanged firmware (§5).
 ///
-/// `*out` is the sign-extended value as int64_t. The one width where that representation is
-/// lossy: an *unsigned* 64-bit raw above INT64_MAX arrives as its two's-complement negative. Such
-/// a value is outside every i32 scale bound either way, so it decodes to "not available" — only a
-/// scale-less (raw passthrough) 64-bit unsigned field would show the difference, and no factory
-/// database field is 64-bit unsigned raw.
-inline bool extract_raw(const uint8_t *resp, size_t resp_len, const FieldView &f, uint16_t element, int64_t *out) {
+/// `*out` retains the extracted bits in uint64_t, sign-extended for SIGNED fields. Keep
+/// the field's signedness through evaluation: unsigned 64-bit values need the entire range.
+inline bool extract_raw_bits(const uint8_t *resp, size_t resp_len, const FieldView &f, uint16_t element,
+                             uint64_t *out) {
   if (resp == nullptr || out == nullptr)
     return false;
   if (f.bit_size == 0 || f.bit_size > 64)
@@ -80,12 +78,29 @@ inline bool extract_raw(const uint8_t *resp, size_t resp_len, const FieldView &f
     raw = swapped;
   }
   if ((f.flags & FIELD_FLAG_SIGNED) != 0 && f.bit_size < 64 && ((raw >> (f.bit_size - 1)) & 1u) != 0) {
-    // Two's-complement sign extension: the unsigned subtraction wraps, the cast below reads the
-    // wrapped pattern back as the intended negative. bit_size == 64 needs no extension (and
+    // Two's-complement sign extension: unsigned subtraction wraps to the extended bit pattern;
+    // signed_raw() interprets it later. bit_size == 64 needs no extension (and
     // 1 << 64 would be UB, which is why the guard is part of the algorithm, not an optimisation).
     raw -= (static_cast<uint64_t>(1) << f.bit_size);
   }
-  *out = static_cast<int64_t>(raw);
+  *out = raw;
+  return true;
+}
+
+/// Interpret a sign-extended two's-complement pattern without an out-of-range signed cast.
+inline int64_t signed_raw(uint64_t bits) {
+  return bits <= INT64_MAX ? static_cast<int64_t>(bits) : -static_cast<int64_t>(~bits) - 1;
+}
+
+/// Convenience for callers needing an int64_t. Refuse an unsigned raw that cannot fit,
+/// rather than silently returning a negative value; decode_numeric() retains the full range.
+inline bool extract_raw(const uint8_t *resp, size_t resp_len, const FieldView &f, uint16_t element, int64_t *out) {
+  uint64_t bits;
+  if (out == nullptr || !extract_raw_bits(resp, resp_len, f, element, &bits))
+    return false;
+  if ((f.flags & FIELD_FLAG_SIGNED) == 0 && bits > INT64_MAX)
+    return false;
+  *out = signed_raw(bits);
   return true;
 }
 
@@ -210,10 +225,16 @@ inline Decoded evaluate_scales(const Catalog &cat, const FieldView &f, int64_t r
 /// short) comes back as not-available, exactly like a sentinel — skipped and counted, never read.
 inline Decoded decode_numeric(const Catalog &cat, const FieldView &f, const uint8_t *resp, size_t resp_len,
                               uint16_t element = 0) {
-  int64_t raw;
-  if (!extract_raw(resp, resp_len, f, element, &raw))
+  uint64_t raw;
+  if (!extract_raw_bits(resp, resp_len, f, element, &raw))
     return Decoded{NAN, nullptr, false, false};
-  return evaluate_scales(cat, f, raw);
+  if ((f.flags & FIELD_FLAG_SIGNED) == 0 && raw > INT64_MAX) {
+    // Every scale bound is i32 (§6): no row can contain this unsigned raw, including -1
+    // sentinel rows. A scale-less field still publishes its positive raw value.
+    return f.scale_count == 0 ? Decoded{static_cast<float>(raw), nullptr, true, false}
+                              : Decoded{NAN, nullptr, false, false};
+  }
+  return evaluate_scales(cat, f, signed_raw(raw));
 }
 
 }  // namespace esphome::uds
