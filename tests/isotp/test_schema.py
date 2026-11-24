@@ -161,3 +161,81 @@ def test_timeout_defaults_are_1000ms(set_core_config, key: str) -> None:
 def test_timeouts_overridable(set_core_config, key: str) -> None:
     setup_c6(set_core_config)
     assert validate(isotp(**{key: "2500ms"}))[key].total_milliseconds == 2500
+
+
+@pytest.mark.parametrize(
+    "data",
+    [[1] * 65537, "x" * 65537, "é" * 2048, [], ""],
+    ids=[
+        "list-overflow",
+        "string-overflow",
+        "utf8-overflow",
+        "empty-list",
+        "empty-string",
+    ],
+)
+def test_b2_send_static_payload_rejects_wire_limit(set_core_config, data) -> None:
+    from esphome.components.isotp import SEND_ACTION_SCHEMA
+
+    setup_c6(set_core_config)
+    with pytest.raises(cv.Invalid, match="1.*4095"):
+        SEND_ACTION_SCHEMA({"id": "transport", "data": data})
+
+
+@pytest.mark.parametrize(
+    "data",
+    [[1], [1] * 4095, "x" * 4095, "é" * 2047],
+    ids=["one", "list-max", "string-max", "utf8-max"],
+)
+def test_b2_send_static_payload_wire_boundaries(set_core_config, data) -> None:
+    from esphome.components.isotp import SEND_ACTION_SCHEMA
+
+    setup_c6(set_core_config)
+    assert SEND_ACTION_SCHEMA({"id": "transport", "data": data})["data"] == data
+
+
+@pytest.mark.parametrize("size", [9, 257])
+@pytest.mark.parametrize("as_string", [False, True])
+def test_b2_send_static_payload_rejects_configured_capacity(
+    set_core_config, size, as_string
+) -> None:
+    from esphome.components.isotp import SEND_ACTION_SCHEMA, _final_validate
+    import esphome.final_validate as fv
+
+    setup_c6(set_core_config)
+    protocol = validate(isotp(id="transport", max_message_size=8))
+    data = "é" * size if as_string else [1] * size
+    action = SEND_ACTION_SCHEMA({"id": "transport", "data": data})
+    token = fv.full_config.set(
+        {"isotp": [protocol], "script": [{"then": [{"isotp.send": action}]}]}
+    )
+    try:
+        with pytest.raises(cv.Invalid, match="max_message_size.*8"):
+            _final_validate(protocol)
+    finally:
+        fv.full_config.reset(token)
+
+
+def test_b2_send_final_validate_accepts_capacity_lambda_and_other_instance(
+    set_core_config,
+) -> None:
+    from esphome.components.isotp import SEND_ACTION_SCHEMA, _final_validate
+    from esphome.core import Lambda
+    import esphome.final_validate as fv
+
+    setup_c6(set_core_config)
+    protocol = validate(isotp(id="transport", max_message_size=8))
+    actions = [
+        {"isotp.send": SEND_ACTION_SCHEMA({"id": hub_id, "data": data})}
+        for hub_id, data in (
+            ("transport", [1] * 8),
+            ("transport", "é" * 4),
+            ("transport", Lambda("return {1};")),
+            ("other", [1] * 9),
+        )
+    ]
+    token = fv.full_config.set({"script": [{"then": actions}]})
+    try:
+        assert _final_validate(protocol) is protocol
+    finally:
+        fv.full_config.reset(token)

@@ -190,3 +190,80 @@ def test_daq_read_action_rejections(set_core_config, fields, message: str) -> No
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid, match=message):
         _daq_read_schema()({"id": "bms_ccp", "fields": fields})
+
+
+@pytest.mark.parametrize(("action", "limit"), [("download", 5), ("raw", 8)])
+@pytest.mark.parametrize("size", [0, 9, 257])
+def test_b2_payload_length_rejected(set_core_config, action, limit, size) -> None:
+    setup_c6(set_core_config)
+    validate(hub())
+    with pytest.raises(cv.Invalid, match=rf"1.*{limit}"):
+        automation.ACTION_REGISTRY[f"ccp.{action}"].schema(
+            {"id": "bms_ccp", "data": [1] * size}
+        )
+
+
+@pytest.mark.parametrize(("action", "limit"), [("download", 5), ("raw", 8)])
+def test_b2_payload_length_boundaries_and_lambda_accepted(
+    set_core_config, action, limit
+) -> None:
+    from esphome.core import Lambda
+
+    setup_c6(set_core_config)
+    validate(hub())
+    schema = automation.ACTION_REGISTRY[f"ccp.{action}"].schema
+    for data in ([1], [1] * limit, Lambda("return {1};")):
+        assert schema({"id": "bms_ccp", "data": data})["data"] == data
+    with pytest.raises(cv.Invalid, match=rf"1.*{limit}"):
+        schema({"id": "bms_ccp", "data": [1] * (limit + 1)})
+
+
+@pytest.mark.parametrize("value", [0x80000000, 0xFFFFFFFF])
+def test_b2_collect_timeout_rejects_signed_deadline_overflow(
+    set_core_config, value
+) -> None:
+    setup_c6(set_core_config)
+    validate(hub())
+    with pytest.raises(cv.Invalid, match="2147483647"):
+        _daq_read_schema()(
+            {
+                "id": "bms_ccp",
+                "fields": [{"address": 0x1000, "size": 1}],
+                "collect_timeout": value,
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [1, 5000, 0x7FFFFFFF])
+def test_b2_collect_timeout_supported_boundaries(set_core_config, value) -> None:
+    setup_c6(set_core_config)
+    validate(hub())
+    config = _daq_read_schema()(
+        {
+            "id": "bms_ccp",
+            "fields": [{"address": 0x1000, "size": 1}],
+            "collect_timeout": value,
+        }
+    )
+    assert config["collect_timeout"] == value
+
+
+@pytest.mark.parametrize("value", [0x80000000, 0xFFFFFFFF])
+def test_b2_response_timeout_rejects_signed_deadline_overflow(
+    set_core_config, value
+) -> None:
+    setup_c6(set_core_config)
+    validate(hub())
+    with pytest.raises(cv.Invalid, match="2147483647"):
+        validate(hub(response_timeout=f"{value}ms"))
+
+
+def test_b2_response_timeout_supported_maximum(set_core_config) -> None:
+    setup_c6(set_core_config)
+    validate(hub())
+    assert (
+        validate(hub(response_timeout="2147483647ms"))[
+            "response_timeout"
+        ].total_milliseconds
+        == 0x7FFFFFFF
+    )

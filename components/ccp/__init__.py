@@ -34,6 +34,7 @@ CcpRawAction = ccp_ns.class_("CcpRawAction", automation.Action)
 CcpSetEnabledAction = ccp_ns.class_("CcpSetEnabledAction", automation.Action)
 
 CCP_ODT_PAYLOAD = 7
+MAX_DEADLINE_TIMEOUT = 0x7FFFFFFF
 
 CONF_CAN_GATEWAY_ID = "can_gateway_id"
 CONF_COMMAND_ID = "command_id"
@@ -79,6 +80,22 @@ def _byte_order(value):
     return cv.one_of("little", "big", lower=True)(value)
 
 
+def _response_timeout(value):
+    value = cv.positive_time_period_milliseconds(value)
+    if value.total_milliseconds > MAX_DEADLINE_TIMEOUT:
+        raise cv.Invalid("response_timeout must be at most 2147483647 ms")
+    return value
+
+
+def _payload_bytes(limit):
+    return cv.templatable(
+        cv.All(
+            cv.ensure_list(cv.hex_uint8_t),
+            cv.Length(min=1, max=limit, msg=f"data must contain 1-{limit} bytes"),
+        )
+    )
+
+
 DAQ_ANCHOR_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ADDRESS): cv.hex_uint32_t,
@@ -104,9 +121,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(CONF_STATION_ADDRESS, default=0x0001): cv.hex_uint16_t,
             cv.Optional(CONF_BYTE_ORDER, default="little"): _byte_order,
-            cv.Optional(
-                CONF_RESPONSE_TIMEOUT, default="100ms"
-            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_RESPONSE_TIMEOUT, default="100ms"): _response_timeout,
             cv.Optional(CONF_ALLOW_WRITE, default=False): cv.boolean,
             cv.Optional(CONF_DAQ_ANCHOR): DAQ_ANCHOR_SCHEMA,
             cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(),
@@ -258,7 +273,7 @@ DAQ_READ_SCHEMA = cv.Schema(
             cv.int_range(min=1, max=0xFFFF)
         ),
         cv.Optional(CONF_COLLECT_TIMEOUT, default=5000): cv.templatable(
-            cv.int_range(min=1, max=0xFFFFFFFF)
+            cv.int_range(min=1, max=MAX_DEADLINE_TIMEOUT)
         ),
         cv.Optional(CONF_REQUIRE_ANCHOR, default=True): cv.templatable(cv.boolean),
     }
@@ -380,7 +395,7 @@ async def _data_action(config, action_id, template_arg, args, cls):
 @automation.register_action(
     "ccp.download",
     CcpDownloadAction,
-    cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}),
+    cv.Schema({**_HUB, cv.Required(CONF_DATA): _payload_bytes(5)}),
     synchronous=True,
 )
 async def ccp_download(config, action_id, template_arg, args):
@@ -488,7 +503,7 @@ async def ccp_daq_read(config, action_id, template_arg, args):
 @automation.register_action(
     "ccp.raw",
     CcpRawAction,
-    cv.Schema({**_HUB, cv.Required(CONF_DATA): _BYTES}),
+    cv.Schema({**_HUB, cv.Required(CONF_DATA): _payload_bytes(8)}),
     synchronous=True,
 )
 async def ccp_raw(config, action_id, template_arg, args):
