@@ -122,8 +122,8 @@ portal:
 | `role` / `roles_available` | identifier / list of identifiers | `role` requires a non-empty `roles_available` containing it |
 | `absent` | why-code | optional; node is `absent` with this code |
 | `absent_when` | `{provider, source, <provider args>}` | requires `absent`; provider from the registry (4.6) |
-| `unknown_when` | `{value, equals, why}` | `value` must be one of this node's own value keys; not combinable with `children` |
-| `trust_from` | value key | must be one of this node's own value keys |
+| `unknown_when` | `{value, equals, why}` | `value` must be one of this node's own value keys bound to a `text_sensor`; not combinable with `children` |
+| `trust_from` | value key | must be one of this node's own value keys bound to a `text_sensor` |
 | `submodule_position` | int >= 1 | optional; unique across the whole tree |
 | `on_demand` | bool, default false | the node's values are only published when asked for (5.3 `not_requested`); requires `values` |
 | `borrow` | list of `{action, before?}` | optional, UI hint only (4.9): render another node's action on this node's page |
@@ -303,6 +303,10 @@ actions:
   must fit the control: select a string, number a float, switch a bool. Where the target
   entity's config is known at config time, the value is checked against it too: a select's
   `options`, a number's `min_value`/`max_value`. Any mismatch is a config error naming the ref.
+  The built-in page waits for each prerequisite's `accepted` result before sending the next
+  prerequisite or main action. A refusal, missing/invalid result, HTTP/network/JSON failure,
+  or failure to confirm completion within four seconds aborts the sequence with a visible
+  prerequisite error. A late response after that deadline cannot resume the sequence.
 
 ### 4.8 Component-level validation
 
@@ -566,6 +570,7 @@ Body over 256 bytes -> refused `body_too_large`.
 
 | situation | HTTP | recorded in tree | response body |
 |---|---|---|---|
+| request origin rejected by `web_server_base` policy (before auth or dispatch) | 403 | no | server error response |
 | unknown node or key | 404 | no | empty |
 | `auth:` set, credentials missing/invalid | 401 | no | empty |
 | action disabled | 409 | `refused` / `disabled` | result JSON |
@@ -666,10 +671,16 @@ the pinned ESPHome 2026.7.0 (`esphome/components/web_server_idf/web_server_idf.{
    then `handleRequest()`; form bodies arrive pre-parsed (`arg("value")`).
 4. Auth: `AsyncWebServerRequest::authenticate()` / `requestAuthentication()` exist when
    `USE_WEBSERVER_AUTH` (+ `_DIGEST`) is defined; the portal emits those defines itself. The
-   portal registers with `add_handler_without_auth()` and checks credentials itself, on the
+   portal registers an origin-only wrapper with `add_handler_without_auth()` and checks credentials itself, on the
    POST route only, so GET can never be locked and the portal's credentials are not shared
    with other handlers. This deviates from "set the base credentials" in the original plan on
    purpose.
+   The wrapper uses `GuardMiddlewareHandler::check_origin_()` from pinned ESPHome 2026.11:
+   it applies the shared allowed-origins table and allow-any define without duplicating
+   `is_origin_allowed()`. Rejected requests are logged and answered 403 before dispatch;
+   their streamed body chunks never reach the portal's buffers. This applies to all methods,
+   including form and text/plain POSTs, regardless of portal authentication. As upstream,
+   requests without Origin and same-origin requests are allowed by default.
 5. Handler order: the portal registers in `setup()` (priority `WIFI - 1`, like `web_server`),
    `captive_portal` only when the AP starts, so the portal is asked first. While the AP is
    up the portal also claims every GET except `/wifi`, `/config.json` and `/wifisave` (§6.3);

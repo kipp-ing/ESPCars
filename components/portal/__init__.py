@@ -646,6 +646,9 @@ def _validate_node_cross_fields(value):
             )
 
     own_keys = {v[CONF_KEY] for v in value.get(CONF_VALUES, [])}
+    text_keys = {
+        v[CONF_KEY] for v in value.get(CONF_VALUES, []) if CONF_TEXT_SENSOR in v
+    }
 
     if CONF_SERIES in value and value[CONF_SERIES][CONF_KEY] in own_keys:
         raise cv.Invalid(
@@ -666,11 +669,21 @@ def _validate_node_cross_fields(value):
             raise cv.Invalid(
                 f"unknown_when.value {target!r} is not one of this node's own values"
             )
+        if target not in text_keys:
+            raise cv.Invalid(
+                f"unknown_when.value {target!r} must reference a value bound to a text_sensor"
+            )
 
-    if CONF_TRUST_FROM in value and value[CONF_TRUST_FROM] not in own_keys:
-        raise cv.Invalid(
-            f"trust_from {value[CONF_TRUST_FROM]!r} is not one of this node's own values"
-        )
+    if CONF_TRUST_FROM in value:
+        target = value[CONF_TRUST_FROM]
+        if target not in own_keys:
+            raise cv.Invalid(
+                f"trust_from {target!r} is not one of this node's own values"
+            )
+        if target not in text_keys:
+            raise cv.Invalid(
+                f"trust_from {target!r} must reference a value bound to a text_sensor"
+            )
 
     # A node carrying a binary_sensor value may not declare a positive budget_ms: a boolean's age
     # is since its last CHANGE, so a finite budget would let a healthy, still-reconfirming boolean
