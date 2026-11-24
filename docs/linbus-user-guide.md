@@ -225,7 +225,18 @@ a software check — it schedules nine fixed ids against itself and needs a
 live transceiver and pull-up looped back to pass. Toggle it at runtime with
 `linbus.run_self_test: {id: lin1, enable: true}`; it publishes through
 `binary_sensor: platform: linbus, self_test_pass:` once every id has been
-seen twice and 5 s have elapsed.
+seen twice and 5 s have elapsed. BASIC PASS latches; test traffic continues
+until explicitly stopped, preserving the bench's 40 s observation window.
+Only stopping with `enable: false` clears the pass latch and restores the exact
+schedule and response tables saved before the run, including user entries
+temporarily overridden by test IDs. Runtime table edits made during a run are temporary.
+User traffic from the restored tables resumes; stopping the test is not a
+bus-wide TX disable. A frame already handed to the UART may still finish.
+
+All nine cases must fit in both tables. If either table lacks capacity, no
+test traffic starts: the tables stay unchanged, a warning reports
+`INCOMPLETE`, the component sets its warning status, and `self_test_pass`
+stays false. Free table capacity before starting another run.
 
 ## 4. `packages:` — splitting "this board" from "this LIN setup"
 
@@ -269,7 +280,7 @@ CAN, check the CAN side before assuming the LIN wiring is at fault.
 | `tx_pin` / `rx_pin` | the only required keys |
 | `cs_pin` | optional; transceiver enable/sleep, driven high once at `setup()` and left there |
 | `baud_rate` | default `19200`; `1000`–`20000` |
-| `uart_port` | default `UART_NUM_1`; one of `UART_NUM_0`/`UART_NUM_1`/`UART_NUM_2` — each instance needs its own, checked at config time |
+| `uart_port` | default `UART_NUM_1`; one of `UART_NUM_0`/`UART_NUM_1`/`UART_NUM_2` — only HP UARTs physically available on the target are accepted; each instance needs its own, checked at config time |
 | `mode` | default `commander`; `commander` / `responder` / `listener` |
 | `schedule` | list, max 16, unique `lin_id`; **commander only** |
 | `responses` | list, max 16, unique `lin_id`; **not valid with `mode: listener`** |
@@ -386,7 +397,7 @@ what you're answering or scheduling. Confirm what's actually flashed from the
 | `send_failures` climbing | genuine commander TX errors — bus wiring, termination, or a segment with no responder |
 | `self_test_pass` never goes true | needs `mode: commander` **and** a real transceiver looped back with a pull-up — it is not a software-only check |
 | a commander's request count stops climbing on a board that also runs `can_gateway` | check the CAN side first — a bus-off CAN segment can flood the TWAI driver with error events fast enough to stall the LIN commander's own task (§4) |
-| `Unknown UART port: ...` warning, falls back to `UART_NUM_1` | `uart_port` named a peripheral this chip wasn't built with (e.g. `UART_NUM_2` on a two-UART target) — passed config validation but has no matching case at runtime; use a port the target actually has |
+| `UART_NUM_2 is not available as an HP UART on ...` | configuration rejected before touching hardware; use `UART_NUM_0` or `UART_NUM_1` on targets such as C3/C6 (C6's LP UART is not supported here) |
 
 ## 8. Going deeper
 

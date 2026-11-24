@@ -11,6 +11,28 @@ namespace esphome::portal {
 
 ESPHOME_LOG_TAG(TAG, "portal");
 
+// Keep GETs public and use portal credentials only for POSTs. The normal base wrapper
+// also checks shared credentials, so reuse just its origin policy (including its allowlist).
+class PortalOriginGuard final : public web_server_base::internal::GuardMiddlewareHandler {
+ public:
+  using GuardMiddlewareHandler::GuardMiddlewareHandler;
+
+  void handleRequest(AsyncWebServerRequest *request) override {
+    if (!this->check_origin_(request)) {
+      ESP_LOGW(TAG, "Rejected request: origin not allowed; no action dispatched");
+      request->send(403);
+      return;
+    }
+    this->next_->handleRequest(request);
+  }
+
+  void handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) override {
+    // Body callbacks run before handleRequest(); do not let rejected requests change buffers.
+    if (this->check_origin_(request))
+      this->next_->handleBody(request, data, len, index, total);
+  }
+};
+
 // ---- tree construction (called from generated setup code) ------------------------------------
 
 uint16_t Portal::add_node(const char *id, const char *kind, const char *label, uint16_t parent, uint32_t budget_ms,
@@ -177,7 +199,7 @@ void Portal::setup() {
   }
 #endif
   this->base_->init();
-  this->base_->add_handler_without_auth(this);
+  this->base_->add_handler_without_auth(new PortalOriginGuard(this));
 }
 
 void Portal::dump_config() {

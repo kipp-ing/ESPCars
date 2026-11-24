@@ -26,6 +26,8 @@ portal:
 
 Viewing the page and state API is always unauthenticated. If controls are declared later, optional digest
 authentication protects their POST requests. A login does not protect the read-only state endpoint.
+All requests use `web_server_base`'s origin policy, including its configured allowed origins;
+rejected origins receive 403 before any action is dispatched, even without a login.
 
 ## Configuration variables
 
@@ -99,12 +101,12 @@ authentication protects their POST requests. A login does not protect the read-o
     - **provider** (**Required**, string): Predicate name; `switch_off` is bundled.
     - **source** (**Required**, [ID](/guides/configuration-types/#id)): Provider source; a switch ID for `switch_off`,
       which accepts no extra arguments.
-  - **unknown_when** (*Optional*, mapping): Text-value rule for unknown state; forbidden with children.
+  - **unknown_when** (*Optional*, mapping): Rule for an own value bound to a `text_sensor`; forbidden with children.
     - **value** (**Required**, string): Key of one of this node's own values.
     - **equals** (**Required**, string): State text to compare.
     - **why** (**Required**, string): Reason matching `[a-z][a-z0-9_]*`. Evidence-only codes `never_announced`,
       `no_transfer`, `crc_fail` and `negative_response` are refused here.
-  - **trust_from** (*Optional*, string): Key of an own value whose state establishes trust.
+  - **trust_from** (*Optional*, string): Key of an own value bound to a `text_sensor` whose state establishes trust.
   - **series** (*Optional*, mapping): Repeated indexed data. Its key must differ from all own value keys.
     - **key** (**Required**, string): Stable local series key.
     - **label** (**Required**, string): Nonempty display name.

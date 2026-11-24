@@ -1,7 +1,6 @@
 #include "linbus.h"
 #include "esphome/core/log.h"
 #include "esphome/core/gpio.h"
-#include "soc/soc_caps.h"
 
 #include <cinttypes>
 
@@ -14,23 +13,6 @@ static int get_pin_no(GPIOPin *pin) {
   if (pin == nullptr || !pin->is_internal())
     return -1;
   return ((InternalGPIOPin *) pin)->get_pin();
-}
-
-void LinBusComponent::set_uart_port_str(const std::string &port) {
-  if (port == "UART_NUM_0") {
-    this->uart_port_ = UART_NUM_0;
-  } else if (port == "UART_NUM_1") {
-    this->uart_port_ = UART_NUM_1;
-  }
-#if SOC_UART_HP_NUM > 2
-  else if (port == "UART_NUM_2") {
-    this->uart_port_ = UART_NUM_2;
-  }
-#endif
-  else {
-    ESP_LOGW(TAG, "Unknown UART port: %s, defaulting to UART_NUM_1", port.c_str());
-    this->uart_port_ = UART_NUM_1;
-  }
 }
 
 void LinBusComponent::setup() {
@@ -99,6 +81,8 @@ void LinBusComponent::loop() {
 
   // Process LIN communication (commander scheduling, statistics, etc.)
   this->lin_comm_->lin_process();
+  if (this->lin_comm_->self_test_incomplete())
+    this->status_set_warning(LOG_STR("LIN self-test incomplete; test traffic refused"));
 
   // Fire on_error for each newly-counted fault (loop runs ~16 ms, so a deliberately induced
   // error lights up within a frame or two). Skipped entirely when no on_error is configured.
@@ -261,6 +245,7 @@ void LinBusComponent::run_self_test(bool enable) {
   }
   ESP_LOGI(TAG, "%s LIN self-test", enable ? LOG_STR_LITERAL("Starting") : LOG_STR_LITERAL("Stopping"));
   this->lin_comm_->enable_self_test(enable);
+  this->status_clear_warning();
 }
 
 void LinBusComponent::update_response(uint8_t lin_id, const std::vector<uint8_t> &data) {

@@ -4,6 +4,14 @@ import logging
 
 from esphome import automation, final_validate as fv, pins
 import esphome.codegen as cg
+from esphome.components.esp32 import get_esp32_variant
+from esphome.components.esp32.const import (
+    VARIANT_ESP32,
+    VARIANT_ESP32C61,
+    VARIANT_ESP32P4,
+    VARIANT_ESP32S3,
+    VARIANT_ESP32S31,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BAUD_RATE,
@@ -96,7 +104,33 @@ def _validate_mode(value):
 
 
 # LIN 2.1 caps the bus at 20 kbit/s; 0 would divide-by-zero in the driver (UPGRADES.md H6).
+UARTPort = cg.global_ns.enum("uart_port_t")
 UART_PORTS = ["UART_NUM_0", "UART_NUM_1", "UART_NUM_2"]
+# Source: ESP-IDF v5.5.6 components/soc/<variant>/include/soc/soc_caps.h,
+# the installed ESPHome 2026.11.0 recommended IDF. S31 is absent there; verified
+# against cached IDF v6.1.1's esp32s31 header instead. SOC_UART_HP_NUM is 3 for
+# ESP32/S3/C61, 5 for P4, 4 for S31, and 2 for S2/C2/C3/C5/C6/H2/H4/H21.
+# Stock uart's IDF allocator checks SOC_UART_NUM in C++. LIN uses HP UARTs
+# (arbitrary GPIO routing), so LP UARTs must not count toward UART2 availability.
+# Keep this allowlist in sync with those per-variant SOC_UART_HP_NUM definitions.
+_UART2_VARIANTS = {
+    VARIANT_ESP32,
+    VARIANT_ESP32C61,
+    VARIANT_ESP32P4,
+    VARIANT_ESP32S3,
+    VARIANT_ESP32S31,
+}
+
+
+def _validate_uart_port(value: str) -> str:
+    value = cv.one_of(*UART_PORTS, upper=True)(value)
+    variant = get_esp32_variant()
+    if value == "UART_NUM_2" and variant not in _UART2_VARIANTS:
+        raise cv.Invalid(
+            f"UART_NUM_2 is not available as an HP UART on {variant}; "
+            "choose UART_NUM_0 or UART_NUM_1"
+        )
+    return value
 
 
 def _validate_interval(value):
@@ -190,9 +224,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_BAUD_RATE, default=19200): cv.int_range(
                 min=1000, max=20000
             ),
-            cv.Optional(CONF_UART_PORT, default="UART_NUM_1"): cv.one_of(
-                *UART_PORTS, upper=True
-            ),
+            cv.Optional(CONF_UART_PORT, default="UART_NUM_1"): _validate_uart_port,
             cv.Optional(CONF_MODE, default=MODE_COMMANDER): _validate_mode,
             cv.Optional(CONF_SCHEDULE): cv.All(
                 cv.ensure_list(SCHEDULE_SCHEMA),
@@ -335,7 +367,7 @@ async def to_code(config):
         cg.add(var.set_cs_pin(cs_pin))
 
     # UART port and baud rate
-    cg.add(var.set_uart_port_str(config[CONF_UART_PORT]))
+    cg.add(var.set_uart_port(getattr(UARTPort, config[CONF_UART_PORT])))
     cg.add(var.set_baud_rate(config[CONF_BAUD_RATE]))
 
     # Mode

@@ -92,6 +92,7 @@ class LINCommunication {
 
   // Built-in self test: whether every exercised ID has reached the pass threshold (S6/B15).
   bool self_test_passed() const { return self_test_passed_; }
+  bool self_test_incomplete() const { return this->self_test_incomplete_; }
 
   // Debug
   void dump_received_pids_to_log() const;
@@ -132,6 +133,7 @@ class LINCommunication {
   bool self_test_enabled_ = false;
   bool self_test_initialized_ = false;
   bool self_test_passed_ = false;
+  bool self_test_incomplete_ = false;
   int64_t self_test_start_time_us_ = 0;
   int64_t self_test_last_eval_us_ = 0;  // per-instance (was a function-local static, UPGRADES.md M6)
 
@@ -147,11 +149,13 @@ class LINCommunication {
   };
   static constexpr size_t SELF_TEST_MAX_IDS = 10;
   SelfTestStat self_test_stats_[SELF_TEST_MAX_IDS]{};
-  // How many slots self_test_init_if_needed_() actually filled. Needed because `id`
-  // cannot double as the "empty slot" sentinel: 0x00 is a legitimate LIN id and
-  // is the FIRST case the exerciser schedules, so `if (st.id == 0) continue`
-  // silently dropped it from every verdict — a dead 0x00 still passed.
+  // Nonzero only when ALL cases installed. ID 0x00 is a legitimate test case.
   size_t self_test_count_ = 0;
+
+  // Fixed snapshots: installation/restoration share the send paths' data mutex.
+  LinScheduleItem self_test_schedule_backup_[LIN_MAX_ID_RQ_COUNT];
+  LinRespondData self_test_responses_backup_[LIN_MAX_RESPONSES];
+  bool self_test_restore_();
 
   void self_test_tick_();  // invoked inside lin_process()
   void self_test_init_if_needed_();

@@ -52,7 +52,9 @@ GEN      := $(BUILD)/rule_patch_extracted.h
 RUNTIME_GEN := $(BUILD)/gateway_runtime.stamp
 
 SRCS     := main.cpp $(sort $(wildcard test_*.cpp))
-OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o)
+LINBUS_DIR := ../../components/linbus
+LINBUS_OBJS := $(BUILD)/lin_communication.o $(BUILD)/lin_protocol_handler.o
+OBJS     := $(SRCS:%.cpp=$(BUILD)/%.o) $(LINBUS_OBJS)
 DEPS     := $(OBJS:.o=.d)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
@@ -110,6 +112,13 @@ lockcheck: $(LOGGER_DIR)/sd_logger.cpp
 $(BIN): $(OBJS)
 	@echo "  LD    $@"
 	@$(CXX) $(OBJS) $(LDFLAGS) -o $@
+
+# Compile the production LIN tables/sender against host RTOS/UART adapters.
+$(BUILD)/test_linbus_self_test.o $(LINBUS_OBJS): CXXFLAGS += -Ilinbus_stubs -I$(LINBUS_DIR)
+
+$(LINBUS_OBJS): $(BUILD)/%.o: $(LINBUS_DIR)/%.cpp | $(BUILD)
+	@echo "  CXX   $<"
+	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/%.o: %.cpp | $(GEN) $(RUNTIME_GEN)
 	@echo "  CXX   $<"
