@@ -239,6 +239,10 @@ inline PciInfo decode_pci(const IsoTpConfig &cfg, const uint8_t *data, uint8_t d
       break;
     }
     case static_cast<uint8_t>(PciType::CONSECUTIVE): {
+      // ISO 15765-2:2016 10.4.3: ignore undersized N_PDUs without further action.
+      // A PCI-only CF carries none of the remaining data, even for an optimized last CF.
+      if (dlc <= static_cast<uint8_t>(pci + 1))
+        return info;
       info.type = PciType::CONSECUTIVE;
       info.sequence = first & 0x0F;
       info.payload_offset = static_cast<uint8_t>(pci + 1);

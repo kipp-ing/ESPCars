@@ -60,7 +60,7 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   bool get_seed(uint8_t resource);
   bool unlock(const uint8_t *key, uint8_t len);
   bool set_mta(uint8_t mta, uint8_t ext, uint32_t address);
-  bool dnload(const uint8_t *data, uint8_t len);
+  bool dnload(const uint8_t *data, size_t len);
   bool dnload6(const uint8_t *data);
   bool upload(uint8_t size);
   bool short_up(uint8_t size, uint8_t ext, uint32_t address);
@@ -81,7 +81,7 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   bool program6(const uint8_t *data);
   bool diag_service(const uint8_t *data, uint8_t len);
   bool action_service(const uint8_t *data, uint8_t len);
-  bool raw(const uint8_t *cro, uint8_t len);
+  bool raw(const uint8_t *cro, size_t len);
   bool read_memory(uint8_t ext, uint32_t address, uint16_t len, std::function<void(std::vector<uint8_t>)> callback);
   bool write_memory(uint8_t ext, uint32_t address, const std::vector<uint8_t> &data,
                     std::function<void(bool)> callback = {});
@@ -141,11 +141,11 @@ class CcpHub : public Component, public can_gateway::CanGatewayFrameConsumer {
   std::vector<uint8_t> write_data_{};
   size_t write_offset_{0};
   std::function<void(bool)> write_callback_{};
-  std::function<void(bool)> connect_callback_{};
   DaqField daq_anchor_{};
   std::vector<uint8_t> daq_anchor_expect_{};
   bool daq_read_active_{false};
   bool daq_collecting_{false};
+  bool daq_cleanup_failed_{false};
   bool daq_anchor_required_{false};
   uint8_t daq_requested_offset_{0};
   uint16_t daq_target_samples_{0};

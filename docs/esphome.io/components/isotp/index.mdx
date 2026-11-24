@@ -116,7 +116,9 @@ then:
 **Configuration variables:**
 
 - **id** (**Required**, [ID](/guides/configuration-types/#id)): Transport instance.
-- **data** (**Required**, templatable byte list or string): Nonempty message; strings are encoded as UTF-8 bytes.
+- **data** (**Required**, templatable byte list or string): Message of 1–4095 bytes, bounded by `max_message_size`;
+  strings are encoded as UTF-8 bytes.
+  Static sizes are checked during configuration and lambda sizes before transmission.
 
 ## See Also
 

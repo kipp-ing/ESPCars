@@ -36,7 +36,7 @@ ccp:
   - `little` *(default)*
   - `big`
 - **response_timeout** (*Optional*, [Time](/guides/configuration-types/#time)): Command response timeout. Defaults to
-  `100ms`.
+  `100ms`. Maximum `2147483647ms`.
 - **allow_write** (*Optional*, boolean): Compile and permit the guarded write opcodes. Defaults to `false`.
   Memory and status reads still transmit when this is false. Calibration page selection requires `true`: it switches
   the calibration data page the ECU runs on, with ECU-defined effects, even though it writes no memory.
@@ -50,7 +50,9 @@ ccp:
   - **expect** (**Required**, byte list): Expected bytes, length 1–7.
 - **on_connected** (*Optional*, automation): Runs on successful connection.
 - **on_response** (*Optional*, automation): Runs for a successful command response.
-- **on_error** (*Optional*, automation): Runs on command failure.
+- **on_error** (*Optional*, automation): Runs on command failure. Negative replies also log command/return code and
+  set a warning without this automation; a positive reply clears it. Failed DAQ cleanup preserves a warning at
+  completion.
 - **on_daq** (*Optional*, automation): Runs for a DAQ data packet.
 - **on_daq_read** (*Optional*, automation): Runs when a bounded DAQ collection finishes.
 - All other options from [Component](/components/esphome/).
@@ -280,7 +282,8 @@ then:
 **Configuration variables:**
 
 - **id** (**Required**, [ID](/guides/configuration-types/#id)): CCP hub identifier.
-- **data** (**Required**, templatable byte list): Bytes passed to the download command; runtime accepts 1–5 bytes.
+- **data** (**Required**, templatable byte list): Bytes passed to the download command, 1–5 bytes; checked before
+  transmission, including lambdas.
 
 ### `ccp.select_cal_page` Action
 
@@ -402,7 +405,7 @@ then:
 - **event** (*Optional*, templatable int): Event channel byte. Defaults to `0`.
 - **prescaler** (*Optional*, templatable int): Event prescaler, 0–65535. Defaults to `10`.
 - **samples** (*Optional*, templatable int): Samples to collect, 1–65535. Defaults to `30`.
-- **collect_timeout** (*Optional*, templatable int): Collection timeout in milliseconds, 1–4294967295.
+- **collect_timeout** (*Optional*, templatable int): Collection timeout in milliseconds, 1–2147483647.
   Defaults to `5000`.
 - **require_anchor** (*Optional*, templatable boolean): Require the configured anchor to match. Defaults to `true`.
 
@@ -422,8 +425,8 @@ then:
 **Configuration variables:**
 
 - **id** (**Required**, [ID](/guides/configuration-types/#id)): CCP hub identifier.
-- **data** (**Required**, templatable byte list): Raw command bytes; runtime accepts 1–8, zero-pads to eight and
-  replaces the command counter byte.
+- **data** (**Required**, templatable byte list): Raw command bytes, 1–8; validated at config time and before runtime
+  transmission. Zero-pads to eight and replaces the command counter byte.
 
 ### `ccp.set_enabled` Action
 
