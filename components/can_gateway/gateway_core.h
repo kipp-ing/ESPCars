@@ -10,7 +10,8 @@
 // Concurrency model: single core, both TWAI interrupts at the SAME
 // priority. Interrupts run to completion — an ISR can preempt loop code, but nothing preempts an
 // ISR. Every structure here is lock-free under exactly that model and additionally uses
-// acquire/release atomics so the host tests (and any future multi-core target) stay correct.
+// acquire/release atomics where contexts exchange ownership. Plain seqlock/banked payloads
+// still require this same-core execution model; atomics alone do not make them multi-core-safe.
 
 #include <atomic>
 #include <cstddef>
@@ -469,9 +470,10 @@ struct FrameSnapshot {
 /// counted). Every entry carries a sequence stamp (seqlock style): the producer marks it odd
 /// while writing and (ticket * 2 + 2) when complete, so a consumer preempted mid-copy detects
 /// the overwrite and retries with the newer head. The producer is wait-free and never reads
-/// consumer state.
+/// consumer state. The plain payload copy requires same-core ISR/loop execution; it is NOT
+/// a portable concurrent-thread seqlock. Host threads must serialize access (see test_snapshot.cpp).
 template<uint8_t N> class SnapshotRing {
-  static_assert(N >= 2, "ring needs at least two entries so the producer never overwrites the entry being read");
+  static_assert(N >= 2, "snapshot ring needs at least two entries");
 
  public:
   /// Producer (ISR): store one snapshot, overwriting the oldest when the ring is full.
@@ -501,7 +503,7 @@ template<uint8_t N> class SnapshotRing {
       // Seqlock reader fence. The acquire on seq_before keeps the copy from being hoisted above it,
       // but an acquire load orders only what FOLLOWS it — without this fence the non-atomic copy may
       // sink below the seq_after load (compiler or weakly-ordered CPU), and a torn record would then
-      // pass validation. Reproduced on arm64 by tests/host/test_snapshot.cpp.
+      // pass validation on the target. Host threads serialize payload access; see test_snapshot.cpp.
       std::atomic_thread_fence(std::memory_order_acquire);
       uint32_t seq_after = entry.seq.load(std::memory_order_relaxed);
       if (seq_before == seq_after && seq_before == ticket * 2 + 2) {
@@ -746,7 +748,8 @@ static constexpr uint8_t TAP_FLAG_TX = 0x08;
 /// stale frames delivered late. Lock-free under the single-core model (the ISR produces, the loop
 /// consumes, ISRs run to completion); acquire/release atomics keep it correct on the host too.
 /// head_/tail_ are free-running counters; their difference is the occupancy (always <= N, so the
-/// unsigned subtraction never wraps meaningfully).
+/// unsigned subtraction never wraps meaningfully). Non-power-of-two depths use separate physical
+/// indices: reducing a wrapped uint32_t ticket modulo N would revisit unread slots at rollover.
 /// RecordT is templated so the datalogger tap (TapRecord) reuses this exact queue rather than
 /// growing a second copy of a concurrency contract that took a real-thread host test to get right.
 /// Each instance has exactly one producer: the RX ISR uses one instance and the TX-completion ISR
@@ -767,7 +770,13 @@ template<uint16_t N, typename RecordT = FrameRecord> class ObserveRing {
     uint32_t head = this->head_.load(std::memory_order_acquire);
     if (tail - head >= N)
       return false;  // full
-    this->entries_[tail % N] = record;
+    if constexpr ((N & (N - 1)) == 0) {
+      this->entries_[tail % N] = record;
+    } else {
+      uint16_t index = this->write_index_;
+      this->write_index_ = index == N - 1 ? 0 : index + 1;
+      this->entries_[index] = record;
+    }
     this->tail_.store(tail + 1, std::memory_order_release);
     return true;
   }
@@ -779,7 +788,13 @@ template<uint16_t N, typename RecordT = FrameRecord> class ObserveRing {
     uint32_t tail = this->tail_.load(std::memory_order_acquire);
     if (head == tail)
       return false;
-    out = this->entries_[head % N];
+    if constexpr ((N & (N - 1)) == 0) {
+      out = this->entries_[head % N];
+    } else {
+      uint16_t index = this->read_index_;
+      this->read_index_ = index == N - 1 ? 0 : index + 1;
+      out = this->entries_[index];
+    }
     this->head_.store(head + 1, std::memory_order_release);
     return true;
   }
@@ -798,6 +813,8 @@ template<uint16_t N, typename RecordT = FrameRecord> class ObserveRing {
   RecordT entries_[N]{};
   std::atomic<uint32_t> head_{0};  // consumer index (loop)
   std::atomic<uint32_t> tail_{0};  // producer index (ISR)
+  uint16_t read_index_{0};         // consumer-owned physical index (non-power-of-two N only)
+  uint16_t write_index_{0};        // producer-owned physical index (non-power-of-two N only)
 };
 
 /// Sorted set of subscribed (can_id, extended) keys for the RX ISR's membership test (A14/N7).

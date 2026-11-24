@@ -89,11 +89,6 @@ def CONFIG_SCHEMA(config):
     return LAST_FRAME_SCHEMA(config)
 
 
-def _c_string(text: str) -> str:
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
 async def _decode_to_code(config):
     cg.add_define("USE_CAN_GATEWAY_OBSERVE")
     var = await text_sensor.new_text_sensor(config)
@@ -101,7 +96,7 @@ async def _decode_to_code(config):
     big_endian = config[CONF_BYTE_ORDER] == BYTE_ORDER_BIG
     cg.add(var.set_signal(config[CONF_OFFSET], config[CONF_LENGTH], big_endian))
     entries = [
-        cg.RawExpression(f"{{{key}, {_c_string(text)}}}")
+        cg.ArrayInitializer(key, cg.safe_exp(text))
         for key, text in config[CONF_MAP].items()
     ]
     arr_id = ID(

@@ -145,6 +145,7 @@ void GatewayRoute::set_last_rule_e2e(uint8_t crc_index, uint8_t first, uint8_t l
 
 bool GatewayPort::start_(GatewayRoute *route_out, const std::atomic<bool> *gateway_enabled,
                          uint8_t interrupt_priority) {
+  this->loop_task_ = xTaskGetCurrentTaskHandle();
   this->gateway_enabled_ = gateway_enabled;
   for (uint8_t i = 0; i < CAN_GATEWAY_INJECT_SLOTS; i++) {
     this->inject_slots_[i].port = this;
@@ -215,6 +216,11 @@ bool GatewayPort::start_(GatewayRoute *route_out, const std::atomic<bool> *gatew
     return false;
   }
 
+#ifdef USE_BINARY_SENSOR
+  if (this->bus_off_sensor_ != nullptr)
+    this->bus_off_sensor_->publish_state(this->is_bus_off());
+#endif
+
   if (this->open_drain_tx_) {
     // Bench aid: both controllers on one wire without
     // transceivers. Requires an external pull-up; never with a transceiver.
@@ -233,6 +239,10 @@ void GatewayPort::try_hw_filter_offload_(const GatewayRoute *route) {
   // snapshot. The offload therefore only engages when no such consumer
   // exists for this port.
 #ifndef USE_CAN_GATEWAY_STATS
+#ifdef USE_CAN_GATEWAY_ISR_HOOK
+  if (this->isr_frame_hook_ != nullptr)
+    return;  // the hook needs frames rejected by the route too
+#endif
 #ifdef USE_CAN_GATEWAY_SNAPSHOT
   if (this->snapshot_ring_ != nullptr)
     return;
@@ -266,7 +276,9 @@ bool GatewayPort::read_error_counters(uint16_t &tec, uint16_t &rec) const {
 
 bool GatewayPort::inject(uint32_t can_id, bool extended, bool rtr, const uint8_t *data, uint8_t len) {
   const char *fail_reason = nullptr;
-  if (this->node_ == nullptr || this->listen_only_) {
+  if (xTaskGetCurrentTaskHandle() != this->loop_task_) {
+    fail_reason = "inject requires ESPHome main-loop task";
+  } else if (this->node_ == nullptr || this->listen_only_) {
     fail_reason = "port cannot transmit";
   } else if (this->is_bus_off()) {
     // Cheap early-out for a port that is already known bus-off: skip the whole
@@ -856,7 +868,7 @@ void CanGateway::setup() {
   // v0.6: 1 or 2 ports; routes optional (a single-port block is a monitor/node
   // with no forwarding). Config validation guarantees the count; guard anyway.
   if (this->ports_.empty()) {
-    this->mark_failed();
+    this->mark_failed(LOG_STR("No CAN ports configured"));
     return;
   }
   // One route per direction (enforced at config time too). Routes are only
@@ -869,7 +881,7 @@ void CanGateway::setup() {
     uint8_t from = route->from_->index_;
     if (route_for[from] != nullptr) {
       ESP_LOGE(TAG, "Port %u already has an outbound route", from);
-      this->mark_failed();
+      this->mark_failed(LOG_STR("Duplicate outbound route"));
       return;
     }
     route_for[from] = route;
@@ -895,7 +907,7 @@ void CanGateway::setup() {
       // loop() again to service them.
       for (size_t j = 0; j < i; j++)
         twai_node_disable(this->ports_[j]->node_);
-      this->mark_failed();
+      this->mark_failed(LOG_STR("CAN port startup failed"));
       return;
     }
   }
@@ -1075,6 +1087,8 @@ void CanGatewaySensorHub::dump_config() {
 #ifdef USE_CAN_GATEWAY_OBSERVE
 #ifdef USE_SENSOR
 void CanGatewayDecodeSensor::on_frame(const FrameView &view) {
+  if (view.rtr)
+    return;  // remote requests carry no payload, regardless of DLC
   // Presence: every byte the signal touches must lie within this frame's DLC.
   // (A Motorola bit-level field runs from its start byte towards HIGHER bytes.)
   uint8_t last_byte;
@@ -1099,8 +1113,13 @@ void CanGatewayDecodeSensor::on_frame(const FrameView &view) {
   } else {
     raw = extract_bits(view.data, view.dlc, this->offset_, this->length_);
   }
-  if (this->have_last_ && raw == this->last_raw_)
-    return;  // publish on change
+#ifdef USE_SENSOR_FILTER
+  if (this->filter_list_ == nullptr)
+#endif
+  {
+    if (this->have_last_ && raw == this->last_raw_)
+      return;
+  }
   uint32_t now = millis();
   if (this->throttle_ms_ > 0 && this->have_last_ && now - this->last_publish_ms_ < this->throttle_ms_)
     return;  // rate-limit a signal that changes every frame
@@ -1122,12 +1141,19 @@ void CanGatewayDecodeSensor::on_frame(const FrameView &view) {
 
 #ifdef USE_BINARY_SENSOR
 void CanGatewayDecodeBinarySensor::on_frame(const FrameView &view) {
+  if (view.rtr)
+    return;  // remote requests carry no payload, regardless of DLC
   uint8_t byte_index = static_cast<uint8_t>(this->bit_ / 8);
   if (byte_index >= view.dlc)
     return;
   bool state = ((view.data[byte_index] >> (this->bit_ % 8)) & 0x01) != 0;
-  if (this->have_last_ && state == this->last_state_)
-    return;
+#ifdef USE_BINARY_SENSOR_FILTER
+  if (this->filter_list_ == nullptr)
+#endif
+  {
+    if (this->have_last_ && state == this->last_state_)
+      return;
+  }
   this->last_state_ = state;
   this->have_last_ = true;
   this->publish_state(state);
@@ -1136,12 +1162,19 @@ void CanGatewayDecodeBinarySensor::on_frame(const FrameView &view) {
 
 #ifdef USE_TEXT_SENSOR
 void CanGatewayDecodeTextSensor::on_frame(const FrameView &view) {
+  if (view.rtr)
+    return;  // remote requests carry no payload, regardless of DLC
   uint8_t last_byte = static_cast<uint8_t>(this->offset_ + this->length_ - 1);
   if (last_byte >= view.dlc)
     return;
   uint32_t raw = extract_bytes(view.data, view.dlc, this->offset_, this->length_, this->big_endian_);
-  if (this->have_last_ && raw == this->last_raw_)
-    return;
+#ifdef USE_TEXT_SENSOR_FILTER
+  if (this->filter_list_ == nullptr)
+#endif
+  {
+    if (this->have_last_ && raw == this->last_raw_)
+      return;
+  }
   uint32_t now = millis();
   if (this->throttle_ms_ > 0 && this->have_last_ && now - this->last_publish_ms_ < this->throttle_ms_)
     return;
