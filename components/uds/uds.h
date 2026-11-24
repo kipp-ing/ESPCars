@@ -190,6 +190,7 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   /// nothing (§4.1).
   void on_message(const isotp::MessageView &msg) override;
   void on_error(isotp::IsoTpError error) override;
+  void on_sent() override;
 
   // -- the action surface (design §6) ------------------------------------------------------
 
@@ -281,7 +282,7 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   /// 0xFFFF (uds.raw — no group) falls back to the plain message.
   void report_group_error_(uint16_t group_index, const char *what, uint8_t nrc);
 
-  /// Resolve a group by name against the flashed catalog and confirm it belongs to our ECU.
+  /// Resolve a group by (ECU, name) against the flashed catalog.
   /// Canonical names and original service qualifiers both work — format §7 gives every alias its
   /// own index entry. `service: 0x0207` is turned into a canonical name by codegen, so no DID
   /// parsing happens on the device.
@@ -335,6 +336,8 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   uint16_t in_flight_resp_min_{0};
   uint8_t in_flight_slot_{0};
   InFlight in_flight_{InFlight::NONE};
+  /// False while ISO-TP is sending; its bounded transport timers own that wait.
+  bool response_waiting_{false};
   uint32_t own_deadline_ms_{0};
   uint8_t pending_streak_{0};
 

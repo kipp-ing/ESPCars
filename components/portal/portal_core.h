@@ -320,12 +320,8 @@ struct NodeDef {
   uint16_t action_count{0};
 };
 
-/// The absence predicate. Within a response `resolve()` is its ONE caller (`fingerprint()` also
-/// mixes it in, on the main loop, for `seq` only): `absent_fn` reads live state at call
-/// time by design, so a second evaluation later in the same response could see a different
-/// answer and pair `state:"absent"` with a `why.code` from a re-read that no longer says
-/// absent. `describe_node_reason()` therefore reads `r.states[index] == State::ABSENT`, the one
-/// verdict `resolve()` already committed.
+/// Live predicate for main-loop sampling. Device HTTP snapshots carry frozen verdicts below;
+/// freestanding callers without those buffers may evaluate their own predicates directly.
 inline bool node_is_absent(const NodeDef &node) {
   return node.absent_why != nullptr && (node.absent_fn == nullptr || node.absent_fn(node.absent_ctx));
 }
@@ -364,7 +360,14 @@ struct Snapshot {
   /// §4.3: the limits table ValueSample::limit_slot indexes (constant data, in flash).
   const ValueLimit *limits{nullptr};
   size_t limit_count{0};
+  /// Main-loop verdicts, parallel to nodes; device requests must copy these under the lock.
+  /// nullptr supports freestanding callers whose predicates have no cross-task entity reads.
+  const bool *absent_samples{nullptr};
 };
+
+inline bool node_is_absent(const Snapshot &s, size_t index) {
+  return s.absent_samples != nullptr ? s.absent_samples[index] : node_is_absent(s.nodes[index]);
+}
 
 /// Caller-owned scratch, one entry per node. Freestanding cores never allocate.
 struct Resolved {
@@ -477,6 +480,10 @@ class ChunkWriter {
   }
 
   bool number_float(float value, int8_t decimals) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if (((bits >> 23) & 0xFFu) == 0xFFu)
+      return this->literal("null");
     if (decimals < 0)
       decimals = 0;
     if (decimals > 6)
@@ -488,13 +495,38 @@ class ChunkWriter {
       negative = true;
       value = -value;
     }
-    double scaled = static_cast<double>(value) * static_cast<double>(scale) + 0.5;
-    uint64_t scaled_int;
+    const double scaled = static_cast<double>(value) * static_cast<double>(scale) + 0.5;
     if (scaled >= static_cast<double>(UINT64_MAX)) {
-      scaled_int = UINT64_MAX;
-    } else {
-      scaled_int = static_cast<uint64_t>(scaled);
+      // At this magnitude even with six decimals a float is an exact integer. Expand its
+      // 24-bit significand into at most 39 decimal digits, without narrowing or saturation.
+      uint32_t significand = (bits & 0x7FFFFFu) | 0x800000u;
+      uint8_t digits[39]{};  // little-endian decimal, enough for FLT_MAX
+      size_t count = 0;
+      do {
+        digits[count++] = significand % 10u;
+        significand /= 10u;
+      } while (significand != 0);
+      const int shift = static_cast<int>((bits >> 23) & 0xFFu) - 127 - 23;
+      for (int bit = 0; bit < shift; bit++) {
+        uint8_t carry = 0;
+        for (size_t i = 0; i < count; i++) {
+          const uint8_t twice = digits[i] * 2u + carry;
+          digits[i] = twice % 10u;
+          carry = twice / 10u;
+        }
+        if (carry != 0)
+          digits[count++] = carry;
+      }
+      if (negative && !this->write("-", 1))
+        return false;
+      while (count != 0) {
+        const char digit = static_cast<char>('0' + digits[--count]);
+        if (!this->write(&digit, 1))
+          return false;
+      }
+      return decimals == 0 || (this->write(".", 1) && this->write("000000", decimals));
     }
+    const uint64_t scaled_int = static_cast<uint64_t>(scaled);
     const uint64_t int_part = scaled_int / scale;
     const uint64_t frac_part = scaled_int % scale;
     if (negative && !this->write("-", 1))
@@ -806,7 +838,7 @@ inline void resolve(const Snapshot &s, Resolved &out) {
     uint32_t age_ms = any_known_age ? max_age : 0;
     bool age_known = any_known_age;
 
-    if (node_is_absent(node)) {
+    if (node_is_absent(s, i)) {
       state = State::ABSENT;
       age_known = false;
       age_ms = 0;
@@ -1143,8 +1175,8 @@ inline bool write_series_with(ChunkWriter &w, const SeriesDef &def, SeriesElemen
     const bool answered = def.element != nullptr && def.element(def.ctx, i, &raw);
     SeriesElement out{};  // defaults to a hole; only the branches below promote it
     if (answered) {
-      if (raw.cls == 's') {
-        out.cls = 's';  // SNA always carries a null value, regardless of raw.has_value
+      if (raw.cls == 's' || ((raw.cls == 'r' || raw.cls == 'i') && raw.has_value && !is_finite_float(raw.value))) {
+        out.cls = 's';  // SNA (or a non-finite reading) always carries a null value
       } else if (raw.cls == '-') {
         out.cls = '-';
       } else if ((raw.cls == 'r' || raw.cls == 'i') && raw.has_value) {
@@ -1627,7 +1659,7 @@ inline uint32_t fingerprint(const Snapshot &s) {
     const NodeDef &node = s.nodes[n];
     // §5.1: an `absent_when` verdict is derived state (e.g. `switch_off` follows a switch).
     if (node.absent_fn != nullptr)
-      mix(node_is_absent(node) ? 1u : 0u);
+      mix(node_is_absent(s, n) ? 1u : 0u);
     for (uint16_t k = 0; k < node.value_count; k++) {
       const ValueSample &v = s.values[node.value_first + k];
       const detail::ValueVerdict verdict = detail::classify_value(v, node.budget_ms, node.budget_known);
@@ -1892,6 +1924,8 @@ inline bool parse_json_string(Cursor &c, char *out, size_t cap, bool *truncated)
           cp = (cp << 4) | static_cast<uint32_t>(h);
         }
         c.p += 4;
+        if (cp == 0)
+          return false;  // C strings cannot represent a decoded NUL without aliasing a prefix.
         if (cp < 0x80) {
           put(static_cast<char>(cp));
         } else if (cp < 0x800) {
@@ -2088,7 +2122,7 @@ inline ActionValue value_from(const JsonValue &jv) {
   } else if (jv.kind == JsonKind::NUMBER && double_is_finite(jv.number)) {
     v.kind = ValueKind::NUMBER;
     v.number = static_cast<float>(jv.number);
-  } else if (jv.kind == JsonKind::TEXT) {
+  } else if (jv.kind == JsonKind::TEXT && !jv.truncated) {
     set_text(&v, jv.text, std::strlen(jv.text));
   }
   return v;
@@ -2175,10 +2209,10 @@ inline ActionOutcome evaluate_action_json(const ActionDef &def, const ActionSamp
 }
 
 /// `Content-Type: application/x-www-form-urlencoded`, with the `value` field already extracted
-/// and decoded (`has_value` false if the field is absent). switch: true/false/on/off/1/0;
-/// number: a decimal; select: the option text.
+/// and decoded (`has_value` false if the field is absent). Pass decoded_len for strings that may contain NUL. switch:
+/// true/false/on/off/1/0; number: a decimal; select: the option text.
 inline ActionOutcome evaluate_action_text(const ActionDef &def, const ActionSample &sample, bool busy, bool has_value,
-                                          const char *text, size_t body_len) {
+                                          const char *text, size_t body_len, size_t decoded_len = SIZE_MAX) {
   if (!detail::action_enabled(def, sample))
     return detail::refuse(409, ActionCode::DISABLED);
   if (busy) {
@@ -2189,6 +2223,8 @@ inline ActionOutcome evaluate_action_text(const ActionDef &def, const ActionSamp
   }
   if (body_len > ACTION_BODY_MAX)
     return detail::refuse(400, ActionCode::BODY_TOO_LARGE);
+  if (text != nullptr && decoded_len != SIZE_MAX && std::memchr(text, '\0', decoded_len) != nullptr)
+    return detail::refuse(400, ActionCode::INVALID_BODY);
   if (def.control == Control::BUTTON) {
     ActionOutcome o;
     o.verdict = Verdict::ACCEPT;
@@ -2198,7 +2234,7 @@ inline ActionOutcome evaluate_action_text(const ActionDef &def, const ActionSamp
   }
   if (!has_value || text == nullptr)
     return detail::refuse(400, ActionCode::INVALID_BODY);
-  const size_t len = std::strlen(text);
+  const size_t len = decoded_len == SIZE_MAX ? std::strlen(text) : decoded_len;
   detail::JsonValue jv;
   jv.kind = detail::JsonKind::TEXT;
   jv.truncated = len >= ACTION_TEXT_MAX;
@@ -2227,8 +2263,11 @@ inline ActionOutcome evaluate_action_text(const ActionDef &def, const ActionSamp
 }
 
 /// Finds and URL-decodes the `value` field of a form body (`a=1&value=on`). `+` is a space.
-/// Returns false if the field is absent. Output is NUL-terminated and truncated at `cap - 1`.
+/// Returns false if absent, NUL-containing, or oversized; never returns a truncated prefix.
 inline bool form_value(const char *body, size_t len, char *out, size_t cap) {
+  if (cap == 0)
+    return false;
+  out[0] = '\0';
   const char *p = body;
   const char *end = body + len;
   while (p <= end) {
@@ -2244,8 +2283,11 @@ inline bool form_value(const char *body, size_t len, char *out, size_t cap) {
           ch = static_cast<char>(detail::hex_digit(q[1]) * 16 + detail::hex_digit(q[2]));
           q += 2;
         }
-        if (n + 1 < cap)
-          out[n++] = ch;
+        if (ch == '\0' || n + 1 >= cap) {
+          out[0] = '\0';
+          return false;
+        }
+        out[n++] = ch;
       }
       out[n] = '\0';
       return true;

@@ -1,5 +1,6 @@
 #include "isotp.h"
 
+#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
@@ -50,6 +51,10 @@ void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
     return;
   }
 
+  // Accepted SF/FF replaces the old receive transfer, including its refused FC.
+  if (info.type == PciType::SINGLE || info.type == PciType::FIRST)
+    this->has_pending_fc_ = false;
+
   Frame out{};
   const RxAction action = this->rx_.on_frame(this->cfg_, view.data, view.dlc, millis(), &out);
   switch (action) {
@@ -59,17 +64,21 @@ void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
       // adds a whole loop period to every block, which on a long response is the difference
       // between a brisk transfer and a visibly slow one. inject() is loop context and short, and
       // the drain we are inside is already loop context, so this is legal.
+      this->has_pending_fc_ = false;
       if (!this->inject_frame_(out)) {
         this->pending_fc_ = out;
         this->has_pending_fc_ = true;
+        this->pending_fc_started_ = millis();
       }
       if (action == RxAction::SEND_FLOW_CONTROL_FAILED)
         this->report_error_(this->rx_.error());
       break;
     case RxAction::MESSAGE_COMPLETE:
+      this->has_pending_fc_ = false;
       this->deliver_message_();
       break;
     case RxAction::FAILED:
+      this->has_pending_fc_ = false;
       this->report_error_(this->rx_.error());
       break;
     case RxAction::NOTHING:
@@ -78,15 +87,24 @@ void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
 }
 
 void IsoTpProtocol::loop() {
-  const uint32_t now = millis();
+  const uint32_t now = App.get_loop_component_start_time();
 
-  // A refused flow control frame is the most time-critical thing we can be holding: until it
-  // lands the peer is blocked, so it goes out ahead of our own transmit work.
-  if (this->has_pending_fc_ && this->inject_frame_(this->pending_fc_))
+  // Expire the transfer before retrying permission to send any more of it.
+  if (this->rx_.poll(this->cfg_, now) == RxAction::FAILED) {
     this->has_pending_fc_ = false;
-
-  if (this->rx_.poll(this->cfg_, now) == RxAction::FAILED)
     this->report_error_(this->rx_.error());
+  } else if (this->has_pending_fc_) {
+    // Overflow notifications have no live receive state to time them out. Bound those
+    // retries too, without reporting the already-delivered overflow error a second time.
+    // After a timeout callback, wait until the next loop: it may have started a new
+    // transfer whose timestamp is later than this iteration's time snapshot.
+    if (elapsed_ms(now, this->pending_fc_started_) >= this->cfg_.n_cr_timeout_ms) {
+      this->has_pending_fc_ = false;
+      ESP_LOGW(TAG, "%s: dropping expired flow control", this->log_name_);
+    } else if (this->inject_frame_(this->pending_fc_)) {
+      this->has_pending_fc_ = false;
+    }
+  }
 
   for (uint8_t i = 0; i < TX_FRAMES_PER_LOOP; i++) {
     Frame frame{};
@@ -101,6 +119,8 @@ void IsoTpProtocol::loop() {
     }
     if (action == TxAction::COMPLETE) {
       this->messages_sent_++;
+      if (this->consumer_ != nullptr)
+        this->consumer_->on_sent();
     } else if (action == TxAction::FAILED) {
       this->report_error_(this->tx_.error());
     }
@@ -108,8 +128,13 @@ void IsoTpProtocol::loop() {
   }
 }
 
-bool IsoTpProtocol::send(const uint8_t *data, uint16_t size) {
-  if (!this->tx_.begin(data, size, millis())) {
+bool IsoTpProtocol::send(const uint8_t *data, size_t size) {
+  if (data == nullptr || size == 0 || size > this->cfg_.max_message_size) {
+    ESP_LOGW(TAG, "%s: send rejected: message must contain 1-%u bytes (max_message_size)", this->log_name_,
+             this->cfg_.max_message_size);
+    return false;
+  }
+  if (!this->tx_.begin(data, static_cast<uint16_t>(size), millis())) {
     ESP_LOGW(TAG, "%s: send rejected: %s", this->log_name_,
              this->tx_.is_busy() ? LOG_STR_LITERAL("a transfer is already in flight")
                                  : LOG_STR_LITERAL("message exceeds max_message_size"));

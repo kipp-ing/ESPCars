@@ -38,6 +38,9 @@ class IsoTpConsumer {
   /// Called in loop context with a view valid ONLY for this call (see the lifetime rule below).
   virtual void on_message(const MessageView &msg) = 0;
   virtual void on_error(IsoTpError error) {}
+  /// Called once in loop context after the final request frame is accepted by the CAN layer.
+  /// ISO-TP owns segmentation/backpressure timing; diagnostic P2 starts here.
+  virtual void on_sent() {}
 };
 
 /// One ISO-TP address pair on one can_gateway port.
@@ -93,7 +96,7 @@ class IsoTpProtocol : public Component, public can_gateway::CanGatewayFrameConsu
 
   /// Queue a message for transmission. Returns false when a send is already in flight (ISO-TP
   /// has no multiplexing, so the caller serialises requests) or the message exceeds capacity.
-  bool send(const uint8_t *data, uint16_t size);
+  bool send(const uint8_t *data, size_t size);
   uint16_t get_max_message_size() const { return this->cfg_.max_message_size; }
 
   bool is_busy() const { return this->tx_.is_busy(); }
@@ -159,6 +162,7 @@ class IsoTpProtocol : public Component, public can_gateway::CanGatewayFrameConsu
   /// it stalls the peer until N_Cr expires, which turns a busy microsecond into a lost second.
   Frame pending_fc_{};
   bool has_pending_fc_{false};
+  uint32_t pending_fc_started_{0};
 
   uint32_t messages_sent_{0};
   uint32_t messages_received_{0};
@@ -216,11 +220,11 @@ template<typename... Ts> class SendAction : public Action<Ts...>, public Parente
 
   void play(const Ts &...x) override {
     if (this->is_static_) {
-      this->parent_->send(this->data_static_.data(), static_cast<uint16_t>(this->data_static_.size()));
+      this->parent_->send(this->data_static_.data(), this->data_static_.size());
       return;
     }
     const std::vector<uint8_t> data = this->data_func_(x...);
-    this->parent_->send(data.data(), static_cast<uint16_t>(data.size()));
+    this->parent_->send(data.data(), data.size());
   }
 
  protected:

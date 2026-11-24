@@ -114,12 +114,12 @@ portal:
 | `segment` | `[a-z][a-z0-9_]*` | required; unique among siblings |
 | `kind` | non-empty string | required; open vocabulary |
 | `label` | non-empty string | required |
-| `budget_ms` | int >= 1, or null (`null`/`~`/empty/`none`) | optional; omitted -> derived (4.4) |
+| `budget_ms` | int 1..4294967295, or null (`null`/`~`/empty/`none`) | optional; omitted -> derived (4.4) |
 | `values` | list of value (4.3), >= 1 | optional |
 | `series` | series (4.5) | optional |
 | `children` | list of node, >= 1 | optional |
 | `actions` | list of action (4.7), >= 1 | optional |
-| `role` / `roles_available` | identifier / list of identifiers | `role` requires a non-empty `roles_available` containing it |
+| `role` / `roles_available` | identifier (at most 39 bytes) / list of such identifiers | `role` requires a non-empty `roles_available` containing it |
 | `absent` | why-code | optional; node is `absent` with this code |
 | `absent_when` | `{provider, source, <provider args>}` | requires `absent`; provider from the registry (4.6) |
 | `unknown_when` | `{value, equals, why}` | `value` must be one of this node's own value keys bound to a `text_sensor`; not combinable with `children` |
@@ -131,6 +131,8 @@ portal:
 Node ids are dotted paths: a top-level node's id is its `segment`, a child's id is
 `<parent id>.<segment>`. The synthetic root has id `car`, kind `car`, label `root_label`
 (id and kind stay `car` for wire compatibility; the root's children carry bare ids).
+The top-level segment `car` is reserved; a nested `car` segment is allowed because its dotted
+ID differs. All node IDs and each node's own value keys must be unique.
 
 Cross-field rules (each a config error naming the node):
 
@@ -170,7 +172,7 @@ Cross-field rules (each a config error naming the node):
 | `label` | non-empty, required |
 | `unit` | string, optional (absent -> JSON null) |
 | `decimals` | 0..6, default 0 |
-| `cadence_ms` | int >= 1, optional; forbidden on `binary_sensor` |
+| `cadence_ms` | int 1..4294967295, optional; forbidden on `binary_sensor` |
 | exactly one of `sensor` / `text_sensor` / `binary_sensor` | entity id |
 | `expert` | bool, default false; UI hint (4.9): the page hides the value unless "expert" is on or the value is not fine |
 | `warn`, `bad` | `{below: float, above: float}`, at least one key; `sensor` values only |
@@ -180,16 +182,18 @@ Limits (`warn`, `bad`, `warn_when`, `bad_when`) drive the value's `level` (5.3).
 `below: x` matches a reading `< x`, `above: x` a reading `> x`; `bad` is checked before `warn`.
 Boolean: `bad_when: b` matches a reading `== b`, then `warn_when`. Limits on a `text_sensor`
 value, numeric limits on a `binary_sensor` value and `*_when` on a `sensor` value are config
-errors. The limits are compiled into flash as one constant table (one small struct per limited
-value); a value names its row by a 16-bit slot that sits in existing struct padding, so limits
+errors. Numeric bounds must be finite and fit float32 (maximum magnitude
+3.4028234663852886e38; a nonzero bound must not round to zero). The limits are compiled into
+flash as one constant table (one small struct per limited value); a value names its row by a 16-bit slot that sits in existing struct padding, so limits
 cost no heap and nothing per request.
 
 ### 4.4 Budget derivation
 
 Explicit `budget_ms` (int or null) wins. Otherwise: no own values, or any own value without
 `cadence_ms` -> null; else `3 * max(cadence_ms)`. The resolved value is written back into the
-validated config (visible in `esphome config` output). A component-level `budget_ms` is a
-config error with an explanatory message.
+validated config (visible in `esphome config` output). A derived budget above 4294967295 ms is
+a config error; an explicit valid budget or null still overrides derivation. A component-level
+`budget_ms` is a config error with an explanatory message.
 
 ### 4.5 Series
 
@@ -197,7 +201,7 @@ config error with an explanatory message.
 |---|---|
 | `key`, `label` | as for values |
 | `unit` | optional |
-| `index_base` | int >= 0, required |
+| `index_base` | int 0..2147483647, required |
 | `index_frame` | `[a-z][a-z0-9_]*` or explicit null, **required** |
 | `count` | 1..64, required |
 | `decimals` | 0..6, default 0 |
@@ -209,7 +213,8 @@ declaring `submodule_position` (itself included). None found -> null. Found and
 `index_frame == submodule_cell` -> `(position - 1) * submodule_size + index_base`. Found and
 `index_frame` null -> config error (an unnamed frame never gets an offset). Found and any
 other frame -> null. Two nodes with the same `submodule_position` -> config error. A
-`submodule_position` without top-level `submodule_size` -> config error.
+`submodule_position` without top-level `submodule_size` -> config error. A derived
+`pack_index_base` above 2147483647 is a config error.
 
 ### 4.6 Provider registry
 
@@ -254,6 +259,9 @@ headers are visible; the portal includes nothing of the provider's component.
   # absent: switched_off                # optional, this is the default
 ```
 
+- Absence predicates run on the main loop; each HTTP response uses a mutex-protected copy of
+  the verdict and AP link count. Before the first sample, a conditional absence is conservative
+  (`absent`). No HTTP request reads the switch entity's live state.
 - The node is `absent` while the switch is off (or the switch is missing), `why.code`
   `switched_off` (the provider's default why-code; any other non-gated code may be declared).
 - `why.evidence` is `{"action": "<node id>/<key>"}`: the first action in the tree (pre-order,
@@ -443,7 +451,10 @@ node carries `series: null`.
 
 Value entry (extended, additive): after the v2 keys (`key, label, unit, value, raw, raw_hex,
 classification, state, why`) comes `level`: `"ok"`, `"warn"`, `"bad"`, or `null` when the value
-declares no limits or has no reading (`classification: sna`). `level` never changes the value's
+declares no limits or has no reading (`classification: sna`). Finite numbers retain their
+magnitude even when the decimal-scaled integer exceeds uint64; there is no saturation. Non-finite
+numeric values remain absent/SNA with `value: null`; a non-finite real/interpolated series
+reading becomes SNA (`s`, null), never a float-to-integer cast. `level` never changes the value's
 own `state`/`why` (they keep their v2 meaning); it feeds the node's derivation above.
 
 ### 5.4 Action entry (extended)
@@ -478,6 +489,11 @@ The validator accepts an action without the extension keys (older producer). If 
 each extension key must have the type above; `control` outside the four known values is a
 violation `unknown_control` for the validator and is rendered as unrecognised (disabled) by
 the page.
+
+Select option strings must fit in 63 UTF-8 bytes and contain no NUL. Known YAML options that
+exceed this are rejected at config time; runtime-only oversized options disable that action,
+with a warning, and are not advertised. An oversized dynamic state is unavailable. Oversized
+request text is refused with result `value: null`, so no response echoes a split UTF-8 character.
 
 ### 5.5 Action result (R26–R28)
 
@@ -544,11 +560,11 @@ credentials gets `401` with
 body, and **no side effect** (the tree and `seq` do not change). A valid Digest response
 (`curl --digest -u user:pass`) passes.
 
-### 6.1 State transport rules (unchanged)
+### 6.1 State transport rules
 
 | rule | response |
 |---|---|
-| query string >= 32 bytes | 400 |
+| query exceeds the generated capacity (longest configured node ID plus `path=`, `&after=4294967295` and NUL) | 400 |
 | non-empty query with neither `path` nor `after` | 400 |
 | unparseable `after` (decimal uint32 only) | 400 |
 | producer cannot snapshot itself | 503 |
@@ -559,6 +575,9 @@ The body is streamed in frames of at most 4096 bytes (`httpd_resp_send_chunk`); 
 buffer never grows with the tree.
 
 ### 6.2 Actions
+
+Decoded NUL bytes in JSON keys/strings (including ignored fields) or form values are refused as
+`invalid_body`; a suffix following a NUL cannot alias a key or option.
 
 Request body, one of:
 - `Content-Type: application/json`: `{"value": <bool|string|number>}`; for a button the body

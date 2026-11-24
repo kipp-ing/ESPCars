@@ -1011,6 +1011,19 @@ SET_SIGNAL_ACTION_SCHEMA = cv.All(
 )
 
 
+def _validate_set_patch_bytes(entries):
+    """Each of the eight payload byte indices may be updated only once."""
+    seen = set()
+    for entry in entries:
+        index = entry[CONF_INDEX]
+        if index in seen:
+            raise cv.Invalid(
+                f"byte index {index} may only be patched once (limit: 8 unique bytes)"
+            )
+        seen.add(index)
+    return entries
+
+
 SET_PATCH_ACTION_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -1029,7 +1042,8 @@ SET_PATCH_ACTION_SCHEMA = cv.All(
                         }
                     )
                 ),
-                cv.Length(min=1),
+                cv.Length(min=1, max=8),
+                _validate_set_patch_bytes,
             ),
         }
     ),

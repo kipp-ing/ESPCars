@@ -148,6 +148,7 @@ class LinBusComponent : public Component {
   uint32_t last_pid_errors_{0};
   uint32_t last_collisions_{0};
   uint32_t last_send_failures_{0};
+  uint32_t last_warned_send_failures_{0};
 
   // Per-instance stats-log throttle (was a function-local static, UPGRADES.md M6)
   uint32_t last_stats_log_{0};

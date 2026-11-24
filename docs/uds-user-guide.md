@@ -301,6 +301,15 @@ still retries normally.
 `on_error` receives a static reason in `x.what`, safe to retain across `delay:`
 or later errors without allocating per error. Group names remain in the log.
 
+P2 starts when ISO-TP reports the complete request sent, after segmentation and
+CAN backpressure. Communication failures set a component warning; the next
+accepted positive response clears it. Existing retry backoff is unchanged.
+
+Each hub supports at most 255 distinct polled groups and 65535 entity bindings.
+Finite `update_interval` values must be at most 2147483647 ms (below 2^31 ms for
+scheduler clock-wrap safety); `never` remains available for on-demand reads.
+These limits are checked during configuration.
+
 Default every hub to `allow_active_services: false` unless you specifically
 need it, and keep it observe-first the way the rest of this repo does.
 

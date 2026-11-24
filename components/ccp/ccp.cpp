@@ -3,6 +3,7 @@
 
 #include <algorithm>
 
+#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
@@ -18,12 +19,13 @@ void CcpHub::register_receive_id(uint32_t id) {
 }
 
 void CcpHub::loop() {
-  if (this->in_flight_ && static_cast<int32_t>(millis() - this->deadline_) >= 0) {
+  const uint32_t now = App.get_loop_component_start_time();
+  if (this->in_flight_ && static_cast<int32_t>(now - this->deadline_) >= 0) {
     ESP_LOGW(TAG, "CCP 0x%03X response timeout for command 0x%02X", static_cast<unsigned>(this->response_id_),
              this->in_flight_command_);
     this->finish_(false, CCP_TIMEOUT, nullptr, 0);
   }
-  if (this->daq_collecting_ && static_cast<int32_t>(millis() - this->daq_collect_deadline_) >= 0)
+  if (this->daq_collecting_ && static_cast<int32_t>(now - this->daq_collect_deadline_) >= 0)
     this->complete_daq_read_("collect_timeout");
 }
 
@@ -81,6 +83,7 @@ void CcpHub::finish_(bool success, uint8_t code, const uint8_t *data, uint8_t le
   this->command_callback_ = {};
   this->in_flight_ = false;
   if (success) {
+    this->status_clear_warning();
     std::vector<uint8_t> payload(data, data + len);
     this->response_callback_.call(command, code, payload);
     if (command == CONNECT) {
@@ -90,6 +93,8 @@ void CcpHub::finish_(bool success, uint8_t code, const uint8_t *data, uint8_t le
     if (command == DISCONNECT)
       this->connected_ = false;
   } else {
+    ESP_LOGW(TAG, "CCP command 0x%02X failed with return code 0x%02X", command, code);
+    this->status_set_warning();
     this->error_callback_.call(command, code);
   }
   if (callback)
@@ -145,10 +150,12 @@ bool CcpHub::unlock(const uint8_t *key, uint8_t len) {
 bool CcpHub::set_mta(uint8_t mta, uint8_t ext, uint32_t address) {
   return this->send_(ccp::set_mta(0, mta, ext, address, this->byte_order_));
 }
-bool CcpHub::dnload(const uint8_t *data, uint8_t len) {
-  if (len == 0 || len > CCP_MAX_TRANSFER)
+bool CcpHub::dnload(const uint8_t *data, size_t len) {
+  if (data == nullptr || len == 0 || len > CCP_MAX_TRANSFER) {
+    ESP_LOGW(TAG, "CCP download refused: data must contain 1-%u bytes", CCP_MAX_TRANSFER);
     return false;
-  return this->send_(ccp::dnload(0, data, len));
+  }
+  return this->send_(ccp::dnload(0, data, static_cast<uint8_t>(len)));
 }
 bool CcpHub::dnload6(const uint8_t *data) { return data != nullptr && this->send_(ccp::dnload6(0, data)); }
 bool CcpHub::upload(uint8_t size) { return size > 0 && size <= CCP_MAX_TRANSFER && this->send_(ccp::upload(0, size)); }
@@ -204,9 +211,11 @@ bool CcpHub::action_service(const uint8_t *data, uint8_t len) {
     std::memcpy(c.data + 2, data, len);
   return this->send_(c);
 }
-bool CcpHub::raw(const uint8_t *cro, uint8_t len) {
-  if (cro == nullptr || len < 1 || len > CCP_FRAME_LEN)
+bool CcpHub::raw(const uint8_t *cro, size_t len) {
+  if (cro == nullptr || len < 1 || len > CCP_FRAME_LEN) {
+    ESP_LOGW(TAG, "CCP raw refused: data must contain 1-%u bytes", CCP_FRAME_LEN);
     return false;
+  }
   Cro c{};
   std::memcpy(c.data, cro, len);
   return this->send_(c);
@@ -214,14 +223,13 @@ bool CcpHub::raw(const uint8_t *cro, uint8_t len) {
 
 bool CcpHub::connect_and(std::function<void(bool)> callback) {
   if (this->connected_) {
-    callback(true);
+    if (callback)
+      callback(true);
     return true;
   }
-  this->connect_callback_ = std::move(callback);
+  // send_ takes ownership only after acceptance; a refused caller cannot replace it.
   return this->send_(ccp::connect(0, this->station_address_, this->byte_order_),
-                     [this](bool ok, uint8_t, const uint8_t *, uint8_t) {
-                       auto callback = std::move(this->connect_callback_);
-                       this->connect_callback_ = {};
+                     [callback = std::move(callback)](bool ok, uint8_t, const uint8_t *, uint8_t) {
                        if (callback)
                          callback(ok);
                      });
@@ -311,6 +319,10 @@ bool CcpHub::send_sequence_(Cro cro, CommandCallback callback) {
 }
 
 bool CcpHub::daq_read(const DaqReadRequest &req, std::function<void(const DaqReadResult &)> callback) {
+  if (req.collect_timeout == 0 || req.collect_timeout > 0x7FFFFFFFU) {
+    ESP_LOGW(TAG, "CCP DAQ read refused: collect_timeout must be 1-2147483647 ms");
+    return false;
+  }
   if (req.dto_id != this->response_id_ &&
       std::find(this->receive_ids_.begin(), this->receive_ids_.end(), req.dto_id) == this->receive_ids_.end()) {
     ESP_LOGW(TAG, "CCP DAQ read refused: DTO ID 0x%03X was not registered before setup",
@@ -353,6 +365,7 @@ bool CcpHub::daq_read(const DaqReadRequest &req, std::function<void(const DaqRea
   }
 
   this->daq_read_active_ = true;
+  this->daq_cleanup_failed_ = false;
   this->daq_collecting_ = false;
   this->daq_anchor_required_ = req.require_anchor && this->has_daq_anchor_();
   this->daq_requested_offset_ = requested_offset;
@@ -502,6 +515,7 @@ void CcpHub::teardown_daq_read_() {
 }
 
 void CcpHub::fail_daq_teardown_(const char *step) {
+  this->daq_cleanup_failed_ = true;
   ESP_LOGW(TAG, "CCP DAQ cleanup failed at %s; ECU streaming may still be active", step);
   this->status_set_warning();
   this->daq_read_result_.ok = false;
@@ -512,6 +526,8 @@ void CcpHub::fail_daq_teardown_(const char *step) {
 void CcpHub::fire_daq_read_() {
   if (!this->daq_read_active_)
     return;
+  if (this->daq_cleanup_failed_)
+    this->status_set_warning();
   DaqReadResult result = std::move(this->daq_read_result_);
   auto callback = std::move(this->daq_read_done_);
   this->daq_read_done_ = {};

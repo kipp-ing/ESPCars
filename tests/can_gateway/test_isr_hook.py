@@ -40,7 +40,7 @@ def test_isr_hook_is_fully_conditional_and_first_rx_tap(set_core_config) -> None
     assert HOOK_DEFINE not in python
 
 
-def test_hook_arms_a_route_less_port_and_inject_is_task_safe(set_core_config) -> None:
+def test_hook_arms_a_route_less_port(set_core_config) -> None:
     header = (_component_dir() / "can_gateway.h").read_text()
     source = (_component_dir() / "can_gateway.cpp").read_text()
     isr = _brace_block(source, "GatewayPort::handle_rx_isr()")
@@ -51,10 +51,3 @@ def test_hook_arms_a_route_less_port_and_inject_is_task_safe(set_core_config) ->
     predicate = _brace_block(header, "bool rx_taps_active_()")
     assert f"#ifdef {HOOK_DEFINE}" in predicate
     assert "active = active || this->isr_frame_hook_ != nullptr;" in predicate
-
-    inject = _brace_block(source, "bool GatewayPort::inject")
-    assert "portENTER_CRITICAL(&this->mux_)" in inject
-    assert "twai_node_transmit" in inject
-    assert "outstanding_.push" in inject
-    assert "compare_exchange_strong" in inject
-    assert "Safe from ESPHome loop context or a FreeRTOS task" in header

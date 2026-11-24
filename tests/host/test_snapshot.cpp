@@ -5,19 +5,21 @@
 //   - read_latest() returns the NEWEST record, not the oldest
 //   - it returns false when the ring is empty and when nothing new arrived
 //   - overwritten pushes are counted in missed()
-//   - a record torn by a concurrent producer is never returned: the seqlock
-//     stamp must make read_latest() retry or give up, never hand out a mix
+//   - records remain consistent under serialized producer/consumer scheduling
 //
-// The last property needs a real concurrent producer, so this file starts a
-// thread. The producer/consumer race on Entry::value is intentional (that is
-// what the seq stamp guards), which is why this target runs under ASan/UBSan
-// rather than TSAN — TSAN reports every seqlock as a data race by design.
+// SnapshotRing is a same-core ISR/loop primitive with plain payload storage.
+// Concurrent C++ threads copying Entry::value have a data race even if a torn
+// copy is discarded by the sequence check. A host mutex models serialized
+// execution on the owning core; this test checks newest/miss bookkeeping with
+// real threads, NOT the safety of overlapping copies or the reader fence.
+// ISR preemption/fence correctness remains a target/bench obligation.
 
 #include "gateway_core.h"
 #include "harness.h"
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <thread>
 
 using namespace esphome::can_gateway;
@@ -47,6 +49,20 @@ bool snapshot_is_consistent(const FrameSnapshot &snapshot) {
   }
   return true;
 }
+
+// Diagnose violations of the host-only single-core serialization precondition.
+// This does not make payload access safe: the caller must hold the core mutex.
+class HostCoreAccess {
+ public:
+  HostCoreAccess(std::atomic<uint32_t> &active, std::atomic<uint32_t> &overlaps) : active_(active) {
+    if (this->active_.fetch_add(1, std::memory_order_relaxed) != 0)
+      overlaps.fetch_add(1, std::memory_order_relaxed);
+  }
+  ~HostCoreAccess() { this->active_.fetch_sub(1, std::memory_order_relaxed); }
+
+ private:
+  std::atomic<uint32_t> &active_;
+};
 
 }  // namespace
 
@@ -165,21 +181,11 @@ TEST(snapshot_ring_minimum_size_two) {
   CHECK_EQ(ring.missed(), 2u);
 }
 
-// Regression test for the seqlock reader fence in SnapshotRing::read_latest.
-// Before the fix this reproduced reliably on arm64 (~666 torn reads in 125k):
-// the validation used a bare acquire load, which orders only what follows it, so
-// the non-atomic payload copy could sink below seq_after and a torn record passed
-// validation. If this ever fails again, the acquire fence went missing.
-TEST(snapshot_ring_concurrent_reader_never_sees_a_torn_record) {
-  // A producer thread stands in for the RX ISR. Every returned record must be
-  // internally consistent; a seqlock failure shows up as a record whose payload
-  // belongs to a different can_id than its header. read_latest() giving up
-  // (false) after three attempts IS allowed by the contract and is not counted.
-  //
-  // Several rounds: on a weakly-ordered host roughly every round trips, but the
-  // window is narrow enough that a single round is not certain.
-  static constexpr uint32_t PUSH_COUNT = 400000;
-  static constexpr int ROUNDS = 20;
+// A threaded scheduling test, with defined C++ semantics. The former test
+// raced on entry.value; a clean sanitizer run did not establish correctness.
+TEST(snapshot_ring_serialized_threads_return_consistent_newest_records) {
+  static constexpr uint32_t PUSH_COUNT = 100000;
+  static constexpr int ROUNDS = 4;
 
   uint32_t torn = 0;
   uint64_t reads = 0;
@@ -190,16 +196,23 @@ TEST(snapshot_ring_concurrent_reader_never_sees_a_torn_record) {
     rounds_run++;
     SnapshotRing<4> ring;
     std::atomic<bool> done{false};
+    std::mutex core;
+    std::atomic<uint32_t> active{0}, overlaps{0};
 
-    std::thread producer([&ring, &done]() {
-      for (uint32_t k = 1; k <= PUSH_COUNT; k++)
+    std::thread producer([&ring, &done, &core, &active, &overlaps]() {
+      for (uint32_t k = 1; k <= PUSH_COUNT; k++) {
+        std::lock_guard<std::mutex> lock(core);
+        HostCoreAccess access(active, overlaps);
         ring.push(snapshot_for(k));
+      }
       done.store(true, std::memory_order_release);
     });
 
     uint32_t last_id = 0;
     while (!done.load(std::memory_order_acquire)) {
       FrameSnapshot out{};
+      std::lock_guard<std::mutex> lock(core);
+      HostCoreAccess access(active, overlaps);
       if (ring.read_latest(out)) {
         reads++;
         if (!snapshot_is_consistent(out))
@@ -210,6 +223,7 @@ TEST(snapshot_ring_concurrent_reader_never_sees_a_torn_record) {
       }
     }
     producer.join();
+    CHECK_EQ_MSG(overlaps.load(), 0u, "host threads violated SnapshotRing call serialization");
 
     // Final drain after the producer stopped.
     FrameSnapshot out{};
