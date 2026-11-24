@@ -186,11 +186,8 @@ bool UdsHub::resolve_ecu_() {
 
 bool UdsHub::find_group_(const char *name, uint16_t *out) const {
   uint32_t gi = 0;
-  if (!this->ecu_valid_ || name == nullptr || !this->catalog_.find(name, NameKind::GROUP, &gi))
-    return false;
-  // A group belongs to exactly one ECU, and a catalog may hold several. Binding to a group outside
-  // our ECU would put another ECU's request bytes on our address pair.
-  if (gi < this->ecu_.group_first || gi >= this->ecu_.group_first + this->ecu_.group_count)
+  if (!this->ecu_valid_ ||
+      !this->catalog_.find(name, NameKind::GROUP, &gi, this->ecu_.group_first, this->ecu_.group_count))
     return false;
   *out = static_cast<uint16_t>(gi);
   return true;
@@ -293,7 +290,7 @@ void UdsHub::loop() {
         this->own_deadline_ms_ = now + this->p2_ms_;
       }
     }
-    if (this->in_flight_ == InFlight::POLLED) {
+    if (this->response_waiting_ && this->in_flight_ == InFlight::POLLED) {
       // The scheduler owns this deadline, and it is the only signal a silent ECU gives: isotp's
       // N_Bs/N_Cr timers run only during a transfer, so total silence yields no IsoTpError at all.
       const SchedTimeout to = this->sched_.poll(now);
@@ -305,7 +302,8 @@ void UdsHub::loop() {
           this->publish_group_unavailable_(gi);
         this->report_group_error_(gi, "response timeout", 0);
       }
-    } else if (this->in_flight_ != InFlight::NONE && sched_time_reached(now, this->own_deadline_ms_)) {
+    } else if (this->response_waiting_ && this->in_flight_ != InFlight::NONE &&
+               sched_time_reached(now, this->own_deadline_ms_)) {
       const uint16_t gi = this->in_flight_group_;
       this->timeouts_++;
       this->finish_in_flight_();
@@ -336,7 +334,7 @@ void UdsHub::issue_next_(uint32_t now) {
     this->in_flight_ = InFlight::RAW;
     this->in_flight_group_ = 0xFFFF;
     this->in_flight_resp_min_ = 0;
-    this->own_deadline_ms_ = now + this->p2_ms_;
+    this->response_waiting_ = false;
     this->requests_sent_++;
     return;
   }
@@ -351,7 +349,7 @@ void UdsHub::issue_next_(uint32_t now) {
     if (result == SendResult::UNSENDABLE)
       return;  // dropped: retrying would log once per loop and never succeed
     this->in_flight_ = InFlight::ONDEMAND;
-    this->own_deadline_ms_ = now + this->p2_ms_;
+    this->response_waiting_ = false;
     return;
   }
 
@@ -375,6 +373,7 @@ void UdsHub::issue_next_(uint32_t now) {
     this->publish_group_unavailable_(gi);
     return;
   }
+  this->response_waiting_ = false;
   this->in_flight_ = InFlight::POLLED;
   this->in_flight_slot_ = static_cast<uint8_t>(slot);
 }
@@ -442,8 +441,21 @@ UdsHub::SendResult UdsHub::send_group_(uint16_t group_index, bool allow_active) 
   return SendResult::SENT;
 }
 
+void UdsHub::on_sent() {
+  if (this->in_flight_ == InFlight::NONE || this->response_waiting_)
+    return;
+  const uint32_t now = millis();
+  this->response_waiting_ = true;
+  if (this->in_flight_ == InFlight::POLLED) {
+    this->sched_.arm_deadline(now, this->p2_ms_);
+  } else {
+    this->own_deadline_ms_ = now + this->p2_ms_;
+  }
+}
+
 void UdsHub::finish_in_flight_() {
   this->in_flight_ = InFlight::NONE;
+  this->response_waiting_ = false;
   this->req_len_ = 0;
   this->pending_streak_ = 0;
 }
@@ -486,6 +498,7 @@ void UdsHub::on_message(const isotp::MessageView &msg) {
   // failure streak resets exactly as it would for a full response.
   const bool partial = rc.verdict == RespVerdict::PARTIAL;
   this->responses_accepted_++;
+  this->status_clear_warning();
   if (partial)
     this->partial_responses_++;
   if (this->in_flight_ == InFlight::RAW) {
@@ -507,6 +520,7 @@ void UdsHub::handle_negative_(const ResponseCheck &rc, uint32_t now) {
         this->fail_in_flight_(now, "too many 'response pending' answers", rc.nrc);
         return;
       }
+      this->response_waiting_ = true;
       if (this->in_flight_ == InFlight::POLLED) {
         this->sched_.extend_deadline(now, this->p2_ext_ms_);
       } else {
@@ -676,6 +690,7 @@ void UdsHub::mark_all_unavailable_() {
 }
 
 void UdsHub::report_error_(const char *what, uint8_t nrc) {
+  this->status_set_warning();
   if (nrc != 0) {
     ESP_LOGW(TAG, "%s: %s (NRC 0x%02X)", this->log_name_, what, nrc);
   } else {
@@ -685,6 +700,7 @@ void UdsHub::report_error_(const char *what, uint8_t nrc) {
 }
 
 void UdsHub::report_group_error_(uint16_t group_index, const char *what, uint8_t nrc) {
+  this->status_set_warning();
   GroupView g;
   if (group_index == 0xFFFF || !this->catalog_.group(group_index, &g)) {
     // uds.raw, or a group the catalog cannot resolve any more: nothing truthful to name.

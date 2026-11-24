@@ -355,3 +355,46 @@ TEST(isotp_runtime_overflow_notifies_consumer_callback_counter_once) {
   CHECK_EQ(protocol.messages_received(), 1u);
   CHECK_EQ(errors, 1u);
 }
+
+TEST(isotp_runtime_reports_sent_only_after_final_frame) {
+  using namespace isotp;
+  struct Consumer : IsoTpConsumer {
+    unsigned sent{0};
+    void on_message(const MessageView &) override {}
+    void on_sent() override { this->sent++; }
+  } consumer;
+  for (uint16_t size : {3, 24}) {
+    transport_now = 0;
+    can_gateway::GatewayPort port;
+    IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+    protocol.set_consumer(&consumer);
+    protocol.setup();
+    consumer.sent = 0;
+    uint8_t request[24]{};
+    CHECK(protocol.send(request, size));
+    port.accept = false;
+    protocol.loop();
+    transport_now = 500;  // CAN backpressure has already consumed several P2 periods.
+    protocol.loop();
+    CHECK_EQ(consumer.sent, 0u);
+    port.accept = true;
+    protocol.loop();
+    if (size > 7) {
+      CHECK_EQ(consumer.sent, 0u);
+      const uint8_t fc[] = {0x30, 0, 20};
+      protocol.on_frame({0x708, fc, 3, false, false});
+      protocol.loop();
+      CHECK_EQ(consumer.sent, 0u);
+      transport_now = 520;
+      protocol.loop();
+      CHECK_EQ(consumer.sent, 0u);
+      transport_now = 540;
+      protocol.loop();
+    }
+    CHECK_EQ(consumer.sent, 1u);
+    protocol.loop();
+    CHECK_EQ(consumer.sent, 1u);
+    CHECK_EQ(protocol.messages_sent(), 1u);
+  }
+  transport_now = 0;
+}

@@ -306,9 +306,16 @@ for i in 0 .. bit_size-1:
     bit = (response[(bit_pos + k*repeat_stride + i) / 8] >> (7 - ((bit_pos + k*repeat_stride + i) % 8))) & 1
     raw = (raw << 1) | bit
 if BYTESWAP:  raw = byteswap(raw, ceil(bit_size/8))
-if SIGNED and bit_size < 64 and (raw >> (bit_size-1)) & 1:
+if SIGNED and (raw >> (bit_size-1)) & 1:
     raw -= (1 << bit_size)          # sign-extend
 ```
+
+`SIGNED` means two's complement at every width, including 64 bits: all ones
+is -1 for a signed field and 18446744073709551615 for an unsigned 64-bit field.
+The pseudocode uses mathematical integers; a fixed-width implementation must
+avoid shifting by 64 and retain unsigned values through scale evaluation. This
+corrects the previous `< 64` pseudocode guard, which assumed a signed accumulator
+at width 64. No catalog layout or flag changes.
 
 Bit numbering is MSB-first within each byte, and bits run across byte boundaries
 without gaps. `BYTESWAP` covers the database's little-endian exception (the

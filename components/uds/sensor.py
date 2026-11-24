@@ -18,6 +18,7 @@ import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
     CONF_UNIT_OF_MEASUREMENT,
+    CONF_UPDATE_INTERVAL,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     STATE_CLASS_TOTAL_INCREASING,
@@ -30,6 +31,7 @@ from . import (
     CONF_UDS_ID,
     UdsHub,
     binding_final_validate,
+    polling_interval,
     register_binding,
     uds_ns,
 )
@@ -78,7 +80,7 @@ VALUE_SCHEMA = (
     .extend(
         # `never` is a first-class choice, not a mistake: identity DIDs and a wide capacity block are
         # read on demand through `uds.read` and must not be polled (design §5).
-        cv.Schema({cv.Optional("update_interval", default="60s"): cv.update_interval})
+        cv.Schema({cv.Optional(CONF_UPDATE_INTERVAL, default="60s"): polling_interval})
     )
 )
 

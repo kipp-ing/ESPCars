@@ -374,7 +374,9 @@ class Catalog {
   /// first version of this format, and it made every alias a verified miss — the entry now
   /// carries the name it was hashed from, and `service: DT_Cell_Voltage_Maximum_Cell_Voltage`
   /// resolves to the group without anyone inventing a name for it.
-  bool find(const char *name, NameKind kind, uint32_t *index_out) const {
+  /// Optional target range scopes equal names (including aliases) to one ECU's groups.
+  bool find(const char *name, NameKind kind, uint32_t *index_out, uint32_t first = 0,
+            uint32_t count = UINT32_MAX) const {
     if (this->base_ == nullptr || name == nullptr)
       return false;
     const uint32_t h = fnv1a(name);
@@ -401,7 +403,7 @@ class Catalog {
       const uint32_t idx = target & 0x0FFFFFFF;
       // The entry's own name verified, but the index it points at still has to exist — a CRC pass
       // proves the blob is intact, not that its target words are in range.
-      if (!this->index_in_range_(kind, idx))
+      if (idx < first || idx - first >= count || !this->index_in_range_(kind, idx))
         continue;
       *index_out = idx;
       return true;

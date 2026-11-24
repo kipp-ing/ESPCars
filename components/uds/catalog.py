@@ -475,7 +475,7 @@ def extract(f: Field, response: bytes, k: int = 0) -> int:
     if f.byteswap:
         nbytes = (f.bit_size + 7) // 8
         raw = int.from_bytes(raw.to_bytes(nbytes, "big"), "little")
-    if f.signed and f.bit_size < 64 and (raw >> (f.bit_size - 1)) & 1:
+    if f.signed and (raw >> (f.bit_size - 1)) & 1:
         raw -= 1 << f.bit_size
     return raw
 
