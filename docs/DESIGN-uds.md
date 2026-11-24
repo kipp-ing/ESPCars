@@ -225,10 +225,17 @@ correct reaction differs:
 `0x31` deserves its own row: polling a DID this ECU does not implement forever
 is how a diagnostic client makes itself a nuisance on a bus.
 
-Timeouts and transport failures come from `isotp` as `IsoTpError`; they feed the
+P2 starts at ISO-TP's `on_sent()` notification after the final request frame is
+accepted by the CAN layer. Queuing, segmentation and CAN backpressure consume
+transport time, not P2. Once a response starts, ISO-TP's receive timeout bounds
+reassembly. Response timeouts are detected by UDS; transport failures arrive
+from `isotp` as `IsoTpError`. They feed the
 same per-group backoff (double from the group interval, capped at 60 s, reset on
 success). After `max_consecutive_failures` the group's entities publish `NaN`, so
 Home Assistant shows unavailable rather than a value that stopped being true.
+Failures set the hub's component warning; the next accepted positive response
+(including a partial response) clears it. Foreign/short responses and NRC 0x78
+do not clear it. Retry counts and exponential backoff are unchanged.
 
 ### 4.1 Decode in the callback, publish from `loop()`
 
@@ -272,7 +279,12 @@ backoff, failure count, flags), so 32 polled groups cost ~512 B of RAM and the
 scan is unmeasurable next to a CAN frame.
 
 `update_interval: never` declares a group that is only read on demand — identity
-DIDs, a wide multi-block capacity read — via `uds.read`.
+DIDs, a wide multi-block capacity read — via `uds.read`. Configuration validation
+limits each hub to 255 distinct polled groups (`uint8_t` scheduler capacity),
+65535 bindings (`uint16_t` binding capacity), and finite polling intervals of at
+most 2147483647 ms (the scheduler's clock-wrap horizon). `never` consumes no poll
+slot. Canonical group names and aliases resolve within the selected ECU, so
+different ECUs may reuse names.
 
 ## 6. Safety
 

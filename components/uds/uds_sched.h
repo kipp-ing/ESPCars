@@ -32,8 +32,8 @@
 ///   slot = next(now, p2_ms)              → SCHED_NONE, or a slot marked in flight and armed
 ///   build_request(...) and send it
 ///     send refused (transport busy)      → cancel_in_flight(): backpressure, not a failure
-///     send accepted                      → optionally arm_deadline(now, p2_ms) at the true end of
-///                                          transmission, which is where ISO 14229 starts P2
+///     send accepted                      → wait for ISO-TP on_sent(), then arm_deadline(now, p2_ms) at the end of
+///                                          transmission, which is where ISO 14229 starts P2; only then poll()
 ///   response ACCEPTed                    → on_success(slot, now)
 ///   NRC 0x78 (response pending)          → extend_deadline(now, p2_ext_ms), keep waiting
 ///   NRC 0x31                             → suspend(slot)

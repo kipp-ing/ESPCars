@@ -38,6 +38,9 @@ class IsoTpConsumer {
   /// Called in loop context with a view valid ONLY for this call (see the lifetime rule below).
   virtual void on_message(const MessageView &msg) = 0;
   virtual void on_error(IsoTpError error) {}
+  /// Called once in loop context after the final request frame is accepted by the CAN layer.
+  /// ISO-TP owns segmentation/backpressure timing; diagnostic P2 starts here.
+  virtual void on_sent() {}
 };
 
 /// One ISO-TP address pair on one can_gateway port.
