@@ -229,7 +229,7 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   /// array elements than its database declares, which is ordinary.
   uint32_t fields_uncovered() const { return this->fields_uncovered_; }
   uint8_t last_nrc() const { return this->last_nrc_; }
-  bool catalog_ready() const { return this->catalog_.is_open(); }
+  bool catalog_ready() const { return this->catalog_.is_open() && this->ecu_valid_; }
   /// So a diagnostics block can name the hub it reports on, for the same reason the hub names itself.
   const char *log_name() const { return this->log_name_; }
 
@@ -246,8 +246,8 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
 
   /// Why a send did not happen, because the two reasons need opposite reactions. BUSY is isotp
   /// refusing while another transfer is in flight — retry the identical request next iteration.
-  /// UNSENDABLE is a group whose request bytes this build cannot assemble, which will be just as
-  /// true next iteration: retrying it logs a warning per loop forever, so the group is dropped.
+  /// UNSENDABLE is a permission or capacity refusal, which will be just as true next iteration:
+  /// retrying it logs a warning per loop forever, so the request is dropped (polls are suspended).
   enum class SendResult : uint8_t { SENT, BUSY, UNSENDABLE };
 
   bool open_catalog_();
@@ -257,7 +257,9 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   void log_report_();
 
   void issue_next_(uint32_t now);
-  SendResult send_group_(uint16_t group_index);
+  SendResult send_group_(uint16_t group_index, bool allow_active = false);
+  SendResult send_request_(const uint8_t *data, uint8_t len, uint16_t group_index, bool allow_active);
+  bool check_ready_();
   void finish_in_flight_();
   void handle_negative_(const ResponseCheck &rc, uint32_t now);
   void fail_in_flight_(uint32_t now, const char *what, uint8_t nrc);
@@ -272,7 +274,8 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   void publish_group_unavailable_(uint16_t group_index);
   void mark_all_unavailable_();
   void report_error_(const char *what, uint8_t nrc);
-  /// report_error_ with the group named in the message. The hub prefix says who was asking;
+  /// Log the group separately from the static reason passed to the automation. The hub prefix
+  /// says who was asking;
   /// without the group it never says what went unanswered — eleven bare "response timeout"
   /// lines against a resting pack are unattributable (uds follow-up session §2.1 (2026-07-30, git history)).
   /// 0xFFFF (uds.raw — no group) falls back to the plain message.
@@ -283,7 +286,7 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   /// own index entry. `service: 0x0207` is turned into a canonical name by codegen, so no DID
   /// parsing happens on the device.
   bool find_group_(const char *name, uint16_t *out) const;
-  bool enqueue_(uint16_t group_index);
+  bool enqueue_(uint16_t group_index, bool allow_active = false);
 
   static void copy_bounded(char *dst, size_t cap, const char *src);
 
@@ -336,6 +339,7 @@ class UdsHub : public Component, public isotp::IsoTpConsumer {
   uint8_t pending_streak_{0};
 
   uint16_t ondemand_[UDS_ONDEMAND_QUEUE]{};
+  bool ondemand_active_[UDS_ONDEMAND_QUEUE]{};
   uint8_t ondemand_head_{0};
   uint8_t ondemand_count_{0};
   uint8_t raw_pending_[UDS_MAX_REQUEST]{};

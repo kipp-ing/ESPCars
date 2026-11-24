@@ -72,7 +72,9 @@ uds:
 
 ### `on_error` Trigger
 
-Receives `x.what` and `x.nrc`; the response code is zero for timeout/transport errors.
+Receives `x.what` and `x.nrc`; the response code is zero for timeout/transport errors
+and local request refusals. `x.what` is a static reason string that remains valid
+across `delay:` and subsequent errors; the log includes the group name.
 
 ```yaml
 uds:

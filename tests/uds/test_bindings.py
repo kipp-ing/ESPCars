@@ -308,7 +308,7 @@ def test_unitless_field_gets_no_unit(set_core_config) -> None:
     config = bind(
         "PRES_Mini_Internal_1Byte",
         service="RT_Mini_Routine_Start",
-        update_interval="10s",
+        update_interval="never",
     )
     assert "unit_of_measurement" not in config
 
