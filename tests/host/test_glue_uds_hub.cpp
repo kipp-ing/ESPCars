@@ -213,3 +213,161 @@ TEST(uds_hub_failed_setup_publishes_all_bindings_before_mark_failed) {
   for (const auto &s : sensors)
     CHECK(std::isnan(s.state));
 }
+
+TEST(uds_hub_p2_waits_for_transmission_for_poll_ondemand_and_raw) {
+  for (unsigned kind : {0u, 1u, 2u}) {
+    Rig r;
+    r.hub.set_allow_active_services(true);
+    r.hub.setup();
+    if (kind == 1)
+      CHECK(r.hub.request_read("mini"));
+    if (kind == 2) {
+      const uint8_t raw[16] = {0x22, 0, 0};
+      CHECK(r.hub.send_raw(raw, sizeof(raw)));
+    }
+    r.tick(0);  // Accepted by ISO-TP, but not yet fully transmitted.
+    r.tp.busy = true;
+    r.tick(500);
+    CHECK_EQ(r.hub.timeouts(), 0u);
+    CHECK(r.errors.empty());
+    CHECK_EQ(r.hub.requests_sent(), 1u);
+    uds_test_now = 500;
+    r.tp.complete_send();
+    r.tick(649);
+    CHECK_EQ(r.hub.timeouts(), 0u);
+    r.tick(650);
+    CHECK_EQ(r.hub.timeouts(), 1u);
+    CHECK_EQ(r.errors.size(), 1u);
+    // No on-demand/raw retransmission; only the ordinary poller may take over.
+    CHECK_EQ(r.hub.requests_sent(), kind == 0 ? 1u : 2u);
+    if (kind == 0) {
+      r.tick(2649);
+      CHECK_EQ(r.hub.requests_sent(), 1u);
+      r.tick(2650);  // Existing 2x interval backoff, from the actual timeout.
+      CHECK_EQ(r.hub.requests_sent(), 2u);
+      r.tp.complete_send();
+      r.tick(2800);
+      CHECK_EQ(r.hub.timeouts(), 2u);
+      r.tick(6799);
+      CHECK_EQ(r.hub.requests_sent(), 2u);
+      r.tick(6800);  // Existing 4x interval backoff, no additional retry.
+      CHECK_EQ(r.hub.requests_sent(), 3u);
+    }
+  }
+}
+
+TEST(uds_hub_communication_failure_sets_warning) {
+  for (unsigned kind : {0u, 1u, 2u, 3u}) {
+    Rig r;
+    r.hub.setup();
+    r.tick(0);
+    r.tp.complete_send();
+    if (kind == 0) {
+      r.tick(150);
+    } else if (kind == 1) {
+      r.hub.on_error(isotp::IsoTpError::TIMEOUT);
+    } else {
+      const uint8_t negative[] = {0x7F, 0x22, static_cast<uint8_t>(kind == 2 ? 0x21 : 0x31)};
+      r.hub.on_message({negative, sizeof(negative)});
+    }
+    CHECK(r.hub.warning);
+    CHECK_EQ(r.hub.warning_sets, 1u);
+    r.tick(200);  // An idle loop must not report the same failure again.
+    CHECK_EQ(r.errors.size(), 1u);
+    const size_t logs = uds_test_logs.size();
+    r.tick(201);
+    CHECK_EQ(uds_test_logs.size(), logs);
+    CHECK(r.hub.request_read("mini"));
+    r.tick(202);
+    r.tp.complete_send();
+    const uint8_t foreign[] = {0x62, 0xFF, 0xFF, 42};
+    r.hub.on_message({foreign, sizeof(foreign)});
+    CHECK(r.hub.warning);
+    const uint8_t pending[] = {0x7F, 0x22, 0x78};
+    r.hub.on_message({pending, sizeof(pending)});
+    CHECK(r.hub.warning);
+    const uint8_t success[] = {0x62, 0, 0, 42};
+    r.hub.on_message({success, sizeof(success)});
+    CHECK(!r.hub.warning);
+    CHECK_EQ(r.hub.warning_clears, 1u);
+  }
+}
+
+TEST(uds_hub_duplicate_group_names_resolve_within_selected_ecu) {
+  std::FILE *file = std::fopen("../uds/fixtures/mini-multi.dcat", "rb");
+  CHECK(file != nullptr);
+  if (file == nullptr)
+    return;
+  std::vector<uint8_t> blob;
+  int byte;
+  while ((byte = std::fgetc(file)) != EOF)
+    blob.push_back(byte);
+  std::fclose(file);
+  for (const char *ecu : {"MINI", "MINI_SECOND"}) {
+    isotp::IsoTpProtocol tp;
+    Hub hub(&tp);
+    sensor::Sensor sensor;
+    hub.set_catalog_embedded(blob.data(), blob.size());
+    hub.set_ecu_name(ecu);
+    hub.reserve_bindings(1);
+    hub.reserve_poll_slots(1);
+    hub.add_sensor_binding("DT_Mini_Voltage", "DT_Mini_Voltage_Maximum_Cell", 0, 1000, &sensor);
+    uds_test_now = 0;
+    hub.setup();
+    hub.loop();
+    CHECK_EQ(tp.sent.size(), 1u);
+    if (!tp.sent.empty())
+      CHECK_EQ(tp.sent[0][1], std::strcmp(ecu, "MINI") == 0 ? 1 : 9);
+    // Both canonical and original-service aliases must remain ECU-scoped.
+    CHECK(hub.request_read("DT_Mini_Voltage_Maximum_Cell"));
+    if (std::strcmp(ecu, "MINI_SECOND") == 0)
+      CHECK(!hub.request_read("DT_Mini_Temperature"));
+  }
+}
+
+TEST(uds_hub_pending_before_sent_hook_keeps_extended_deadline) {
+  Rig r;
+  r.hub.setup();
+  r.tick(0);
+  const uint8_t pending[] = {0x7F, 0x22, 0x78};
+  r.hub.on_message({pending, sizeof(pending)});
+  r.tp.complete_send();  // A late COMPLETE observation must not overwrite P2*.
+  r.tick(1999);
+  CHECK_EQ(r.hub.timeouts(), 0u);
+  r.tick(2000);
+  CHECK_EQ(r.hub.timeouts(), 1u);
+}
+
+TEST(uds_hub_transport_failure_while_sending_does_not_wait_for_p2) {
+  Rig r;
+  r.hub.setup();
+  r.tick(0);
+  uds_test_now = 500;
+  r.hub.on_error(isotp::IsoTpError::TIMEOUT);
+  CHECK(r.hub.warning);
+  CHECK_EQ(r.errors.size(), 1u);
+  CHECK_EQ(r.hub.timeouts(), 0u);
+  r.tick(2499);
+  CHECK_EQ(r.hub.requests_sent(), 1u);
+  r.tick(2500);
+  CHECK_EQ(r.hub.requests_sent(), 2u);
+}
+
+TEST(uds_hub_p2_start_and_receive_extension_survive_clock_wrap) {
+  Rig r;
+  r.hub.setup();
+  r.tick(0);
+  uds_test_now = UINT32_MAX - 100;
+  r.tp.complete_send();
+  r.tick(48);
+  CHECK_EQ(r.hub.timeouts(), 0u);
+  r.tp.rx_busy = true;
+  r.tick(49);  // Response started: ISO-TP N_Cr now bounds reassembly.
+  r.tick(500);
+  CHECK_EQ(r.hub.timeouts(), 0u);
+  r.tp.rx_busy = false;
+  r.tick(649);
+  CHECK_EQ(r.hub.timeouts(), 0u);
+  r.tick(650);
+  CHECK_EQ(r.hub.timeouts(), 1u);
+}

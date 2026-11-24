@@ -16,10 +16,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "harness.h"
+#include "uds_blob_builder.h"
 #include "uds_catalog.h"
 #include "uds_decode.h"
 #include "uds_proto.h"
@@ -150,3 +152,62 @@ TEST(uds_fixture_group_is_addressable_by_name) {
 }
 
 }  // namespace
+
+TEST(uds_fixture_64_bit_spec_vectors) {
+  std::FILE *file = std::fopen("../uds/fixtures/mini-64-vectors.csv", "r");
+  CHECK(file != nullptr);
+  if (file == nullptr)
+    return;
+  char name[64], wire[17], expected[32];
+  unsigned flags;
+  unsigned count = 0;
+  Catalog cat;
+  while (std::fscanf(file, "%63[^,],%u,%16[^,],%31[^\n]\n", name, &flags, wire, expected) == 4) {
+    uint8_t response[8];
+    for (unsigned i = 0; i < 8; i++) {
+      unsigned byte;
+      std::sscanf(wire + i * 2, "%2x", &byte);
+      response[i] = byte;
+    }
+    FieldView f{};
+    f.bit_size = 64;
+    f.repeat_count = 1;
+    f.flags = flags;
+    uint64_t bits = 0;
+    CHECK_MSG(extract_raw_bits(response, sizeof(response), f, 0, &bits), name);
+    if ((flags & FIELD_FLAG_SIGNED) != 0) {
+      int64_t raw = 0;
+      CHECK_MSG(extract_raw(response, sizeof(response), f, 0, &raw), name);
+      CHECK_EQ_MSG(raw, std::strtoll(expected, nullptr, 10), name);
+    } else {
+      CHECK_EQ_MSG(bits, std::strtoull(expected, nullptr, 10), name);
+      int64_t narrowed = 42;
+      CHECK(!extract_raw(response, sizeof(response), f, 0, &narrowed));
+      CHECK_EQ(narrowed, 42);  // no silent signed wrap, and no write on refusal
+    }
+    const auto result = decode_numeric(cat, f, response, sizeof(response));
+    CHECK_MSG(result.valid, name);
+    CHECK_MSG(result.value == std::strtof(expected, nullptr), name);
+    count++;
+  }
+  std::fclose(file);
+  CHECK_EQ(count, 7u);
+}
+
+TEST(uds_fixture_unsigned_64_never_matches_negative_scale) {
+  udstest::BlobBuilder b;
+  b.add_scale({-1, -1, 1.0f, 0.0f, "", 0});
+  const auto blob = b.build();
+  Catalog cat;
+  CHECK(cat.open(blob.data(), blob.size()));
+  FieldView f{};
+  f.bit_size = 64;
+  f.repeat_count = 1;
+  f.scale_count = 1;
+  const uint8_t response[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  CHECK(!decode_numeric(cat, f, response, sizeof(response)).valid);
+  f.flags = FIELD_FLAG_SIGNED;
+  const auto result = decode_numeric(cat, f, response, sizeof(response));
+  CHECK(result.valid);
+  CHECK_EQ(result.value, -1.0f);
+}
