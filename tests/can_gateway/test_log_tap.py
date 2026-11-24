@@ -174,18 +174,22 @@ def test_define_emitted_exactly_when_a_port_taps(set_core_config) -> None:
 def test_rx_isr_no_route_branch_consults_the_tap_ring(set_core_config) -> None:
     """The regression itself, pinned in the source: inside handle_rx_isr()'s
     `route == nullptr` branch the tap ring must be consulted and the staging
-    receive reachable, under the same define spelling codegen emits. Before the
+    receive reachable through the common RX-consumer predicate. Before the
     fix that branch received only for an observation ring, which is why a
     tap-only port stayed deaf while an empty `on_frame` — whose trigger builds
     an observation ring — woke it up (the A/B in HANDOVER-guest-bms.md §8)."""
     setup_c6(set_core_config)
     source = (_component_dir() / "can_gateway.cpp").read_text()
+    header = (_component_dir() / "can_gateway.h").read_text()
     isr = _brace_block(source, "GatewayPort::handle_rx_isr()")
     no_route = _brace_block(isr, "if (route == nullptr)")
-    assert "log_tap_ring_" in no_route, (
-        "handle_rx_isr()'s no-route branch no longer consults log_tap_ring_ — "
+    assert "this->rx_taps_active_()" in no_route, (
+        "handle_rx_isr()'s no-route branch no longer consults rx_taps_active_() — "
         "a tap-only port (log_tap: true, no routes, no decode entities, no "
         "on_frame) would leave every frame to the driver and log nothing"
     )
     assert "receive_into_staging_" in no_route
-    assert f"#ifdef {LOG_TAP_DEFINE}" in no_route
+    assert "#ifdef CAN_GATEWAY_HAS_RX_TAPS" in no_route
+    predicate = _brace_block(header, "bool rx_taps_active_()")
+    assert "log_tap_ring_ != nullptr" in predicate
+    assert f"#ifdef {LOG_TAP_DEFINE}" in predicate
