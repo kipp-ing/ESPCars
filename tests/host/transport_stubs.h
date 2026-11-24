@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
+#include <string>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -17,9 +19,49 @@
 #define LOG_STR_LITERAL(value) value
 
 namespace esphome {
-template<typename... Args> void transport_log(const char *, const char *, const Args &...) {}
+inline std::vector<std::string> transport_logs;
+template<typename... Args> void transport_log(const char *, const char *format, const Args &...args) {
+  if constexpr (sizeof...(args) == 0) {
+    transport_logs.emplace_back(format);
+  } else {
+    char message[512];
+    std::snprintf(message, sizeof(message), format, args...);
+    transport_logs.emplace_back(message);
+  }
+}
 inline uint32_t transport_now = 0;
 inline uint32_t millis() { return transport_now; }
+struct Application {
+  uint32_t get_loop_component_start_time() const { return transport_now; }
+};
+inline Application App;
+template<typename T> class Parented {
+ public:
+  void set_parent(T *parent) { this->parent_ = parent; }
+
+ protected:
+  T *parent_{nullptr};
+};
+template<typename... Ts> class Action {
+ public:
+  virtual ~Action() = default;
+  virtual void play(const Ts &...) = 0;
+};
+template<typename T, typename... Ts> class TemplatableValue {
+ public:
+  void set(T value) { this->value_ = value; }
+  T value(const Ts &...) const { return this->value_; }
+
+ protected:
+  T value_{};
+};
+#define TEMPLATABLE_VALUE(type, name) \
+ protected: \
+  TemplatableValue<type, Ts...> name##_; \
+\
+ public: \
+  void set_##name(type value) { this->name##_.set(value); }
+
 namespace setup_priority {
 static constexpr float DATA = 600.0f;
 }
@@ -31,6 +73,7 @@ class Component {
   virtual void dump_config() {}
   virtual float get_setup_priority() const { return setup_priority::DATA; }
   void status_set_warning() { warning = true; }
+  void status_clear_warning() { warning = false; }
   bool warning{false};
 };
 template<typename Signature> class LazyCallbackManager;

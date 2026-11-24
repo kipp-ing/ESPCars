@@ -36,6 +36,20 @@ attempts each existing stop/status step once. A rejection, timeout or negative
 reply during cleanup makes the result unsuccessful, logs a warning that the ECU
 may still be streaming, and preserves the first failed step.
 
+`ccp.download` accepts 1–5 bytes and `ccp.raw` 1–8 bytes. Static payloads are
+validated during configuration; runtime payloads (including lambdas) are checked
+at their full length before conversion or transmission. A refused `connect_and()`
+leaves the in-flight caller's callback intact.
+
+`collect_timeout` is 1–2147483647 ms; `response_timeout` is at most 2147483647 ms.
+These limits keep signed deadline comparisons valid across clock wrap. An invalid
+runtime collection timeout is refused before DAQ configuration sends anything.
+
+Negative command replies log the command and return code and set a component
+warning even without `on_error`. The next positive response clears the command
+warning. A failed DAQ cleanup still leaves a warning when the collection finishes,
+even if its final cleanup command succeeds.
+
 Worked configurations are in `tests/components/ccp/common*.yaml`. Validate
 or compile them with `script/test_build_components.py` and the corresponding
 `test[-variant].<target>-idf.yaml` path. Schema reference expansion is P7.

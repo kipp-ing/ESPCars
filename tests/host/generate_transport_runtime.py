@@ -1,6 +1,6 @@
 """Compile the real transport glue with host substitutes for ESPHome and CAN IO.
 
-Like RulePatch's extraction in Makefile, only platform includes/actions are removed;
+Like RulePatch's extraction in Makefile, only platform includes and optional diagnostics are removed;
 the hub declarations and every runtime method are copied verbatim, never reimplemented.
 """
 
@@ -16,16 +16,20 @@ def generate() -> None:
         '#include "ccp_proto.h"',
         '#include "isotp_core.h"',
     ]
-    for name, marker in (
-        ("ccp", "template<typename... Ts> class CcpConnectAction"),
-        ("isotp", "#ifdef USE_SENSOR\n/// Optional diagnostic"),
-    ):
+    for name in ("ccp", "isotp"):
         folder = root / "components" / name
-        header = (folder / f"{name}.h").read_text().split(marker)[0]
+        header = (folder / f"{name}.h").read_text()
+        if name == "isotp":
+            header = (
+                header.split("#ifdef USE_SENSOR\n/// Optional diagnostic")[0]
+                + "/// `isotp.send` action."
+                + header.split("/// `isotp.send` action.")[1]
+            )
+        # Keep the real automation classes so payload size conversions are exercised too.
         source = (folder / f"{name}.cpp").read_text()
         parts.extend(
             re.sub(r'^#include "[^"\n]+"\n', "", text, flags=re.MULTILINE)
-            for text in (header + f"\n}}  // namespace esphome::{name}\n", source)
+            for text in (header, source)
         )
     output.write_text("\n".join(parts))
 
