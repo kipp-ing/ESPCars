@@ -19,6 +19,7 @@ import esphome.final_validate as fv
 
 CODEOWNERS = ["@swifty99"]
 DEPENDENCIES = ["isotp"]
+DOMAIN = "diag_server"
 MULTI_CONF = True
 
 CONF_DIAG_SERVER_ID = "diag_server_id"
