@@ -38,7 +38,7 @@ def pages(tmp_path):
 def test_current_docs_pass():
     result = run("check_docs.py")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "17 pages" in result.stdout
+    assert "21 pages" in result.stdout
     assert "0 findings" in result.stdout
 
 

@@ -20,9 +20,9 @@ def test_ci_coverage_and_unique_builds():
     matrix = jobs["compile"]["strategy"]["matrix"]["config"]
     compiled = runner.list_targets()
     all_targets = runner.list_targets(include_validate=True)
-    assert len(matrix) == 17
-    assert len(compiled) == 18
-    assert len(all_targets) == 21
+    assert len(matrix) == 18
+    assert len(compiled) == 19
+    assert len(all_targets) == 22
     assert set(compiled) == set(matrix) | set(tidy.DEFAULT_TARGETS)
     assert len({runner.node_name(target) for target in all_targets}) == len(all_targets)
     assert len({runner.build_path(target) for target in all_targets}) == len(
