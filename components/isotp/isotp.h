@@ -92,6 +92,8 @@ class IsoTpProtocol : public Component, public can_gateway::CanGatewayFrameConsu
   void set_log_name(const char *name) { this->log_name_ = name; }
 
   // -- C++ API for the layer above ---------------------------------------------------------
+  /// Mute a dedicated transport, including receive-side flow control and queued transfers.
+  void set_active(bool active);
   void set_consumer(IsoTpConsumer *consumer) { this->consumer_ = consumer; }
 
   /// Queue a message for transmission. Returns false when a send is already in flight (ISO-TP
@@ -155,6 +157,7 @@ class IsoTpProtocol : public Component, public can_gateway::CanGatewayFrameConsu
   std::unique_ptr<uint8_t[]> rx_buffer_;
 
   IsoTpConsumer *consumer_{nullptr};
+  bool active_{true};
   LazyCallbackManager<void(MessageView)> message_callback_;
   LazyCallbackManager<void(IsoTpError)> error_callback_;
 

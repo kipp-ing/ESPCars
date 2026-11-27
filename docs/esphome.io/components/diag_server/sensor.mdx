@@ -1,0 +1,37 @@
+---
+title: "Diagnostic Server Sensors"
+description: "Observe request, reply and miss counters on an isolated bench."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires Diagnostic Server on ESP32 with ESP-IDF. CAN Gateway rejects ESP32-C5.
+
+```yaml
+sensor:
+  - platform: diag_server
+    diag_server_id: sim_mini
+    requests: {name: "Mini requests"}
+    replies: {name: "Mini replies"}
+    misses: {name: "Mini misses"}
+```
+
+## Configuration variables
+
+Specify at least one counter.
+
+- **id** (*Optional*, ID) identifies the polling component.
+- **diag_server_id** (*Required*, ID) selects the [Diagnostic Server](/components/diag_server/).
+- **requests** (*Optional*, sensor) counts nonempty requests received while enabled.
+- **replies** (*Optional*, sensor) counts replies that ISO-TP finished sending,
+  including injected response-pending messages.
+- **misses** (*Optional*, sensor) counts default negative replies and requests
+  dropped while busy or by `drop_every`. Table entries can contain negative
+  replies and still count as hits.
+- **update_interval** (*Optional*, time) sets the polling interval. Defaults to `60s`.
+- Other options for each counter come from [Sensor](/components/sensor/).
+
+## See Also
+
+- [Diagnostic Server](/components/diag_server/)
+- <APIRef text="diag_server.h" path="diag_server/diag_server.h" />

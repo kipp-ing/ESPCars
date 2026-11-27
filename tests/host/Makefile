@@ -48,6 +48,8 @@ UDS_DIR  := ../../components/uds
 # tier until 2026-07-30, when the bench found that no transfer needing a second
 # flow-control block had ever actually run — see test_isotp_core.cpp's header.
 ISOTP_DIR := ../../components/isotp
+# diag_server's matcher/session/fault core is ESPHome-free, like isotp's.
+DIAG_DIR := ../../components/diag_server
 CCP_DIR := ../../components/ccp
 # portal's core (resolver, envelope emitter, action parser) is ESPHome-free by construction.
 PORTAL_DIR := ../../components/portal
@@ -73,7 +75,7 @@ DEPS     := $(OBJS:.o=.d)
 BINS     := $(BIN) $(GLUE_BINS)
 
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(SAN) -pthread -MMD -MP -I. -I$(BUILD) -I$(CORE_DIR) \
-            -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
+            -I$(LOGGER_DIR) -I$(UDS_DIR) -I$(ISOTP_DIR) -I$(DIAG_DIR) -I$(CCP_DIR) -I$(PORTAL_DIR) -DSD_LOGGER_HOST_TEST
 LDFLAGS  := $(SAN) -pthread
 
 # Exercise the filter-enabled decoder branch with protected entity filter storage.

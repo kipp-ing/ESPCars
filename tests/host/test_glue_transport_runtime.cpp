@@ -769,3 +769,118 @@ TEST(isotp_runtime_reports_sent_only_after_final_frame) {
   }
   transport_now = 0;
 }
+
+// ---- set_active(false): a muted transport is silent on the bus, and resumes when re-activated ----
+// diag_server mutes its dedicated transport while its switch is off; "off = silent" must hold even
+// for the ISO-TP layer's own flow control frames, or the bus shows a phantom ECU.
+
+TEST(isotp_mute_first_frame_gets_no_flow_control_until_reactivated) {
+  transport_now = 0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.setup();
+  protocol.set_active(false);
+  const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+  protocol.on_frame({0x708, ff, 8, false, false});
+  protocol.loop();
+  CHECK(port.sent.empty());
+  CHECK(!protocol.receiving());
+  protocol.set_active(true);
+  protocol.loop();
+  CHECK(port.sent.empty());  // The muted first frame is gone; nothing is owed after the unmute.
+  protocol.on_frame({0x708, ff, 8, false, false});
+  CHECK_EQ(port.sent.size(), 1u);
+  if (!port.sent.empty())
+    CHECK_EQ(port.sent.back().data[0], 0x30);
+}
+
+TEST(isotp_mute_single_frame_is_not_delivered_until_reactivated) {
+  using namespace isotp;
+  struct Consumer : IsoTpConsumer {
+    unsigned messages{0};
+    void on_message(const MessageView &) override { this->messages++; }
+    void on_sent() override {}
+  } consumer;
+  can_gateway::GatewayPort port;
+  IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.set_consumer(&consumer);
+  protocol.setup();
+  protocol.set_active(false);
+  const uint8_t sf[]{1, 0x3E};
+  protocol.on_frame({0x708, sf, 2, false, false});
+  CHECK_EQ(consumer.messages, 0u);
+  CHECK_EQ(protocol.messages_received(), 0u);
+  protocol.set_active(true);
+  protocol.on_frame({0x708, sf, 2, false, false});
+  CHECK_EQ(consumer.messages, 1u);
+  CHECK_EQ(protocol.messages_received(), 1u);
+}
+
+TEST(isotp_mute_refuses_send_and_emits_nothing_until_reactivated) {
+  transport_now = 0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.setup();
+  protocol.set_active(false);
+  const uint8_t message[]{0x7E, 0x00};
+  CHECK(!protocol.send(message, sizeof(message)));
+  protocol.loop();
+  CHECK(port.sent.empty());
+  CHECK(!protocol.is_busy());
+  protocol.set_active(true);
+  CHECK(protocol.send(message, sizeof(message)));
+  protocol.loop();
+  CHECK_EQ(port.sent.size(), 1u);
+  if (!port.sent.empty()) {
+    CHECK_EQ(port.sent.back().id, 0x700u);
+    CHECK_EQ(port.sent.back().data[0], 2);  // single frame, 2 bytes
+    CHECK_EQ(port.sent.back().data[1], 0x7E);
+  }
+}
+
+TEST(isotp_mute_drops_queued_and_in_flight_transfers) {
+  for (bool started : {false, true}) {
+    transport_now = 0;
+    can_gateway::GatewayPort port;
+    isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+    protocol.setup();
+    uint8_t message[24]{};
+    CHECK(protocol.send(message, sizeof(message)));
+    if (started)
+      protocol.loop();  // first frame is out, waiting for flow control
+    const size_t before = port.sent.size();
+    protocol.set_active(false);
+    const uint8_t fc[]{0x30, 0, 0};
+    protocol.on_frame({0x708, fc, 3, false, false});
+    transport_now = 50;
+    protocol.loop();
+    CHECK_EQ(port.sent.size(), before);
+    CHECK(!protocol.is_busy());
+    protocol.set_active(true);
+    transport_now = 100;
+    protocol.loop();
+    CHECK_EQ(port.sent.size(), before);  // nothing stale is replayed after the unmute
+  }
+  transport_now = 0;
+}
+
+TEST(isotp_mute_drops_partial_receive_and_refused_flow_control) {
+  transport_now = 0;
+  can_gateway::GatewayPort port;
+  isotp::IsoTpProtocol protocol(&port, 0x700, 0x708, false);
+  protocol.setup();
+  port.accept = false;  // the first frame's flow control is refused and stays owed
+  const uint8_t ff[]{0x10, 8, 1, 2, 3, 4, 5, 6};
+  protocol.on_frame({0x708, ff, 8, false, false});
+  CHECK(protocol.receiving());
+  protocol.set_active(false);
+  CHECK(!protocol.receiving());
+  port.accept = true;
+  protocol.loop();
+  protocol.set_active(true);
+  protocol.loop();
+  CHECK(port.sent.empty());  // the owed flow control was not sent, neither muted nor after
+  const uint8_t cf[]{0x21, 7, 8};
+  protocol.on_frame({0x708, cf, 3, false, false});
+  CHECK_EQ(protocol.messages_received(), 0u);  // the transfer that began before the mute is gone
+}

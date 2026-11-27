@@ -1,0 +1,84 @@
+---
+title: "Diagnostic Server"
+description: "Answer ISO-TP diagnostic requests from a static table on an isolated bench."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Use `diag_server` only on an isolated bench. It models one fictional ECU per
+server and starts silent. Give each server a dedicated [ISO-TP](/components/isotp/)
+instance on ESP32 with ESP-IDF. CAN Gateway rejects ESP32-C5. Set its `rx_id` to
+the tester's request ID and its `tx_id` to the server's reply ID.
+
+```yaml
+diag_server:
+  id: sim_mini
+  isotp_id: iso_mini
+  table: mini.json
+  ecu: MINI
+```
+
+## Configuration variables
+
+- **id** (*Optional*, ID) identifies this server.
+- **isotp_id** (*Required*, ID) selects an ISO-TP instance with no other consumer.
+- **table** (*Required*, file) loads a JSON table relative to the YAML at configuration time.
+- **ecu** (*Required*, string) selects an ECU by name.
+- **enabled** (*Optional*, boolean) sets the startup state. Defaults to `false`.
+- **s3_timeout** (*Optional*, time) resets the session to `01` after this much request inactivity.
+  Defaults to `5s`.
+- **faults** (*Optional*, mapping) sets the startup fault values.
+  - **delay** (*Optional*, time) holds each reply without blocking the loop. Defaults to `0ms`.
+    The maximum is `16777215ms`.
+  - **pending_78** (*Optional*, boolean) sends `7F <sid> 78` immediately before
+    holding the final reply for `delay`. With zero delay it holds the reply for 100 ms.
+    Defaults to `false`.
+  - **drop_every** (*Optional*, integer) drops every nth request. Defaults to zero,
+    which disables dropping. The maximum is 16777215.
+
+## Reply table
+
+```json
+{
+  "format": "diag-sim/1",
+  "ecus": [
+    {
+      "name": "MINI",
+      "req": "0x651",
+      "resp": "0x659",
+      "entries": [
+        {"req": "22 01 01", "resp": "62 01 01 01 A4 01 9F 00", "src": "Fictional mini fixture"},
+        {"req": "22 01 *", "resp": "7F 22 31", "src": "Synthetic"},
+        {"req": "22 03 18", "resp": "62 03 18 01 2C", "session": "03"}
+      ]
+    }
+  ]
+}
+```
+
+The ECU's CAN IDs must match the transport. Entries use space-separated hex bytes.
+The table rejects unknown keys and duplicate request patterns. A request pattern
+can end in `*` to match zero or more additional bytes. Exact entries take precedence.
+For `3E 00` and `3E 80`, the built-in rules then take precedence over prefixes.
+The longest matching prefix wins for other requests. A winning entry with a
+different required `session` returns NRC `7F`. The optional `src` records
+provenance in the JSON only.
+
+Without a matching entry, `3E 00` returns `7E 00`, `3E 80` stays silent, and
+`10 xx` returns `50 xx 00 32 01 F4`. A positive `50` reply to `10 xx` switches
+the session to `xx` when ISO-TP completes sending it. Other misses return NRC
+`31` for known service bytes and NRC `11` for unknown service bytes.
+The complete table has a 64 KiB flash budget. Only the selected ECU is embedded.
+Each of its replies must fit the transport's `max_message_size`.
+
+An off server cancels any held reply and stops its ISO-TP transport, including
+flow control. A request received while a reply is held or being sent is dropped.
+At VERBOSE the server logs one line per delivered request and shows the first
+64 bytes of longer requests.
+
+## See Also
+
+- [Diagnostic Server Switch](/components/diag_server/switch/)
+- [Diagnostic Server Numbers](/components/diag_server/number/)
+- [Diagnostic Server Sensors](/components/diag_server/sensor/)
+- <APIRef text="diag_server.h" path="diag_server/diag_server.h" />

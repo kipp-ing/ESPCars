@@ -1,0 +1,34 @@
+---
+title: "Diagnostic Server Numbers"
+description: "Adjust the reply delay or drop cadence on an isolated bench."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires Diagnostic Server on ESP32 with ESP-IDF. CAN Gateway rejects ESP32-C5.
+
+```yaml
+number:
+  - platform: diag_server
+    diag_server_id: sim_mini
+    fault: delay
+    name: "Mini reply delay"
+    unit_of_measurement: ms
+  - platform: diag_server
+    diag_server_id: sim_mini
+    fault: drop_every
+    name: "Mini drop every"
+```
+
+## Configuration variables
+
+- **diag_server_id** (*Required*, ID) selects the [Diagnostic Server](/components/diag_server/).
+- **fault** (*Required*, string) selects `delay` in milliseconds or `drop_every`
+  in requests. Both accept whole numbers from 0 to 16777215. Changing the drop
+  cadence restarts its count. The startup value comes from the server's `faults`.
+- Other options come from [Number](/components/number/).
+
+## See Also
+
+- [Diagnostic Server](/components/diag_server/)
+- <APIRef text="diag_server.h" path="diag_server/diag_server.h" />

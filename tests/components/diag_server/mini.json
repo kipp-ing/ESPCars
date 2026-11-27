@@ -1,0 +1,16 @@
+{
+  "format": "diag-sim/1",
+  "ecus": [
+    {
+      "name": "MINI",
+      "req": "0x651",
+      "resp": "0x659",
+      "entries": [
+        {"req": "22 01 01", "resp": "62 01 01 01 A4 01 9F 00", "src": "Fictional mini fixture"},
+        {"req": "10 03", "resp": "50 03 00 32 01 F4", "src": "Synthetic"},
+        {"req": "22 03 18", "resp": "62 03 18 01 2C", "session": "03", "src": "Synthetic"},
+        {"req": "22 01 *", "resp": "7F 22 31", "src": "Synthetic"}
+      ]
+    }
+  ]
+}

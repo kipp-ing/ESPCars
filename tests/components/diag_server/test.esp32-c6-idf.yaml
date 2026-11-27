@@ -1,0 +1,54 @@
+# Use only on an isolated bench. The server starts off.
+can_gateway:
+  ports:
+    - id: sim_bus
+      tx_pin: GPIO2
+      rx_pin: GPIO3
+      bit_rate: 500kbps
+      observe_queue_depth: 32
+
+isotp:
+  id: iso_mini
+  port_id: sim_bus
+  rx_id: 0x651
+  tx_id: 0x659
+  max_message_size: 64
+
+diag_server:
+  id: sim_mini
+  isotp_id: iso_mini
+  table: mini.json
+  ecu: MINI
+  enabled: false
+  s3_timeout: 5s
+  faults:
+    delay: 0ms
+    pending_78: false
+    drop_every: 0
+
+switch:
+  - platform: diag_server
+    diag_server_id: sim_mini
+    name: "Mini responder"
+  - platform: diag_server
+    diag_server_id: sim_mini
+    fault: pending_78
+    name: "Mini response pending"
+
+number:
+  - platform: diag_server
+    diag_server_id: sim_mini
+    fault: delay
+    name: "Mini reply delay"
+    unit_of_measurement: ms
+  - platform: diag_server
+    diag_server_id: sim_mini
+    fault: drop_every
+    name: "Mini drop every"
+
+sensor:
+  - platform: diag_server
+    diag_server_id: sim_mini
+    requests: {name: "Mini requests"}
+    replies: {name: "Mini replies"}
+    misses: {name: "Mini misses"}
