@@ -54,7 +54,9 @@ JSON; codegen reads it, validates it and compiles it into flash (const arrays). 
 - `src` is free text and is kept only for humans. Unknown keys are refused. Duplicate `req` strings are refused.
 - Limits are refused at config time with the actual numbers: a reply longer than the isotp `max_message_size`, or a table larger than 64 KB of flash.
 
-## R: rules built in (before the table, unless the table has an exact entry)
+## R: rules built in
+
+Match order, first hit wins: (1) exact table entry, (2) the `3E` rows below, (3) longest prefix entry, (4) the `10 xx` default row, (5) NRC `31`, then NRC `11`. So `10 xx` "with a table entry" means an exact or prefix match.
 
 | Request | Answer |
 |---|---|
@@ -67,7 +69,7 @@ JSON; codegen reads it, validates it and compiles it into flash (const arrays). 
 | empty request | ignored |
 
 - **Session:** the server tracks the current session. It starts at `01` and falls back to `01` after `s3_timeout` without any request.
-- **Session-scoped entries:** an entry may carry `"session": "03"`. It then only matches in that session; otherwise the reply is `7F <sid> 7F`, serviceNotSupportedInActiveSession.
+- **Session-scoped entries:** an entry may carry `"session": "03"`. When it wins the match outside that session, the reply is `7F <sid> 7F`, serviceNotSupportedInActiveSession; matching does not fall through to other entries.
 
 ## Faults (bench only)
 
@@ -92,6 +94,6 @@ JSON; codegen reads it, validates it and compiles it into flash (const arrays). 
 ## Tests (written by a tester, not the programmer)
 
 - **Host/pytest:** schema and table validation for every refusal above, with the message naming the values.
-- **Host C++ (if the matcher is a header like `gateway_core.h`):** match precedence (exact, then longest prefix, then R, then NRC 31/11), the session and S3 fallback with a fake clock, the session-scoped entry, and the counter for every fault.
+- **Host C++ (if the matcher is a header like `gateway_core.h`):** match precedence (exact, `3E` rules, longest prefix, `10 xx` default, NRC 31/11), the session and S3 fallback with a fake clock, the session-scoped entry, and the counter for every fault.
 - **`tests/components/diag_server/`:** a config with a fictional table (`tests/uds/fixtures/` style, no real vehicle data); `config` always, `compile` once.
 - **HIL selftest:** two bench boards. One runs `diag_server` on a fictional table, the other a `uds` hub polling it: the values arrive, `misses` stays 0, and each fault produces the tester-side timeout or pending-wait and then recovery.
