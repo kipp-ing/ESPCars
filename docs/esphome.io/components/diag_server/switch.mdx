@@ -1,0 +1,33 @@
+---
+title: "Diagnostic Server Switch"
+description: "Enable an isolated bench responder or its response-pending fault."
+---
+
+import APIRef from '@components/APIRef.astro';
+
+Requires Diagnostic Server on ESP32 with ESP-IDF. CAN Gateway rejects ESP32-C5.
+
+```yaml
+switch:
+  - platform: diag_server
+    diag_server_id: sim_mini
+    name: "Mini responder"
+  - platform: diag_server
+    diag_server_id: sim_mini
+    fault: pending_78
+    name: "Mini response pending"
+```
+
+## Configuration variables
+
+- **diag_server_id** (*Required*, ID) selects the [Diagnostic Server](/components/diag_server/).
+- **fault** (*Optional*, string) selects `pending_78`. Omit it to control whether the server answers.
+- **initial_state** comes from the server's `enabled` or `faults.pending_78` setting.
+- **restore_mode** is unavailable. The switch starts from the YAML setting at each boot.
+- **restore_state** is unavailable. Switch changes last until reboot.
+- Other supported options come from [Switch](/components/switch/).
+
+## See Also
+
+- [Diagnostic Server](/components/diag_server/)
+- <APIRef text="diag_server.h" path="diag_server/diag_server.h" />

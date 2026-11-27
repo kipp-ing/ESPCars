@@ -5,6 +5,7 @@
 # Components (owners declared in their Python modules)
 /components/can_gateway/* @kipp-ing
 /components/ccp/* @kipp-ing
+/components/diag_server/* @swifty99
 /components/isotp/* @swifty99
 /components/linbus/* @swifty99
 /components/portal/* @swifty99

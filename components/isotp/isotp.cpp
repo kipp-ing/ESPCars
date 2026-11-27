@@ -39,7 +39,19 @@ void IsoTpProtocol::setup() {
   this->rx_.init(this->rx_buffer_.get(), this->cfg_.max_message_size);
 }
 
+void IsoTpProtocol::set_active(bool active) {
+  this->active_ = active;
+  if (!active) {
+    this->tx_.abort();
+    this->rx_.reset();
+    this->has_pending_fc_ = false;
+  }
+}
+
 void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
+  if (!this->active_)
+    return;
+
   // view.data dies the moment this returns, so every path below either consumes the bytes now or
   // copies them into our own buffer. Nothing retains the pointer.
   const PciInfo info = decode_pci(this->cfg_, view.data, view.dlc);
@@ -87,6 +99,9 @@ void IsoTpProtocol::on_frame(const can_gateway::FrameView &view) {
 }
 
 void IsoTpProtocol::loop() {
+  if (!this->active_)
+    return;
+
   const uint32_t now = App.get_loop_component_start_time();
 
   // Expire the transfer before retrying permission to send any more of it.
@@ -129,6 +144,8 @@ void IsoTpProtocol::loop() {
 }
 
 bool IsoTpProtocol::send(const uint8_t *data, size_t size) {
+  if (!this->active_)
+    return false;
   if (data == nullptr || size == 0 || size > this->cfg_.max_message_size) {
     ESP_LOGW(TAG, "%s: send rejected: message must contain 1-%u bytes (max_message_size)", this->log_name_,
              this->cfg_.max_message_size);
@@ -151,7 +168,7 @@ void IsoTpProtocol::deliver_message_() {
   this->messages_received_++;
   const MessageView msg{this->rx_.data(), this->rx_.size()};
   ESP_LOGV(TAG, "%s: received %u bytes", this->log_name_, msg.size);
-  // Both consumers run inside can_gateway's bounded drain, so they are expected to be brief:
+  // The consumer and the automation run inside can_gateway's bounded drain, so they are expected to be brief:
   // parse and buffer, act on the next tick.
   if (this->consumer_ != nullptr)
     this->consumer_->on_message(msg);

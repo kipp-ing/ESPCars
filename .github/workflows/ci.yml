@@ -73,6 +73,7 @@ jobs:
           - tests/components/linbus/test.esp32-c3-idf.yaml
           - tests/components/linbus/test.esp32-c6-idf.yaml
           - tests/components/isotp/test.esp32-c6-idf.yaml
+          - tests/components/diag_server/test.esp32-c6-idf.yaml
           # uds with `embed: true`: the whole decode path — catalog open, name
           # resolution, group scheduling, bit extraction, scale evaluation,
           # entity publishing — compiled with NOTHING flashed. This is the only

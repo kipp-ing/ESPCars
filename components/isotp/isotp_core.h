@@ -4,8 +4,7 @@
 /// state machines. Deliberately has no ESPHome, ESP-IDF or can_gateway dependency so the whole
 /// protocol can be exercised on the host (see the isotp host test suite).
 ///
-/// Role is **tester / client** only: this segments requests and reassembles responses. It never
-/// emulates an ECU.
+/// The state machines segment and reassemble messages in either direction.
 ///
 /// Everything here runs in **loop context**. ISO-TP deadlines (N_Bs and N_Cr around 1000 ms) are
 /// two orders of magnitude above a typical ~16 ms ESPHome loop, and as the receiver we author the
@@ -313,6 +312,7 @@ class TxTransfer {
     if (this->state_ != State::IDLE) {
       this->error_ = IsoTpError::ABORTED;
       this->state_ = State::IDLE;
+      this->pending_ = Pending::NONE;
     }
   }
 
